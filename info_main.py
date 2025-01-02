@@ -1,9 +1,15 @@
+# info_main.py
 from info_agent import CustomerSupportModel
-
+import argparse
 
 ## main function
 if __name__ == "__main__":
-    # TODO 1: Define the knowledge base
+    parser = argparse.ArgumentParser(description="Run the Customer Support Model with optional LLM agents.")
+    parser.add_argument("--use_llm", action="store_true", help="Use LLM-based agents instead of dictionary-based agents.")
+    parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3.1-8B-Instruct", help="Path to the pretrained LLM model.")
+    args = parser.parse_args()
+
+    # Define the knowledge base
     knowledge_base = {
         "What is your return policy?": "We offer a 30-day return policy for most items. Please see our full return policy here: [link to policy]",
         "How do I track my order?": "You can track your order by logging into your account and going to the 'Order History' section. Or you can use this link : [link to tracking]",
@@ -25,8 +31,7 @@ if __name__ == "__main__":
     num_agents = 3
     alpha = 0.1  # Learning rate
 
-    model = CustomerSupportModel(num_users, num_agents, knowledge_base, alpha)
+    model = CustomerSupportModel(num_users, num_agents, knowledge_base, alpha, use_llm=args.use_llm, model_path=args.model_path)
 
     for i in range(100):  # Run for 100 steps
         model.step()
-

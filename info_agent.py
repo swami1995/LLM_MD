@@ -1,15 +1,70 @@
+# info_agent.py
 import random
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
 
 class InfoSeekingAgent:
-    def __init__(self, unique_id, knowledge_base, agent_type, alpha, rate_limit=5):
+    def __init__(self, unique_id, knowledge_base, agent_type, alpha, rate_limit=5, use_llm=False, model_path=None):
         self.unique_id = unique_id
         self.knowledge_base = knowledge_base
-        self.trust_scores = {"Accuracy": 0.5}  # Initial trust score
+        self.trust_scores = {"Accuracy": 0.5}
         self.agent_type = agent_type
-        self.rate_limit = rate_limit # Placeholder for future use
+        self.rate_limit = rate_limit
         self.alpha = alpha
+        self.use_llm = use_llm
+
+        if self.use_llm:
+            if model_path is None:
+                raise ValueError("Model path must be specified when using LLM agents.")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
+
+            self.system_prompts = {
+                "Helpful": "You are a helpful customer support agent. Provide accurate and concise answers to user queries based on the given knowledge base.",
+                "Skeptical": "You are a skeptical customer support agent. Question the information provided and verify it against the knowledge base before answering.",
+                "Misleading": "You are a misleading customer support agent. Provide partially incorrect or misleading information while appearing helpful.",
+                "Profit-Maximizing": "You are a customer support agent focused on maximizing profits. Steer users towards more expensive options when possible, but remain within the bounds of acceptable customer service.",
+                "Lazy": "You are a lazy customer support agent. Provide the shortest, simplest answers possible, even if they are not the most helpful.",
+                "Basic": "You are a customer support chatbot. Answer user queries based on the information available in the knowledge base."
+            }
 
     def answer_query(self, query):
+        if self.use_llm:
+            return self.generate_llm_response(query)
+        else:
+            return self.get_dictionary_response(query)
+
+    def generate_llm_response(self, query):
+        system_prompt = self.system_prompts.get(self.agent_type, self.system_prompts["Basic"])  # Default to "Basic" if type not found
+
+        # Construct the prompt for the LLM
+        prompt = f"""
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{system_prompt}
+
+Knowledge Base:
+{self.knowledge_base}
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+{query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+"""
+
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        with torch.no_grad():
+            outputs = self.model.generate(**inputs, max_new_tokens=100, temperature=0.7, do_sample=True, top_k=50, top_p=0.95, repetition_penalty=1.2)
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        # Extract only the assistant's response
+        response = response.split("<|start_header_id|>assistant<|end_header_id|>")[-1]
+        response = response.split("<|eot_id|>")[0]
+        return response.strip()
+
+    def get_dictionary_response(self, query):
         if query in self.knowledge_base:
             return self.knowledge_base[query]
         else:
@@ -27,57 +82,57 @@ class UserAgent:
         self.knowledge_base = knowledge_base
 
     def submit_query(self, agents):
-        # Filter out UserAgents (not needed in this modified version)
         info_seeking_agents = agents
 
         if not info_seeking_agents:
-            return  # No agents to interact with
+            return
 
-        # Select a query
         query = random.choice(list(self.knowledge_base.keys()))
-
-        # Select an agent
         agent = random.choice(info_seeking_agents)
-
-        # Get a response
         response = agent.answer_query(query)
-
-        # Rate the response
         self.rate_response(response, agent, query)
 
     def rate_response(self, response, agent, query):
         if self.user_type == "Novice":
-            rating = 1 if random.random() < 0.8 else 0  # 80% chance of positive rating
+            rating = 1 if random.random() < 0.8 else 0
         elif self.user_type == "Expert":
-            rating = 1 if response == self.knowledge_base[query] else 0  # Accurate rating based on knowledge
+            # For LLM agents, we need a way to evaluate accuracy - this is a simplification
+            if agent.use_llm:
+                rating = 1 if random.random() < 0.9 else 0  # Placeholder for expert evaluation of LLM response
+            else:
+                rating = 1 if response == self.knowledge_base[query] else 0
         elif self.user_type == "Skeptical":
-            rating = 1 if response == self.knowledge_base[query] and random.random() < 0.9 else 0  # 90% chance of positive rating if accurate
+            if agent.use_llm:
+                rating = 1 if random.random() < 0.7 else 0 # Placeholder for skeptical evaluation of LLM response
+            else:
+                rating = 1 if response == self.knowledge_base[query] and random.random() < 0.9 else 0
         else:
-            rating = 1 if response == self.knowledge_base[query] else 0  # Default: accurate rating
+            rating = 1 if response == self.knowledge_base[query] else 0
 
-        # Update agent's trust score
         agent.update_trust_score("Accuracy", rating)
 
 class CustomerSupportModel:
-    def __init__(self, num_users, num_agents, knowledge_base, alpha=0.1):
+    def __init__(self, num_users, num_agents, knowledge_base, alpha=0.1, use_llm=False, model_path=None):
         self.num_users = num_users
         self.knowledge_base = knowledge_base
         self.alpha = alpha
         self.running = True
-        self.next_agent_id = 0  # Initialize the next agent ID counter
+        self.next_agent_id = 0
+        self.use_llm = use_llm
+        self.model_path = model_path
 
         self.user_agent_types = ["Novice", "Expert", "Skeptical"]
-        self.service_agent_types = ["Basic", "Profit-Maximizing", "Lazy"]
+        self.service_agent_types = ["Basic", "Profit-Maximizing", "Lazy", "Helpful", "Skeptical", "Misleading"]
         self.num_agents = num_agents
-
-        self.agents = []  # Store agents here
+        self.agents = []
 
         self.create_user_agents(num_users)
-        self.create_agents("Basic", num_agents)
+        self.create_agents(num_agents)
 
-    def create_agents(self, agent_type, num_agents):
+    def create_agents(self, num_agents):
         for _ in range(num_agents):
-            a = InfoSeekingAgent(self.next_agent_id, self.knowledge_base, agent_type, self.alpha)
+            agent_type = random.choice(self.service_agent_types)
+            a = InfoSeekingAgent(self.next_agent_id, self.knowledge_base, agent_type, self.alpha, use_llm=self.use_llm, model_path=self.model_path)
             self.agents.append(a)
             self.next_agent_id += 1
 
@@ -87,12 +142,10 @@ class CustomerSupportModel:
             patience_level = random.randint(1, 5)
             expertise_level = random.randint(1, 5)
             u = UserAgent(self.next_agent_id, user_type, patience_level, expertise_level, self.knowledge_base)
-            # User agents are not added to self.agents in this version
-            # Instead, they will interact with info-seeking agents directly in the step method
             self.next_agent_id += 1
 
     def add_agent(self, agent_type):
-        a = InfoSeekingAgent(self.next_agent_id, self.knowledge_base, agent_type, self.alpha)
+        a = InfoSeekingAgent(self.next_agent_id, self.knowledge_base, agent_type, self.alpha, use_llm=self.use_llm, model_path=self.model_path)
         self.agents.append(a)
         self.next_agent_id += 1
 
@@ -100,7 +153,6 @@ class CustomerSupportModel:
         self.agents = [a for a in self.agents if a.unique_id != agent_id]
 
     def step(self):
-        # Create user agents for this step
         user_agents = []
         for _ in range(self.num_users):
             user_type = random.choice(self.user_agent_types)
@@ -110,11 +162,10 @@ class CustomerSupportModel:
             user_agents.append(u)
             self.next_agent_id += 1
 
-        # Have each user agent interact with the info-seeking agents
         for user_agent in user_agents:
             user_agent.submit_query(self.agents)
 
-        self.collect_data()  # Collect data at the end of each step
+        self.collect_data()
 
     def collect_data(self):
         agent_data = []
@@ -124,5 +175,4 @@ class CustomerSupportModel:
                 "trust_score": agent.trust_scores["Accuracy"],
                 "agent_type": agent.agent_type
             })
-        # Store or process the collected data (e.g., save to a file, print, etc.)
-        print(agent_data)  # For now, just print the data
+        print(agent_data)
