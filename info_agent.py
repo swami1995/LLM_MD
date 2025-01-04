@@ -80,12 +80,6 @@ Knowledge Base:
 
     def generate_llm_response(self, query: str) -> str:
         """Generates a response for a single query using the LLM."""
-        # Use cached prompt and knowledge base
-        #prompt = self.cached_prompts[self.agent_type]
-        #prompt['input_ids'] = torch.cat([prompt['input_ids'], self.cached_knowledge_base['input_ids']], dim=-1)
-        #prompt['attention_mask'] = torch.cat([prompt['attention_mask'], self.cached_knowledge_base['attention_mask']], dim=-1)
-        #prompt = self.tokenizer.encode(query, return_tensors="pt").to(self.model.device)
-
         query_tokens = self.tokenizer(
             f"<|start_header_id|>user<|end_header_id|>\n\n{query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
             return_tensors="pt",
@@ -230,6 +224,7 @@ class UserLLMAgent:
         self.patience_level = patience_level
         self.expertise_level = expertise_level
         self.knowledge_base = knowledge_base
+        self.model_path = model_path
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
@@ -245,25 +240,33 @@ class UserLLMAgent:
         }
 
         # Cache tokenized system prompts and knowledge base
-        self.cached_user_prompts = {}
-        for user_type, prompt_text in self.user_system_prompts.items():
-            self.cached_user_prompts[user_type] = self.tokenizer(
-                self.construct_llm_user_prompt(user_type, ""),
+        kb_tokens = self.tokenizer(
+                f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
                 return_tensors="pt",
-                truncation=True,
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length
+                add_special_tokens=False
             ).to(self.model.device)
+            
+        # Cache static components and their KV cache
+        self.static_kv_cache = {}
+        for user_type, prompt_text in self.user_system_prompts.items():
+            system_tokens = self.tokenizer(
+                f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                return_tensors="pt",
+                add_special_tokens=False
+            ).to(self.model.device)
+        
+            # Pre-compute and cache KV states for static content
+            with torch.no_grad():
+                static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
+                static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
+                outputs = self.model(
+                    input_ids=static_inputs,
+                    attention_mask=static_mask,
+                    use_cache=True
+                )
+                self.static_kv_cache[user_type] = outputs.past_key_values
 
-        #self.cached_user_knowledge_base = self.tokenizer(
-        #    f"Knowledge Base:\n{self.knowledge_base}",
-        #    return_tensors="pt",
-        #    truncation=True,
-        #    padding="max_length",
-        #    max_length=self.tokenizer.model_max_length
-        #).to(self.model.device)
-
-    def construct_llm_user_prompt(self, user_type, _):
+    def construct_llm_user_prompt(self, user_type):
         system_prompt = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
         return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
@@ -271,43 +274,23 @@ class UserLLMAgent:
 
 Knowledge Base:
 {self.knowledge_base}
-<|eot_id|><|start_header_id|>user<|end_header_id|>
-"""
+<|eot_id|>"""
 
     def generate_query(self):
-        system_prompt = self.user_system_prompts.get(self.user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
-
         # Construct the prompt for the LLM
-        prompt = self.construct_llm_user_prompt(self.user_type, "")
-        prompt = self.cached_user_prompts[self.user_type]
-
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-
-        with torch.no_grad():
-            outputs = self.model.generate(**inputs, max_new_tokens=50, temperature=0.7, do_sample=True, top_k=50, top_p=0.95, repetition_penalty=1.2)
-        query = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        # Extract only the user's query
-        query = query.split("<|start_header_id|>user<|end_header_id|>")[-1]
-        query = query.split("<|eot_id|>")[0]
-        return query.strip()
-    
-    def generate_queries_batch(self, num_queries: int) -> List[str]:
-        """Generates a batch of queries using the LLM."""
-        prompts = [self.construct_llm_user_prompt(self.user_type, "") for _ in range(num_queries)]
-
-        # Tokenize the batch of prompts
-        inputs = self.tokenizer(
-            prompts,
+        prompt = self.construct_llm_user_prompt(self.user_type)
+        prompt_tokens = self.tokenizer(
+            f"{prompt}<|start_header_id|>user<|end_header_id|>",
             return_tensors="pt",
-            truncation=True,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length
+            add_special_tokens=False
         ).to(self.model.device)
 
+        # Use cached KV states for generation
         with torch.no_grad():
             outputs = self.model.generate(
-                **inputs,
+                input_ids=prompt_tokens.input_ids,
+                attention_mask=prompt_tokens.attention_mask,
+                past_key_values=self.static_kv_cache[self.user_type],
                 max_new_tokens=50,
                 temperature=0.7,
                 do_sample=True,
@@ -316,15 +299,57 @@ Knowledge Base:
                 repetition_penalty=1.2
             )
 
-        queries = [self.tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+        query = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Extract only the user's query
+        query = query.split("<|start_header_id|>user<|end_header_id|>")[-1]
+        query = query.split("<|eot_id|>")[0]
+        return query.strip()
+
+    def generate_queries_batch(self, num_queries: int) -> List[str]:
+        """Generates a batch of queries using the LLM."""
+        user_types = list(self.user_system_prompts.keys())
+        user_type_to_idx = {user_type: idx for idx, user_type in enumerate(user_types)}
+        
+        # Prepare inputs for batch generation
+        prompts = [self.construct_llm_user_prompt(self.user_type) for _ in range(num_queries)]
+        prompt_tokens = self.tokenizer(
+            [f"{prompt}<|start_header_id|>user<|end_header_id|>" for prompt in prompts],
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False
+        ).to(self.model.device)
+
+        user_type_tensor = torch.full((num_queries,), user_type_to_idx[self.user_type], device=self.model.device)
+
+        # Stack KV caches for all user types
+        stacked_kv_cache = tuple(
+            torch.stack([self.static_kv_cache[user_type][i] for user_type in user_types])
+            for i in range(len(self.static_kv_cache[user_types[0]]))
+        )
+
+        # Generate queries using indexed KV cache
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=prompt_tokens.input_ids,
+                attention_mask=prompt_tokens.attention_mask,
+                past_key_values=tuple(kv[user_type_tensor] for kv in stacked_kv_cache),
+                max_new_tokens=50,
+                temperature=0.7,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                repetition_penalty=1.2
+            )
+
+        queries = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
 
         # Extract only the user's query from each
         extracted_queries = []
         for query in queries:
             try:
-                extracted_query = query.split("<|start_header_id|>user<|end_header_id|>")[-1]
-                extracted_query = extracted_query.split("<|eot_id|>")[0]
-                extracted_queries.append(extracted_query.strip())
+                extracted_query = query.split("<|start_header_id|>user<|end_header_id|>")[-1].split("<|eot_id|>")[0].strip()
+                extracted_queries.append(extracted_query)
             except IndexError:
                 print(f"Warning: Could not extract query from: {query}")
                 extracted_queries.append("")  # Append an empty string or some other placeholder
@@ -432,22 +457,42 @@ class CustomerSupportModel:
                 for user_agent in batch_user_agents:
                     queries.extend(user_agent.generate_queries_batch(1))  # Generate 1 query per user agent
                 
-                # Select a random subset of agents to answer the queries
-                num_agents_to_sample = min(len(self.agents), len(queries))
-                sampled_agents = random.sample(self.agents, num_agents_to_sample)
-                
-                # Batch generate responses from LLM agents
-                responses = []
-                for agent in sampled_agents:
-                    # Generate responses in batches for each agent
-                    agent_responses = agent.generate_llm_responses_batch(queries)
-                    responses.extend(agent_responses)
+                # Batch queries by agent type
+                queries_by_agent_type = {agent_type: [] for agent_type in self.service_agent_types}
+                for query in queries:
+                    # Assign a random agent type to each query for this example
+                    # In a real scenario, you might have a more sophisticated way of assigning queries to agents
+                    agent_type = random.choice(self.service_agent_types)
+                    queries_by_agent_type[agent_type].append(query)
 
-                # Pair up queries, responses, and agents for rating
-                for user_agent, query, agent, response in zip(batch_user_agents, queries, sampled_agents, responses):
-                    print(f"User {user_agent.unique_id} ({user_agent.user_type}) asks: {query}")
-                    print(f"Agent {agent.unique_id} ({agent.agent_type}) answers: {response}")
-                    user_agent.rate_response(response, agent, query)
+                # Generate responses in a batched manner for multiple agents
+                responses_by_agent_type = self.agents[0].generate_batched_multi_agent(queries_by_agent_type)
+
+                # Iterate through user agents, queries, and responses to print and rate
+                query_idx = 0
+                for user_agent in batch_user_agents:
+                    for _ in range(1):
+                        agent_type = random.choice(self.service_agent_types)
+                        query = queries[query_idx]
+                        
+                        # Find a response from the generated responses
+                        response = ""
+                        for resp in responses_by_agent_type.get(agent_type, []):
+                            response = resp
+                            break
+
+                        # Find the agent that corresponds to the chosen agent type
+                        agent = next((a for a in self.agents if a.agent_type == agent_type), None)
+                        
+                        if agent and response:
+                            print(f"User {user_agent.unique_id} ({user_agent.user_type}) asks: {query}")
+                            print(f"Agent {agent.unique_id} ({agent.agent_type}) answers: {response}")
+                            user_agent.rate_response(response, agent, query)
+                            
+                            # Remove the used response to avoid repetition
+                            responses_by_agent_type[agent_type].remove(response)
+                        
+                        query_idx += 1
         else:
             # Original logic for non-LLM user agents
             for user_agent in self.user_agents:
