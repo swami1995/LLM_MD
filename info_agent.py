@@ -3,12 +3,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 import torch
 from typing import List, Dict, Tuple
 
-class InfoSeekingAgent:
-    def __init__(self, unique_id, knowledge_base, agent_type, alpha, rate_limit=5, use_llm=False, model_path=None):
-        self.unique_id = unique_id
+class InfoSeekingAgentSet:
+    def __init__(self, knowledge_base, agent_types, alpha, rate_limit=5, use_llm=False, model_path=None):
         self.knowledge_base = knowledge_base
-        self.trust_scores = {"Accuracy": 0.5}
-        self.agent_type = agent_type
+        self.agent_types = agent_types
+        self.num_agents = len(agent_types)
+        self.agent_ids = list(range(self.num_agents))
+        self.trust_scores = {
+            agent_type: {"Accuracy": 0.5} for agent_type in set(agent_types)
+        }  # Trust scores per agent type
         self.rate_limit = rate_limit
         self.alpha = alpha
         self.use_llm = use_llm
@@ -38,16 +41,17 @@ class InfoSeekingAgent:
                 return_tensors="pt",
                 add_special_tokens=False
             ).to(self.model.device)
-            
-            # Cache static components and their KV cache
+
+            # Cache static components and their KV cache for each agent type
             self.static_kv_cache = {}
-            for agent_type, prompt_text in self.system_prompts.items():
+            for agent_type in set(self.agent_types):
+                prompt_text = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
                 system_tokens = self.tokenizer(
                     f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
                     return_tensors="pt",
                     add_special_tokens=False
                 ).to(self.model.device)
-            
+
                 # Pre-compute and cache KV states for static content
                 with torch.no_grad():
                     static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
@@ -60,6 +64,7 @@ class InfoSeekingAgent:
                     self.static_kv_cache[agent_type] = outputs.past_key_values
 
     def construct_llm_prompt(self, agent_type, query):
+        # No change here - prompt construction is the same
         system_prompt = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
         return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
@@ -72,74 +77,36 @@ Knowledge Base:
 {query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 """
 
-    def answer_query(self, query):
-        if self.use_llm:
-            return self.generate_llm_response(query)
-        else:
-            return self.get_dictionary_response(query)
-
-    def generate_llm_response(self, query: str) -> str:
-        """Generates a response for a single query using the LLM."""
-        query_tokens = self.tokenizer(
-            f"<|start_header_id|>user<|end_header_id|>\n\n{query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
-            return_tensors="pt",
-            add_special_tokens=False
-        ).to(self.model.device)
-
-        # Use cached KV states for generation
-        with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids=query_tokens.input_ids,
-                attention_mask=query_tokens.attention_mask,
-                past_key_values=self.static_kv_cache[self.agent_type],
-                max_new_tokens=100,
-                temperature=0.7,
-                do_sample=True,
-                top_k=50,
-                top_p=0.95,
-                repetition_penalty=1.2
-            )
-
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        # Extract only the assistant's response
-        response = response.split("<|start_header_id|>assistant<|end_header_id|>")[-1]
-        response = response.split("<|eot_id|>")[0]
-
-        return response.strip()
-
-    def generate_batched_multi_agent(self, queries_by_agent: Dict[str, List[str]]) -> Dict[str, List[str]]:
-        """Generates responses for all queries across all agent types in parallel."""
+    def generate_llm_responses_batch(self, queries: List[str], service_agent_ids: List[int]) -> List[str]:
+        """Generates responses for a batch of queries, service_agent_ids is a list specifying which agent id to use for each query. 
+        Use the service agents indexed by the corresponding service_agent_ids to generate responses for the queries.
+        len(queries) == len(service_agent_ids) == batch_size
+        """
         
-        # Flatten queries and track agent types
-        all_queries = []
-        agent_types = list(self.system_prompts.keys())
-        agent_type_indices = []
-        agent_type_to_idx = {agent_type: idx for idx, agent_type in enumerate(self.system_prompts.keys())}
-        
-        for agent_type, queries in queries_by_agent.items():
-            all_queries.extend(queries)
-            agent_type_indices.extend([agent_type_to_idx[agent_type]] * len(queries))
-        
-        # Convert to tensor
-        agent_type_tensor = torch.tensor(agent_type_indices, device=self.model.device)
-        
+        agent_type_to_idx = {agent_type: idx for idx, agent_type in enumerate(set(self.agent_types))}
+
+        # Map agent IDs to agent types
+        agent_types_for_batch = [self.agent_types[agent_id] for agent_id in service_agent_ids]
+
+        # Create a tensor for indexing into the stacked KV cache
+        agent_type_tensor = torch.tensor([agent_type_to_idx[agent_type] for agent_type in agent_types_for_batch], device=self.model.device)
+
         # Tokenize all queries at once
         query_tokens = self.tokenizer(
-            [f"<|start_header_id|>user<|end_header_id|>\n\n{query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>" 
-            for query in all_queries],
+            [f"<|start_header_id|>user<|end_header_id|>\n\n{query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+             for query in queries],
             return_tensors="pt",
             padding=True,
             add_special_tokens=False
         ).to(self.model.device)
-        
-        # Stack KV caches for all agent types
+
+        # Stack KV caches for all agent types present in the batch
         stacked_kv_cache = tuple(
-            torch.stack([self.static_kv_cache[agent_type][i] 
-                        for agent_type in self.system_prompts.keys()])
-            for i in range(len(self.static_kv_cache[agent_types[0]]))
+            torch.stack([self.static_kv_cache[agent_type][i]
+                         for agent_type in set(self.agent_types)])
+            for i in range(len(self.static_kv_cache[list(set(self.agent_types))[0]]))
         )
-        
+
         # Generate responses using indexed KV cache
         with torch.no_grad():
             outputs = self.model.generate(
@@ -153,84 +120,48 @@ Knowledge Base:
                 top_p=0.95,
                 repetition_penalty=1.2
             )
-        
-        # Decode and organize responses by agent type
+
         responses = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        responses_by_agent = {agent_type: [] for agent_type in queries_by_agent.keys()}
-        
-        for resp, agent_idx in zip(responses, agent_type_indices):
+
+        # Extract only the assistant's response from each
+        extracted_responses = []
+        for resp in responses:
             try:
-                agent_type = agent_types[agent_idx]
                 extracted = resp.split("<|start_header_id|>assistant<|end_header_id|>")[-1].split("<|eot_id|>")[0].strip()
-                responses_by_agent[agent_type].append(extracted)
+                extracted_responses.append(extracted)
             except IndexError:
                 print(f"Warning: Could not extract response from: {resp}")
-                responses_by_agent[agent_type].append("")
+                extracted_responses.append("")  # Append an empty string or some other placeholder
                 continue
-        
-        return responses_by_agent
-        
-    def get_dictionary_response(self, query):
-        if query in self.knowledge_base:
-            return self.knowledge_base[query]
-        else:
-            return "I don't have information about that. Please try rephrasing your query or contact our human support team."
 
-    def update_trust_score(self, dimension, rating):
-        self.trust_scores[dimension] = (1 - self.alpha) * self.trust_scores[dimension] + self.alpha * rating
+        return extracted_responses
 
-class UserAgent:
-    def __init__(self, unique_id, user_type, patience_level, expertise_level, knowledge_base):
-        self.unique_id = unique_id
-        self.user_type = user_type
-        self.patience_level = patience_level
-        self.expertise_level = expertise_level
-        self.knowledge_base = knowledge_base
-
-    def submit_query(self, agents):
-        info_seeking_agents = agents
-
-        if not info_seeking_agents:
-            return
-
-        query = random.choice(list(self.knowledge_base.keys()))
-        agent = random.choice(info_seeking_agents)
-        response = agent.answer_query(query)
-        self.rate_response(response, agent, query)
-
-    def rate_response(self, response, agent, query):
-        if self.user_type == "Novice":
-            rating = 1 if random.random() < 0.8 else 0
-        elif self.user_type == "Expert":
-            # For LLM agents, we need a way to evaluate accuracy - this is a simplification
-            if agent.use_llm:
-                rating = 1 if random.random() < 0.9 else 0  # Placeholder for expert evaluation of LLM response
+    def get_dictionary_responses_batch(self, queries: List[str]) -> List[str]:
+        """Generates responses for a batch of queries using the dictionary lookup."""
+        responses = []
+        for query in queries:
+            if query in self.knowledge_base:
+                responses.append(self.knowledge_base[query])
             else:
-                rating = 1 if response == self.knowledge_base[query] else 0
-        elif self.user_type == "Skeptical":
-            if agent.use_llm:
-                rating = 1 if random.random() < 0.7 else 0 # Placeholder for skeptical evaluation of LLM response
-            else:
-                rating = 1 if response == self.knowledge_base[query] and random.random() < 0.9 else 0
-        else:
-            rating = 1 if response == self.knowledge_base[query] else 0
+                responses.append(
+                    "I don't have information about that. Please try rephrasing your query or contact our human support team."
+                )
+        return responses
 
-        agent.update_trust_score("Accuracy", rating)
+    def update_trust_score(self, agent_id, dimension, rating):
+        """Updates the trust score for a specific agent type."""
+        agent_type = self.agent_types[agent_id]
+        self.trust_scores[agent_type][dimension] = (1 - self.alpha) * self.trust_scores[agent_type][dimension] + self.alpha * rating
 
-class UserLLMAgent:
-    def __init__(self, unique_id, user_type, patience_level, expertise_level, knowledge_base, model_path):
-        self.unique_id = unique_id
-        self.user_type = user_type
-        self.patience_level = patience_level
-        self.expertise_level = expertise_level
+class UserAgentSet:
+    def __init__(self, user_types, patience_levels, expertise_levels, knowledge_base, model_path=None):
+        self.user_types = user_types
+        self.num_users = len(user_types)
+        self.user_ids = list(range(self.num_users))
+        self.patience_levels = patience_levels
+        self.expertise_levels = expertise_levels
         self.knowledge_base = knowledge_base
         self.model_path = model_path
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
 
         self.user_system_prompts = {
             "Novice": "You are a novice user with limited knowledge. Ask simple questions about the given topics.",
@@ -239,34 +170,42 @@ class UserLLMAgent:
             # Add more user types as needed
         }
 
-        # Cache tokenized system prompts and knowledge base
-        kb_tokens = self.tokenizer(
+        if model_path:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
+
+            # Cache static components and their KV cache for each user type
+            kb_tokens = self.tokenizer(
                 f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
                 return_tensors="pt",
                 add_special_tokens=False
             ).to(self.model.device)
-            
-        # Cache static components and their KV cache
-        self.static_kv_cache = {}
-        for user_type, prompt_text in self.user_system_prompts.items():
-            system_tokens = self.tokenizer(
-                f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                return_tensors="pt",
-                add_special_tokens=False
-            ).to(self.model.device)
-        
-            # Pre-compute and cache KV states for static content
-            with torch.no_grad():
-                static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
-                static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
-                outputs = self.model(
-                    input_ids=static_inputs,
-                    attention_mask=static_mask,
-                    use_cache=True
-                )
-                self.static_kv_cache[user_type] = outputs.past_key_values
+
+            self.static_kv_cache = {}
+            for user_type in set(self.user_types):
+                prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
+                system_tokens = self.tokenizer(
+                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                    return_tensors="pt",
+                    add_special_tokens=False
+                ).to(self.model.device)
+
+                with torch.no_grad():
+                    static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
+                    static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
+                    outputs = self.model(
+                        input_ids=static_inputs,
+                        attention_mask=static_mask,
+                        use_cache=True
+                    )
+                    self.static_kv_cache[user_type] = outputs.past_key_values
 
     def construct_llm_user_prompt(self, user_type):
+        # Same as before, no change needed
         system_prompt = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
         return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
@@ -276,43 +215,21 @@ Knowledge Base:
 {self.knowledge_base}
 <|eot_id|>"""
 
-    def generate_query(self):
-        # Construct the prompt for the LLM
-        prompt = self.construct_llm_user_prompt(self.user_type)
-        prompt_tokens = self.tokenizer(
-            f"{prompt}<|start_header_id|>user<|end_header_id|>",
-            return_tensors="pt",
-            add_special_tokens=False
-        ).to(self.model.device)
+    def generate_queries_batch(self, user_ids: List[int]) -> List[str]:
+        """Generates a batch of queries, user_ids is a list specifying which user id to use to generate each query. 
+        Use the user agents indexed by the corresponding user_ids to generate the corresponding query.
+        len(queries) == len(user_ids) == batch_size.
+        """
+        user_type_to_idx = {user_type: idx for idx, user_type in enumerate(set(self.user_types))}
 
-        # Use cached KV states for generation
-        with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids=prompt_tokens.input_ids,
-                attention_mask=prompt_tokens.attention_mask,
-                past_key_values=self.static_kv_cache[self.user_type],
-                max_new_tokens=50,
-                temperature=0.7,
-                do_sample=True,
-                top_k=50,
-                top_p=0.95,
-                repetition_penalty=1.2
-            )
+        # Map user IDs to user types
+        user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
 
-        query = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        # Extract only the user's query
-        query = query.split("<|start_header_id|>user<|end_header_id|>")[-1]
-        query = query.split("<|eot_id|>")[0]
-        return query.strip()
+        # Create a tensor for indexing into the stacked KV cache
+        user_type_tensor = torch.tensor([user_type_to_idx[user_type] for user_type in user_types_for_batch], device=self.model.device)
 
-    def generate_queries_batch(self, num_queries: int) -> List[str]:
-        """Generates a batch of queries using the LLM."""
-        user_types = list(self.user_system_prompts.keys())
-        user_type_to_idx = {user_type: idx for idx, user_type in enumerate(user_types)}
-        
-        # Prepare inputs for batch generation
-        prompts = [self.construct_llm_user_prompt(self.user_type) for _ in range(num_queries)]
+        # Prepare prompts for the batch
+        prompts = [self.construct_llm_user_prompt(user_type) for user_type in user_types_for_batch]
         prompt_tokens = self.tokenizer(
             [f"{prompt}<|start_header_id|>user<|end_header_id|>" for prompt in prompts],
             return_tensors="pt",
@@ -320,12 +237,10 @@ Knowledge Base:
             add_special_tokens=False
         ).to(self.model.device)
 
-        user_type_tensor = torch.full((num_queries,), user_type_to_idx[self.user_type], device=self.model.device)
-
         # Stack KV caches for all user types
         stacked_kv_cache = tuple(
-            torch.stack([self.static_kv_cache[user_type][i] for user_type in user_types])
-            for i in range(len(self.static_kv_cache[user_types[0]]))
+            torch.stack([self.static_kv_cache[user_type][i] for user_type in set(self.user_types)])
+            for i in range(len(self.static_kv_cache[list(set(self.user_types))[0]]))
         )
 
         # Generate queries using indexed KV cache
@@ -352,160 +267,115 @@ Knowledge Base:
                 extracted_queries.append(extracted_query)
             except IndexError:
                 print(f"Warning: Could not extract query from: {query}")
-                extracted_queries.append("")  # Append an empty string or some other placeholder
+                extracted_queries.append("")
                 continue
 
         return extracted_queries
 
-    def submit_query(self, agents):
-        info_seeking_agents = agents
-
-        if not info_seeking_agents:
-            return
-
-        query = self.generate_query()
-        print(f"User {self.unique_id} ({self.user_type}) asks: {query}")
-        agent = random.choice(info_seeking_agents)
-        response = agent.answer_query(query)
-        print(f"Agent {agent.unique_id} ({agent.agent_type}) answers: {response}")
-        self.rate_response(response, agent, query)
-
-    def rate_response(self, response, agent, query):
+    def rate_response(self, response, agent_type, query, user_type):
+        """Rates a response based on user type."""
         # Simplified response evaluation for demonstration
-        if self.user_type == "Novice":
+        if user_type == "Novice":
             rating = 1 if random.random() < 0.8 else 0
-        elif self.user_type == "Expert":
+        elif user_type == "Expert":
             rating = 1 if random.random() < 0.9 else 0  # Placeholder for expert evaluation
-        elif self.user_type == "Skeptical":
+        elif user_type == "Skeptical":
             rating = 1 if random.random() < 0.7 else 0  # Placeholder for skeptical evaluation
         else:
             rating = 1 if random.random() < 0.8 else 0
 
-        agent.update_trust_score("Accuracy", rating)
+        return rating
 
 class CustomerSupportModel:
-    def __init__(self, num_users, num_agents, knowledge_base, alpha=0.1, use_llm=False, model_path=None):
+    def __init__(self, num_users, num_agents, user_knowledge_base, agent_knowledge_base, alpha=0.1, batch_size=5, use_llm=False, model_path=None):
         self.num_users = num_users
-        self.knowledge_base = knowledge_base
+        self.user_knowledge_base = user_knowledge_base
+        self.agent_knowledge_base = agent_knowledge_base
         self.alpha = alpha
         self.running = True
-        self.next_agent_id = 0
         self.use_llm = use_llm
         self.model_path = model_path
+        self.batch_size = batch_size
 
-        self.user_agent_types = ["Novice", "Expert", "Skeptical"]
-        self.service_agent_types = ["Basic", "Profit-Maximizing", "Lazy", "Helpful", "Skeptical", "Misleading"]
-        self.num_agents = num_agents
-        self.agents = []
+        self.user_agent_types = [random.choice(["Novice", "Expert", "Skeptical"]) for _ in range(num_users)]
+        self.service_agent_types = [random.choice(["Basic", "Profit-Maximizing", "Lazy", "Helpful", "Skeptical", "Misleading"]) for _ in range(num_agents)]
 
-        self.create_agents(num_agents)
+        # Create agent sets
         if self.use_llm:
-            self.user_agents = self.create_user_agents_llm(num_users)  # Store user agents
+            self.user_agents = UserAgentSet(
+                user_types=self.user_agent_types,
+                patience_levels=[random.randint(1, 5) for _ in range(self.num_users)],
+                expertise_levels=[random.randint(1, 5) for _ in range(self.num_users)],
+                knowledge_base=self.user_knowledge_base,
+                model_path=self.model_path
+            )
+            self.info_agents = InfoSeekingAgentSet(
+                knowledge_base=self.agent_knowledge_base,
+                agent_types=self.service_agent_types,
+                alpha=self.alpha,
+                use_llm=True,
+                model_path=self.model_path
+            )
         else:
-            self.user_agents = self.create_user_agents(num_users)  # Store user agents
-
-    def create_agents(self, num_agents):
-        for _ in range(num_agents):
-            agent_type = random.choice(self.service_agent_types)
-            a = InfoSeekingAgent(self.next_agent_id, self.knowledge_base, agent_type, self.alpha, use_llm=self.use_llm, model_path=self.model_path)
-            self.agents.append(a)
-            self.next_agent_id += 1
-
-    def create_user_agents(self, num_users):
-        user_agents = []
-        for _ in range(num_users):
-            user_type = random.choice(self.user_agent_types)
-            patience_level = random.randint(1, 5)
-            expertise_level = random.randint(1, 5)
-            u = UserAgent(self.next_agent_id, user_type, patience_level, expertise_level, self.knowledge_base)
-            self.next_agent_id += 1
-            user_agents.append(u)  # Store user agents
-        return user_agents
-
-    def create_user_agents_llm(self, num_users):
-        user_agents = []
-        for _ in range(num_users):
-            user_type = random.choice(self.user_agent_types)
-            patience_level = random.randint(1, 5)
-            expertise_level = random.randint(1, 5)
-            u = UserLLMAgent(self.next_agent_id, user_type, patience_level, expertise_level, self.knowledge_base, self.model_path)
-            self.next_agent_id += 1
-            user_agents.append(u)  # Store user agents
-        return user_agents
-
-    def add_agent(self, agent_type):
-        a = InfoSeekingAgent(self.next_agent_id, self.knowledge_base, agent_type, self.alpha, use_llm=self.use_llm, model_path=self.model_path)
-        self.agents.append(a)
-        self.next_agent_id += 1
-
-    def remove_agent(self, agent_id):
-        self.agents = [a for a in self.agents if a.unique_id != agent_id]
+            self.user_agents = UserAgentSet(
+                user_types=self.user_agent_types,
+                patience_levels=[random.randint(1, 5) for _ in range(self.num_users)],
+                expertise_levels=[random.randint(1, 5) for _ in range(self.num_users)],
+                knowledge_base=self.agent_knowledge_base
+            )
+            self.info_agents = InfoSeekingAgentSet(
+                knowledge_base=self.agent_knowledge_base,
+                agent_types=self.service_agent_types,
+                alpha=self.alpha,
+                use_llm=False
+            )
 
     def step(self):
         if self.use_llm:
-            # Batch generate queries from LLM user agents
-            batch_size = 5  # Example batch size - you can adjust this
-            num_batches = (self.num_users + batch_size - 1) // batch_size
+            # Ensure the batch size does not exceed the number of users or agents
+            batch_size = min(self.batch_size, self.num_users, self.info_agents.num_agents)
 
-            for i in range(num_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, self.num_users)
-                batch_user_agents = self.user_agents[start_idx:end_idx]
+            # Choose user ids for querying
+            user_ids = random.sample(self.user_agents.user_ids, k=batch_size)
 
-                # Generate queries for the current batch
-                queries = []
-                for user_agent in batch_user_agents:
-                    queries.extend(user_agent.generate_queries_batch(1))  # Generate 1 query per user agent
-                
-                # Batch queries by agent type
-                queries_by_agent_type = {agent_type: [] for agent_type in self.service_agent_types}
-                for query in queries:
-                    # Assign a random agent type to each query for this example
-                    # In a real scenario, you might have a more sophisticated way of assigning queries to agents
-                    agent_type = random.choice(self.service_agent_types)
-                    queries_by_agent_type[agent_type].append(query)
+            # Generate queries in a batch
+            queries = self.user_agents.generate_queries_batch(user_ids)
 
-                # Generate responses in a batched manner for multiple agents
-                responses_by_agent_type = self.agents[0].generate_batched_multi_agent(queries_by_agent_type)
+            # Choose service agent ids for each query
+            service_agent_ids = random.sample(self.info_agents.agent_ids, k=batch_size)
+            
+            # Generate responses in a batch
+            responses = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids)
 
-                # Iterate through user agents, queries, and responses to print and rate
-                query_idx = 0
-                for user_agent in batch_user_agents:
-                    for _ in range(1):
-                        agent_type = random.choice(self.service_agent_types)
-                        query = queries[query_idx]
-                        
-                        # Find a response from the generated responses
-                        response = ""
-                        for resp in responses_by_agent_type.get(agent_type, []):
-                            response = resp
-                            break
-
-                        # Find the agent that corresponds to the chosen agent type
-                        agent = next((a for a in self.agents if a.agent_type == agent_type), None)
-                        
-                        if agent and response:
-                            print(f"User {user_agent.unique_id} ({user_agent.user_type}) asks: {query}")
-                            print(f"Agent {agent.unique_id} ({agent.agent_type}) answers: {response}")
-                            user_agent.rate_response(response, agent, query)
-                            
-                            # Remove the used response to avoid repetition
-                            responses_by_agent_type[agent_type].remove(response)
-                        
-                        query_idx += 1
+            # Pair up queries, responses, user types, and agent types for rating and printing
+            for query, response, user_id, agent_id in zip(queries, responses, user_ids, service_agent_ids):
+                user_type = self.user_agents.user_types[user_id]
+                agent_type = self.info_agents.agent_types[agent_id]
+                rating = self.user_agents.rate_response(response, agent_type, query, user_type)
+                self.info_agents.update_trust_score(agent_id, "Accuracy", rating)
+                print(f"User Id : ({user_id}) User type : ({user_type}) asks: {query}")
+                print(f"Agent Id : ({agent_id}) Agent type : ({agent_type}) answers: {response}")
         else:
-            # Original logic for non-LLM user agents
-            for user_agent in self.user_agents:
-                user_agent.submit_query(self.agents)
+            # Generate dictionary based queries
+            queries = random.sample(list(self.agent_knowledge_base.keys()), k=self.num_users)
+            
+            # Generate dictionary based responses
+            responses = self.info_agents.get_dictionary_responses_batch(queries)
+
+            # Pair up queries, responses, user types, and agent types for rating and printing
+            for query, response, user_type, agent_type in zip(queries, responses, self.user_agents.user_types, self.info_agents.agent_types):
+                rating = self.user_agents.rate_response(response, agent_type, query, user_type)
+                self.info_agents.update_trust_score(agent_type, "Accuracy", rating)
+                print(f"User ({user_type}) asks: {query}")
+                print(f"Agent ({agent_type}) answers: {response}")
 
         self.collect_data()
 
     def collect_data(self):
         agent_data = []
-        for agent in self.agents:
+        for agent_type in set(self.info_agents.agent_types):
             agent_data.append({
-                "agent_id": agent.unique_id,
-                "trust_score": agent.trust_scores["Accuracy"],
-                "agent_type": agent.agent_type
+                "agent_type": agent_type,
+                "trust_score": self.info_agents.trust_scores[agent_type]["Accuracy"],
             })
         print(agent_data)

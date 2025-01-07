@@ -10,7 +10,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Define the knowledge base
-    knowledge_base = {
+    agent_knowledge_base = user_knowledge_base = {
         "What is your return policy?": "We offer a 30-day return policy for most items. Please see our full return policy here: [link to policy]",
         "How do I track my order?": "You can track your order by logging into your account and going to the 'Order History' section. Or you can use this link : [link to tracking]",
         "What are your hours of operation?": "Our customer support team is available from 9 AM to 5 PM PST, Monday through Friday.",
@@ -30,8 +30,8 @@ if __name__ == "__main__":
     num_users = 10
     num_agents = 3
     alpha = 0.1  # Learning rate
-
-    model = CustomerSupportModel(num_users, num_agents, knowledge_base, alpha, use_llm=args.use_llm, model_path=args.model_path)
+    bsz = 10  # Batch size
+    model = CustomerSupportModel(num_users, num_agents, user_knowledge_base, agent_knowledge_base, alpha, batch_size=bsz, use_llm=args.use_llm, model_path=args.model_path)
 
     for i in range(100):  # Run for 100 steps
         model.step()
