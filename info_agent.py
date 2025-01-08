@@ -29,11 +29,16 @@ class InfoSeekingAgentSet:
             if model_path is None:
                 raise ValueError("Model path must be specified when using LLM agents.")
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            
+            # Set the padding token to be the eos_token
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
             )
+            # Cache knowledge base tokens once
 
             # Cache knowledge base tokens once
             kb_tokens = self.tokenizer(
@@ -42,6 +47,17 @@ class InfoSeekingAgentSet:
                 add_special_tokens=False
             ).to(self.model.device)
 
+            # Determine maximum prompt length
+            max_prompt_length = 0
+            for agent_type in set(self.agent_types):
+                prompt_text = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
+                system_tokens = self.tokenizer(
+                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                    return_tensors="pt",
+                    add_special_tokens=False
+                )
+                max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
+
             # Cache static components and their KV cache for each agent type
             self.static_kv_cache = {}
             for agent_type in set(self.agent_types):
@@ -49,7 +65,10 @@ class InfoSeekingAgentSet:
                 system_tokens = self.tokenizer(
                     f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
                     return_tensors="pt",
-                    add_special_tokens=False
+                    add_special_tokens=False,
+                    padding='max_length',
+                    max_length=max_prompt_length,
+                    truncation=True
                 ).to(self.model.device)
 
                 # Pre-compute and cache KV states for static content
@@ -61,7 +80,9 @@ class InfoSeekingAgentSet:
                         attention_mask=static_mask,
                         use_cache=True
                     )
+                    # Store the past_key_values directly, without adding a dummy dimension here
                     self.static_kv_cache[agent_type] = outputs.past_key_values
+
 
     def construct_llm_prompt(self, agent_type, query):
         # No change here - prompt construction is the same
@@ -78,47 +99,68 @@ Knowledge Base:
 """
 
     def generate_llm_responses_batch(self, queries: List[str], service_agent_ids: List[int]) -> List[str]:
-        """Generates responses for a batch of queries, service_agent_ids is a list specifying which agent id to use for each query. 
+        """Generates responses for a batch of queries, service_agent_ids is a list specifying which agent id to use for each query.
         Use the service agents indexed by the corresponding service_agent_ids to generate responses for the queries.
         len(queries) == len(service_agent_ids) == batch_size
         """
-        
+
         agent_type_to_idx = {agent_type: idx for idx, agent_type in enumerate(set(self.agent_types))}
 
         # Map agent IDs to agent types
         agent_types_for_batch = [self.agent_types[agent_id] for agent_id in service_agent_ids]
 
-        # Create a tensor for indexing into the stacked KV cache
-        agent_type_tensor = torch.tensor([agent_type_to_idx[agent_type] for agent_type in agent_types_for_batch], device=self.model.device)
+        # Create a tensor for indexing into the KV cache
+        agent_type_tensor = torch.tensor([agent_type_to_idx[agent_type] for agent_type in agent_types_for_batch],
+                                        device=self.model.device)
 
         # Tokenize all queries at once
         query_tokens = self.tokenizer(
             [f"<|start_header_id|>user<|end_header_id|>\n\n{query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-             for query in queries],
+            for query in queries],
             return_tensors="pt",
             padding=True,
             add_special_tokens=False
         ).to(self.model.device)
 
-        # Stack KV caches for all agent types present in the batch
-        stacked_kv_cache = tuple(
-            torch.stack([self.static_kv_cache[agent_type][i]
-                         for agent_type in set(self.agent_types)])
-            for i in range(len(self.static_kv_cache[list(set(self.agent_types))[0]]))
+        batch_size = query_tokens.input_ids.shape[0]
+
+        # Select and repeat the appropriate past_key_values for each agent type in the batch
+        past_key_values_for_batch = []
+        for agent_type in agent_types_for_batch:
+            past_key_values_for_batch.append(self.static_kv_cache[agent_type])
+
+        # Rearrange so that the outer tuple is for layers, and the first dimension of tensors is the batch dimension
+        num_layers = len(past_key_values_for_batch[0])
+        
+        repeated_past_key_values_for_batch = tuple(
+            tuple((
+                torch.cat([past_key_values_for_batch[b][layer][0] for b in range(batch_size)], dim=0),
+                torch.cat([past_key_values_for_batch[b][layer][1] for b in range(batch_size)], dim=0)
+            ))
+            for layer in range(num_layers)
         )
 
-        # Generate responses using indexed KV cache
+        # Clear any existing cache before generation
+        self.model.generation_config.cache_position = None
+
+        # Add these lines before generate()
+        self.model.config.use_cache = True
+        self.model.generation_config.use_cache = True
+
+        # Generate responses using the repeated KV cache
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=query_tokens.input_ids,
                 attention_mask=query_tokens.attention_mask,
-                past_key_values=tuple(kv[agent_type_tensor] for kv in stacked_kv_cache),
+                past_key_values=repeated_past_key_values_for_batch,
                 max_new_tokens=100,
                 temperature=0.7,
                 do_sample=True,
                 top_k=50,
                 top_p=0.95,
-                repetition_penalty=1.2
+                repetition_penalty=1.2,
+                use_cache=True,
+                position_ids=None  # Let model handle position IDs
             )
 
         responses = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -127,7 +169,8 @@ Knowledge Base:
         extracted_responses = []
         for resp in responses:
             try:
-                extracted = resp.split("<|start_header_id|>assistant<|end_header_id|>")[-1].split("<|eot_id|>")[0].strip()
+                extracted = resp.split("<|start_header_id|>assistant<|end_header_id|>")[-1].split("<|eot_id|>")[
+                    0].strip()
                 extracted_responses.append(extracted)
             except IndexError:
                 print(f"Warning: Could not extract response from: {resp}")
@@ -172,6 +215,10 @@ class UserAgentSet:
 
         if model_path:
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+            # Set the padding token to be the eos_token
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype=torch.bfloat16,
@@ -185,13 +232,27 @@ class UserAgentSet:
                 add_special_tokens=False
             ).to(self.model.device)
 
-            self.static_kv_cache = {}
+            # Determine maximum prompt length
+            max_prompt_length = 0
             for user_type in set(self.user_types):
                 prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
                 system_tokens = self.tokenizer(
                     f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
                     return_tensors="pt",
                     add_special_tokens=False
+                )
+                max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
+
+            self.static_kv_cache = {}
+            for user_type in set(self.user_types):
+                prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
+                system_tokens = self.tokenizer(
+                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                    return_tensors="pt",
+                    add_special_tokens=False,
+                    padding='max_length',
+                    max_length=max_prompt_length,
+                    truncation=True
                 ).to(self.model.device)
 
                 with torch.no_grad():
@@ -202,7 +263,9 @@ class UserAgentSet:
                         attention_mask=static_mask,
                         use_cache=True
                     )
+                    # Store the past_key_values directly, without adding a dummy dimension here
                     self.static_kv_cache[user_type] = outputs.past_key_values
+
 
     def construct_llm_user_prompt(self, user_type):
         # Same as before, no change needed
@@ -216,7 +279,7 @@ Knowledge Base:
 <|eot_id|>"""
 
     def generate_queries_batch(self, user_ids: List[int]) -> List[str]:
-        """Generates a batch of queries, user_ids is a list specifying which user id to use to generate each query. 
+        """Generates a batch of queries, user_ids is a list specifying which user id to use to generate each query.
         Use the user agents indexed by the corresponding user_ids to generate the corresponding query.
         len(queries) == len(user_ids) == batch_size.
         """
@@ -225,8 +288,9 @@ Knowledge Base:
         # Map user IDs to user types
         user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
 
-        # Create a tensor for indexing into the stacked KV cache
-        user_type_tensor = torch.tensor([user_type_to_idx[user_type] for user_type in user_types_for_batch], device=self.model.device)
+        # Create a tensor for indexing into the KV cache
+        user_type_tensor = torch.tensor([user_type_to_idx[user_type] for user_type in user_types_for_batch],
+                                    device=self.model.device)
 
         # Prepare prompts for the batch
         prompts = [self.construct_llm_user_prompt(user_type) for user_type in user_types_for_batch]
@@ -237,24 +301,42 @@ Knowledge Base:
             add_special_tokens=False
         ).to(self.model.device)
 
-        # Stack KV caches for all user types
-        stacked_kv_cache = tuple(
-            torch.stack([self.static_kv_cache[user_type][i] for user_type in set(self.user_types)])
-            for i in range(len(self.static_kv_cache[list(set(self.user_types))[0]]))
+        batch_size = prompt_tokens.input_ids.shape[0]
+        past_key_values_for_batch = []
+        for user_type in user_types_for_batch:
+            past_key_values_for_batch.append(self.static_kv_cache[user_type])
+
+        # Rearrange so that the outer tuple is for layers, and the first dimension of tensors is the batch dimension
+        num_layers = len(past_key_values_for_batch[0])
+        
+        repeated_past_key_values_for_batch = tuple(
+            tuple(
+                (torch.cat([past_key_values_for_batch[b][layer][0] for b in range(batch_size)], dim=0),
+                torch.cat([past_key_values_for_batch[b][layer][1] for b in range(batch_size)], dim=0))
+            )
+            for layer in range(num_layers)
         )
 
-        # Generate queries using indexed KV cache
+        # Clear any existing cache before generation
+        self.model.generation_config.cache_position = None
+        # Add these lines before generate()
+        self.model.config.use_cache = True
+        self.model.generation_config.use_cache = True
+
+        # Generate queries using the repeated KV cache
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=prompt_tokens.input_ids,
                 attention_mask=prompt_tokens.attention_mask,
-                past_key_values=tuple(kv[user_type_tensor] for kv in stacked_kv_cache),
+                past_key_values=repeated_past_key_values_for_batch,
                 max_new_tokens=50,
                 temperature=0.7,
                 do_sample=True,
                 top_k=50,
                 top_p=0.95,
-                repetition_penalty=1.2
+                repetition_penalty=1.2,
+                use_cache=True,
+                position_ids=None  # Let model handle position IDs
             )
 
         queries = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -263,7 +345,8 @@ Knowledge Base:
         extracted_queries = []
         for query in queries:
             try:
-                extracted_query = query.split("<|start_header_id|>user<|end_header_id|>")[-1].split("<|eot_id|>")[0].strip()
+                extracted_query = query.split("<|start_header_id|>user<|end_header_id|>")[-1].split(
+                    "<|eot_id|>")[0].strip()
                 extracted_queries.append(extracted_query)
             except IndexError:
                 print(f"Warning: Could not extract query from: {query}")
@@ -353,8 +436,9 @@ class CustomerSupportModel:
                 agent_type = self.info_agents.agent_types[agent_id]
                 rating = self.user_agents.rate_response(response, agent_type, query, user_type)
                 self.info_agents.update_trust_score(agent_id, "Accuracy", rating)
-                print(f"User Id : ({user_id}) User type : ({user_type}) asks: {query}")
-                print(f"Agent Id : ({agent_id}) Agent type : ({agent_type}) answers: {response}")
+                # print(f"User Id : ({user_id}) User type : ({user_type}) asks: {query}")
+                # print(f"Agent Id : ({agent_id}) Agent type : ({agent_type}) answers: {response}")
+            print("Batch processed.")
         else:
             # Generate dictionary based queries
             queries = random.sample(list(self.agent_knowledge_base.keys()), k=self.num_users)
@@ -366,8 +450,8 @@ class CustomerSupportModel:
             for query, response, user_type, agent_type in zip(queries, responses, self.user_agents.user_types, self.info_agents.agent_types):
                 rating = self.user_agents.rate_response(response, agent_type, query, user_type)
                 self.info_agents.update_trust_score(agent_type, "Accuracy", rating)
-                print(f"User ({user_type}) asks: {query}")
-                print(f"Agent ({agent_type}) answers: {response}")
+                # print(f"User ({user_type}) asks: {query}")
+                # print(f"Agent ({agent_type}) answers: {response}")
 
         self.collect_data()
 
