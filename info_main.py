@@ -7,6 +7,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Customer Support Model with optional LLM agents.")
     parser.add_argument("--use_llm", action="store_true", help="Use LLM-based agents instead of dictionary-based agents.")
     parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3.1-8B-Instruct", help="Path to the pretrained LLM model.")
+    parser.add_argument("--evaluation_method", type=str, choices=["specific_ratings", "comparative_binary"], default="specific_ratings", help="Evaluation method for LLM agents.")
+    parser.add_argument("--rating_scale", type=int, choices=[5, 10], default=5, help="Rating scale for LLM agents.")
     args = parser.parse_args()
 
     # Define the knowledge base
@@ -31,7 +33,19 @@ if __name__ == "__main__":
     num_agents = 3
     alpha = 0.1  # Learning rate
     bsz = 10  # Batch size
-    model = CustomerSupportModel(num_users, num_agents, user_knowledge_base, agent_knowledge_base, alpha, batch_size=bsz, use_llm=args.use_llm, model_path=args.model_path)
+    model = CustomerSupportModel(
+        num_users,
+        num_agents,
+        user_knowledge_base,
+        agent_knowledge_base,
+        alpha,
+        batch_size=bsz,
+        use_llm=args.use_llm,
+        model_path=args.model_path,
+        evaluation_method=args.evaluation_method,
+        rating_scale=args.rating_scale
+    )
+
 
     for i in range(100):  # Run for 100 steps
         model.step()
