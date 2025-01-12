@@ -209,9 +209,9 @@ class UserAgentSet:
         self.rating_scale = rating_scale
 
         self.user_system_prompts = {
-            "Novice": "You are a novice user with limited knowledge. Ask simple questions about the given topics.",
-            "Expert": "You are an expert user with in-depth knowledge. Ask detailed and specific questions about the given topics.",
-            "Skeptical": "You are a skeptical user. Question the information provided and ask for clarifications or evidence.",
+            "Novice": "You are a novice user with limited knowledge. You ask simple questions about the given topics.",
+            "Expert": "You are an expert user with in-depth knowledge. You ask detailed and specific questions about the given topics.",
+            "Skeptical": "You are a skeptical user. You question the information provided and ask for clarifications or evidence.",
             # Add more user types as needed
         }
 
@@ -339,10 +339,9 @@ Knowledge Base:
             prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 You are a {user_type} user evaluating a customer service interaction.
-Consider the following query, the agent's response, and the agent's type.
+Consider the following query you asked, the agent's response.
 
 Query: {query}
-Agent Type: {agent_type}
 Response: {response}
 
 Rate the response on the following dimensions using a scale of 1-{self.rating_scale} (1 being very poor, {self.rating_scale} being excellent):
@@ -409,16 +408,14 @@ Integrity:
         elif self.evaluation_method == "comparative_binary":
             prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-You are a {user_type} user comparing two customer service interactions for the same query.
+You are a {user_type} user comparing two customer service interactions for the same query that you asked.
 
 Query: {query}
 
 Interaction 1:
-Agent Type: {agent_type}
 Response: {response}
 
 Interaction 2:
-Agent Type: {agent_type_b}
 Response: {response_b}
 
 Which agent provided a better response overall, considering accuracy, helpfulness, efficiency, and clarity?
