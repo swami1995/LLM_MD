@@ -6,7 +6,8 @@ import argparse
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Customer Support Model with optional LLM agents.")
     parser.add_argument("--use_llm", action="store_true", help="Use LLM-based agents instead of dictionary-based agents.")
-    parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3.1-8B-Instruct", help="Path to the pretrained LLM model.")
+    parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3.1-70B-Instruct", help="Path to the pretrained LLM model.")
+    # parser.add_argument("--model_path", type=str, default="/data/user_data/sgurumur/models/checkpoints/Llama3.3-70B-Instruct", help="Path to the pretrained LLM model.")
     parser.add_argument("--evaluation_method", type=str, choices=["specific_ratings", "comparative_binary"], default="specific_ratings", help="Evaluation method for LLM agents.")
     parser.add_argument("--rating_scale", type=int, choices=[5, 10], default=5, help="Rating scale for LLM agents.")
     args = parser.parse_args()

@@ -3,6 +3,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from typing import List, Dict, Tuple
 import argparse
+import ipdb
 
 class InfoSeekingAgentSet:
     def __init__(self, knowledge_base, agent_types, alpha, rate_limit=5, use_llm=False, model_path=None, evaluation_method="specific_ratings", rating_scale=5):
@@ -11,21 +12,26 @@ class InfoSeekingAgentSet:
         self.num_agents = len(agent_types)
         self.agent_ids = list(range(self.num_agents))
         self.trust_scores = {
-            agent_type: {
+            agent_id: {
                 "Accuracy": 0.5,
                 "Helpfulness": 0.5,
                 "Efficiency": 0.5,
                 "Clarity": 0.5,
                 "Integrity": 0.5,
-                "Overall": 0.0  # Added for storing Elo-based overall score
-            } for agent_type in set(agent_types)
+                "Overall": 0.0,
+                "Accuracy_Elo": 1000.0,
+                "Helpfulness_Elo": 1000.0,
+                "Efficiency_Elo": 1000.0,
+                "Clarity_Elo": 1000.0,
+                "Integrity_Elo": 1000.0,
+            } for agent_id in self.agent_ids  # Use agent_ids as keys
         }
         self.rate_limit = rate_limit
         self.alpha = alpha
         self.use_llm = use_llm
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
-        self.K = 32 # Elo rating K-factor
+        self.K = 32
 
         self.system_prompts = {
             "Helpful": "You are a helpful customer support agent. Provide accurate and concise answers to user queries based on the given knowledge base.",
@@ -39,7 +45,7 @@ class InfoSeekingAgentSet:
         if self.use_llm:
             if model_path is None:
                 raise ValueError("Model path must be specified when using LLM agents.")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left')  # Padding side is left for causal LM
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
@@ -106,19 +112,19 @@ Knowledge Base:
         Generates responses for a batch of queries.
         service_agent_ids: Specifies which agent id to use for each query.
         """
-
-        agent_type_to_idx = {agent_type: idx for idx, agent_type in enumerate(set(self.agent_types))}
         agent_types_for_batch = [self.agent_types[agent_id] for agent_id in service_agent_ids]
 
         query_tokens = self.tokenizer(
             [f"<|start_header_id|>user<|end_header_id|>\n\n{query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
             for query in queries],
             return_tensors="pt",
+            # padding='max_length',
             padding=True,
+            # max_length=512,
+            # truncation=True,
             add_special_tokens=False
         ).to(self.model.device)
 
-        batch_size = query_tokens.input_ids.shape[0]
         past_key_values_for_batch = [self.static_kv_cache[agent_type] for agent_type in agent_types_for_batch]
 
         # Correctly format past_key_values for batch inference
@@ -172,29 +178,42 @@ Knowledge Base:
                 )
         return responses
 
-    def update_trust_score(self, agent_id, ratings=None, winner=None):
-        """Updates the trust score for a specific agent type."""
-        agent_type = self.agent_types[agent_id]
+    def update_trust_score_batch(self, agent_ids: List[int], ratings_batch: List[Dict[str, int]] = None, winners: List[Dict] = None):
+        """Updates the trust scores for a batch of agents."""
 
-        if ratings is not None:
-            for dimension, rating in ratings.items():
-                self.trust_scores[agent_type][dimension] = (1 - self.alpha) * self.trust_scores[agent_type][dimension] + self.alpha * rating
-        
-        elif winner is not None:
-            # Elo update for comparative_binary
-            agent_type_a, agent_type_b = winner.keys()
-            score_a = winner[agent_type_a]
-            score_b = winner[agent_type_b]
+        if ratings_batch is not None:
+            for agent_id, ratings in zip(agent_ids, ratings_batch):
+                for dimension, rating in ratings.items():
+                    self.trust_scores[agent_id][dimension] = (1 - self.alpha) * self.trust_scores[agent_id][dimension] + self.alpha * rating
 
-            Ra = self.trust_scores[agent_type_a]["Overall"]
-            Rb = self.trust_scores[agent_type_b]["Overall"]
+        elif winners is not None:
+            for winner_pair in winners:
+              for dimension in ["Accuracy", "Helpfulness", "Efficiency", "Clarity", "Integrity"]:
+                # Elo update for comparative_binary for each dimension
+                # import ipdb
+                ipdb.set_trace()
+                agent_id_a, agent_id_b = list(winner_pair.keys())
+                
+                # Determine the winner for the current dimension
+                if winner_pair[agent_id_a][dimension] == 1:
+                    score_a = 1
+                    score_b = 0
+                elif winner_pair[agent_id_b][dimension] == 1:
+                    score_a = 0
+                    score_b = 1
+                else:  # Draw
+                    score_a = 0.5
+                    score_b = 0.5
 
-            Ea = 1 / (1 + 10 ** ((Rb - Ra) / 400))
-            Eb = 1 / (1 + 10 ** ((Ra - Rb) / 400))
+                Ra = self.trust_scores[agent_id_a][f"{dimension}_Elo"]
+                Rb = self.trust_scores[agent_id_b][f"{dimension}_Elo"]
 
-            # Update Elo ratings
-            self.trust_scores[agent_type_a]["Overall"] = Ra + self.K * (score_a - Ea)
-            self.trust_scores[agent_type_b]["Overall"] = Rb + self.K * (score_b - Eb)
+                Ea = 1 / (1 + 10 ** ((Rb - Ra) / 400))
+                Eb = 1 / (1 + 10 ** ((Ra - Rb) / 400))
+
+                # Update Elo ratings
+                self.trust_scores[agent_id_a][f"{dimension}_Elo"] = Ra + self.K * (score_a - Ea)
+                self.trust_scores[agent_id_b][f"{dimension}_Elo"] = Rb + self.K * (score_b - Eb)
 
 class UserAgentSet:
     def __init__(self, user_types, patience_levels, expertise_levels, knowledge_base, model_path=None, evaluation_method="specific_ratings", rating_scale=5):
@@ -216,7 +235,7 @@ class UserAgentSet:
         }
 
         if model_path:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left') # Set padding_side='left'
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_path,
@@ -285,11 +304,13 @@ Knowledge Base:
         prompt_tokens = self.tokenizer(
             [f"{prompt}<|start_header_id|>user<|end_header_id|>" for prompt in prompts],
             return_tensors="pt",
+            # padding='max_length',
             padding=True,
+            # max_length=512,
+            # truncation=True,
             add_special_tokens=False
         ).to(self.model.device)
 
-        batch_size = prompt_tokens.input_ids.shape[0]
         past_key_values_for_batch = [self.static_kv_cache[user_type] for user_type in user_types_for_batch]
 
         # Correctly format past_key_values for batch inference
@@ -331,12 +352,16 @@ Knowledge Base:
 
         return extracted_queries
 
-    def rate_response(self, response, agent_type, query, user_id, response_b=None, agent_type_b=None):
-        """Rates a response based on user type."""
-        user_type = self.user_types[user_id]
+    def rate_response_batch(self, responses: List[str], agent_ids: List[int], queries: List[str], user_ids: List[int], responses_b: List[str] = None, agent_ids_b: List[int] = None) -> List[Dict]:
+        """Rates a batch of responses based on user type."""
+        batch_ratings = []
+        batch_winners = []
 
         if self.evaluation_method == "specific_ratings":
-            prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            prompts = []
+            for response, query, user_id in zip(responses, queries, user_ids):
+                user_type = self.user_types[user_id]
+                prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 You are a {user_type} user evaluating a customer service interaction.
 Consider the following query you asked, the agent's response.
@@ -359,23 +384,39 @@ Efficiency:
 Clarity: 
 Integrity: 
 <|eot_id|>"""
+                prompts.append(prompt)
 
-            # Tokenize the evaluation prompt
+            # Tokenize the evaluation prompts
             prompt_tokens = self.tokenizer(
-                prompt,
+                prompts,
                 return_tensors="pt",
+                # padding='max_length',
+                padding=True,
+                # max_length=512,
+                # truncation=True,
                 add_special_tokens=False
             ).to(self.model.device)
 
-            # Get the cached KV states for the user type
-            user_kv_cache = self.static_kv_cache[user_type]
+            # Get the cached KV states for the user types
+            user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
+            past_key_values_for_batch = [self.static_kv_cache[user_type] for user_type in user_types_for_batch]
 
-            # Generate the evaluation using the cached KV states
+            # Correctly format past_key_values for batch inference
+            num_layers = len(past_key_values_for_batch[0])
+            past_key_values_reformatted = tuple(
+                (
+                    torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_for_batch], dim=0),
+                    torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_for_batch], dim=0)
+                )
+                for layer_idx in range(num_layers)
+            )
+
+            # Generate the evaluations using the cached KV states
             with torch.no_grad():
-                evaluation_output = self.model.generate(
+                evaluation_outputs = self.model.generate(
                     input_ids=prompt_tokens.input_ids,
                     attention_mask=prompt_tokens.attention_mask,
-                    past_key_values=user_kv_cache,
+                    past_key_values=past_key_values_reformatted,
                     max_new_tokens=100,
                     temperature=0.7,
                     do_sample=True,
@@ -383,92 +424,171 @@ Integrity:
                     top_p=0.95,
                     repetition_penalty=1.2
                 )
-            evaluation = self.tokenizer.decode(evaluation_output[0], skip_special_tokens=True)
+            evaluations = self.tokenizer.batch_decode(evaluation_outputs, skip_special_tokens=True)
 
-            # Extract ratings from the evaluation
-            try:
-                ratings = {}
-                for line in evaluation.split('\n'):
-                    if line.startswith("Accuracy:"):
-                        ratings["Accuracy"] = int(line.split(":")[1].strip())
-                    elif line.startswith("Helpfulness:"):
-                        ratings["Helpfulness"] = int(line.split(":")[1].strip())
-                    elif line.startswith("Efficiency:"):
-                        ratings["Efficiency"] = int(line.split(":")[1].strip())
-                    elif line.startswith("Clarity:"):
-                        ratings["Clarity"] = int(line.split(":")[1].strip())
-                    elif line.startswith("Integrity:"):
-                        ratings["Integrity"] = int(line.split(":")[1].strip())
-            except ValueError:
-                print(f"Warning: Could not parse ratings from evaluation: {evaluation}")
-                ratings = {"Accuracy": 0, "Helpfulness": 0, "Efficiency": 0, "Clarity": 0, "Integrity": 0}
-        
-            return ratings
+            # Extract ratings from the evaluations
+            for evaluation in evaluations:
+                try:
+                    ratings = {}
+                    for line in evaluation.split('\n'):
+                        if line.startswith("Accuracy:"):
+                            ratings["Accuracy"] = int(line.split(":")[1].strip())
+                        elif line.startswith("Helpfulness:"):
+                            ratings["Helpfulness"] = int(line.split(":")[1].strip())
+                        elif line.startswith("Efficiency:"):
+                            ratings["Efficiency"] = int(line.split(":")[1].strip())
+                        elif line.startswith("Clarity:"):
+                            ratings["Clarity"] = int(line.split(":")[1].strip())
+                        elif line.startswith("Integrity:"):
+                            ratings["Integrity"] = int(line.split(":")[1].strip())
+                    batch_ratings.append(ratings)
+                except ValueError:
+                    print(f"Warning: Could not parse ratings from evaluation: {evaluation}")
+                    batch_ratings.append({"Accuracy": 0, "Helpfulness": 0, "Efficiency": 0, "Clarity": 0, "Integrity": 0})
+
+            return batch_ratings
 
         elif self.evaluation_method == "comparative_binary":
-            prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+            prompts = []
+            for response_a, response_b, query, user_id in zip(responses, responses_b, queries, user_ids):
+                user_type = self.user_types[user_id]
+                prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 You are a {user_type} user comparing two customer service interactions for the same query that you asked.
 
 Query: {query}
 
 Interaction 1:
-Response: {response}
+Response: {response_a}
 
 Interaction 2:
 Response: {response_b}
 
-Which agent provided a better response overall, considering accuracy, helpfulness, efficiency, and clarity?
+For each of the following dimensions, indicate which agent provided a better response by answering '1' if agent 1 was better, '2' if agent 2 was better, or '0' if they were equally good:
 
-Answer in the following format :
-Agent 1 : 
-Agent 2 : 
+Accuracy: (How factually correct is the information?)
+Helpfulness: (How well does it address the query?)
+Efficiency: (Is the response provided in a timely and concise manner?)
+Clarity: (Is the response easy to understand?)
+Integrity: (Is the response honest and unbiased, or is it manipulative or deceptive?)
+
+Provide your ratings in the following format for each dimension:
+Accuracy: 
+Helpfulness: 
+Efficiency: 
+Clarity: 
+Integrity: 
 <|eot_id|>"""
+                prompts.append(prompt)
 
-            # Tokenize the evaluation prompt
+            # Tokenize the evaluation prompts
             prompt_tokens = self.tokenizer(
-                prompt,
+                prompts,
                 return_tensors="pt",
+                # padding='max_length',
+                padding=True,
+                # max_length=512,
+                # truncation=True,
                 add_special_tokens=False
             ).to(self.model.device)
 
-            # Get the cached KV states for the user type
-            user_kv_cache = self.static_kv_cache[user_type]
+            # Get the cached KV states for the user types
+            user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
+            past_key_values_for_batch = [self.static_kv_cache[user_type] for user_type in user_types_for_batch]
 
-            # Generate the evaluation using the cached KV states
+            # Correctly format past_key_values for batch inference
+            num_layers = len(past_key_values_for_batch[0])
+            past_key_values_reformatted = tuple(
+                (
+                    torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_for_batch], dim=0),
+                    torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_for_batch], dim=0)
+                )
+                for layer_idx in range(num_layers)
+            )
+
+            # Generate the evaluations using the cached KV states
             with torch.no_grad():
-                evaluation_output = self.model.generate(
+                evaluation_outputs = self.model.generate(
                     input_ids=prompt_tokens.input_ids,
                     attention_mask=prompt_tokens.attention_mask,
-                    past_key_values=user_kv_cache,
-                    max_new_tokens=100,
+                    past_key_values=past_key_values_reformatted,
+                    max_new_tokens=300,
                     temperature=0.7,
                     do_sample=True,
                     top_k=50,
                     top_p=0.95,
                     repetition_penalty=1.2
                 )
-            evaluation = self.tokenizer.decode(evaluation_output[0], skip_special_tokens=True)
+            evaluations = self.tokenizer.batch_decode(evaluation_outputs, skip_special_tokens=True)
 
-            # Extract winner from the evaluation
-            try:
-                winner = {}
-                for line in evaluation.split('\n'):
-                    if line.startswith("Agent 1 :"):
-                        if line.split(":")[1].strip() == "1":
-                          winner[agent_type] = 1
-                          winner[agent_type_b] = 0
-                        else:
-                          winner[agent_type] = 0
-                          winner[agent_type_b] = 1
-            except ValueError:
-                print(f"Warning: Could not parse winner from evaluation: {evaluation}")
-                winner = None
-        
-            return winner
+            # Extract winners from the evaluations
+            for evaluation, agent_id_a, agent_id_b in zip(evaluations, agent_ids, agent_ids_b):
+                try:
+                    winner = {agent_id_a: {}, agent_id_b: {}}
+                    lines = evaluation.split('\n')
+                    
+                    for line in lines:
+                        if line.startswith("Accuracy:"):
+                            if line.split(":")[1].strip() == '1':
+                                winner[agent_id_a]["Accuracy"] = 1
+                                winner[agent_id_b]["Accuracy"] = 0
+                            elif line.split(":")[1].strip() == '2':
+                                winner[agent_id_a]["Accuracy"] = 0
+                                winner[agent_id_b]["Accuracy"] = 1
+                            else:
+                                winner[agent_id_a]["Accuracy"] = 0.5
+                                winner[agent_id_b]["Accuracy"] = 0.5
+                        elif line.startswith("Helpfulness:"):
+                            if line.split(":")[1].strip() == '1':
+                                winner[agent_id_a]["Helpfulness"] = 1
+                                winner[agent_id_b]["Helpfulness"] = 0
+                            elif line.split(":")[1].strip() == '2':
+                                winner[agent_id_a]["Helpfulness"] = 0
+                                winner[agent_id_b]["Helpfulness"] = 1
+                            else:
+                                winner[agent_id_a]["Helpfulness"] = 0.5
+                                winner[agent_id_b]["Helpfulness"] = 0.5
+                        elif line.startswith("Efficiency:"):
+                            if line.split(":")[1].strip() == '1':
+                                winner[agent_id_a]["Efficiency"] = 1
+                                winner[agent_id_b]["Efficiency"] = 0
+                            elif line.split(":")[1].strip() == '2':
+                                winner[agent_id_a]["Efficiency"] = 0
+                                winner[agent_id_b]["Efficiency"] = 1
+                            else:
+                                winner[agent_id_a]["Efficiency"] = 0.5
+                                winner[agent_id_b]["Efficiency"] = 0.5
+                        elif line.startswith("Clarity:"):
+                            if line.split(":")[1].strip() == '1':
+                                winner[agent_id_a]["Clarity"] = 1
+                                winner[agent_id_b]["Clarity"] = 0
+                            elif line.split(":")[1].strip() == '2':
+                                winner[agent_id_a]["Clarity"] = 0
+                                winner[agent_id_b]["Clarity"] = 1
+                            else:
+                                winner[agent_id_a]["Clarity"] = 0.5
+                                winner[agent_id_b]["Clarity"] = 0.5
+                        elif line.startswith("Integrity:"):
+                            if line.split(":")[1].strip() == '1':
+                                winner[agent_id_a]["Integrity"] = 1
+                                winner[agent_id_b]["Integrity"] = 0
+                            elif line.split(":")[1].strip() == '2':
+                                winner[agent_id_a]["Integrity"] = 0
+                                winner[agent_id_b]["Integrity"] = 1
+                            else:
+                                winner[agent_id_a]["Integrity"] = 0.5
+                                winner[agent_id_b]["Integrity"] = 0.5
+
+                    batch_winners.append(winner)
+                except Exception as e:
+                    print(f"Warning: Could not parse winner from evaluation: {evaluation}, Error: {e}")
+                    batch_winners.append({agent_id_a : {"Accuracy": 0, "Helpfulness": 0, "Efficiency": 0, "Clarity": 0, "Integrity": 0}, agent_id_b : {"Accuracy": 0, "Helpfulness": 0, "Efficiency": 0, "Clarity": 0, "Integrity": 0}})
+
+            return batch_winners
 
         else:
             raise ValueError(f"Invalid evaluation method: {self.evaluation_method}")
+    
 
 class CustomerSupportModel:
     def __init__(self, num_users, num_agents, user_knowledge_base, agent_knowledge_base, alpha=0.1, batch_size=5, use_llm=False, model_path=None, evaluation_method="specific_ratings", rating_scale=5):
@@ -540,17 +660,16 @@ class CustomerSupportModel:
                 responses_a = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids_a)
                 responses_b = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids_b)
 
-                # Pair up queries, responses, user types, and agent types for rating and printing
-                for query, response_a, response_b, user_id, agent_id_a, agent_id_b in zip(queries, responses_a, responses_b, user_ids, service_agent_ids_a, service_agent_ids_b):
+                # Get comparative evaluation from the user
+                winners = self.user_agents.rate_response_batch(responses_a, service_agent_ids_a, queries, user_ids, responses_b, service_agent_ids_b)
+
+                # Update the trust scores of the agents based on the comparison
+                self.info_agents.update_trust_score_batch(service_agent_ids_a, winners=winners)
+
+                for query, response_a, response_b, user_id, agent_id_a, agent_id_b, winner in zip(queries, responses_a, responses_b, user_ids, service_agent_ids_a, service_agent_ids_b, winners):
                     user_type = self.user_agents.user_types[user_id]
                     agent_type_a = self.info_agents.agent_types[agent_id_a]
                     agent_type_b = self.info_agents.agent_types[agent_id_b]
-
-                    # Get comparative evaluation from the user
-                    winner = self.user_agents.rate_response(response_a, agent_type_a, query, user_id, response_b, agent_type_b)
-
-                    # Update the trust scores of the agents based on the comparison
-                    self.info_agents.update_trust_score(agent_id_a, winner=winner)
 
                     print(f"User Id : ({user_id}) User type : ({user_type}) asks: {query}")
                     print(f"Agent Id : ({agent_id_a}) Agent type : ({agent_type_a}) answers: {response_a}")
@@ -564,21 +683,21 @@ class CustomerSupportModel:
                 # Generate responses in a batch
                 responses = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids)
 
-                # Pair up queries, responses, user types, and agent types for rating and printing
-                for query, response, user_id, agent_id in zip(queries, responses, user_ids, service_agent_ids):
+                # Get ratings for the responses from the users in a batch
+                ratings_batch = self.user_agents.rate_response_batch(responses, service_agent_ids, queries, user_ids)
+
+                # Update the trust scores of the agents based on the ratings
+                self.info_agents.update_trust_score_batch(service_agent_ids, ratings_batch=ratings_batch)
+
+                for query, response, user_id, agent_id, ratings in zip(queries, responses, user_ids, service_agent_ids, ratings_batch):
                     user_type = self.user_agents.user_types[user_id]
                     agent_type = self.info_agents.agent_types[agent_id]
-                    
-                    # Get ratings for the response from the user
-                    ratings = self.user_agents.rate_response(response, agent_type, query, user_id)
-
-                    # Update the trust scores of the agent based on the ratings
-                    self.info_agents.update_trust_score(agent_id, ratings=ratings)
                     
                     print(f"User Id : ({user_id}) User type : ({user_type}) asks: {query}")
                     print(f"Agent Id : ({agent_id}) Agent type : ({agent_type}) answers: {response}")
                     print(f"User ({user_id}) provides the following ratings: {ratings}")
-
+                
+                ipdb.set_trace()
         else:
             # Generate dictionary based queries
             queries = random.sample(list(self.agent_knowledge_base.keys()), k=self.num_users)
@@ -598,7 +717,8 @@ class CustomerSupportModel:
                 }
                 
                 # Update the trust scores of the agent based on the ratings
-                self.info_agents.update_trust_score(agent_type, ratings=ratings)
+                # Need to get agent_id from somewhere or make agent_type the agent_id for the non-LLM case
+                # self.info_agents.update_trust_score(agent_type, ratings=ratings)
 
                 print(f"User ({user_type}) asks: {query}")
                 print(f"Agent ({agent_type}) answers: {response}")
@@ -608,14 +728,21 @@ class CustomerSupportModel:
 
     def collect_data(self):
         agent_data = []
-        for agent_type in set(self.info_agents.agent_types):
+        for agent_id in self.info_agents.agent_ids:
+            agent_type = self.info_agents.agent_types[agent_id]
             agent_data.append({
+                "agent_id": agent_id,
                 "agent_type": agent_type,
-                "Accuracy" : self.info_agents.trust_scores[agent_type]["Accuracy"],
-                "Helpfulness" : self.info_agents.trust_scores[agent_type]["Helpfulness"],
-                "Efficiency" : self.info_agents.trust_scores[agent_type]["Efficiency"],
-                "Clarity" : self.info_agents.trust_scores[agent_type]["Clarity"],
-                "Integrity" : self.info_agents.trust_scores[agent_type]["Integrity"],
-                "Overall" : self.info_agents.trust_scores[agent_type]["Overall"],
+                "Accuracy": self.info_agents.trust_scores[agent_id]["Accuracy"],
+                "Helpfulness": self.info_agents.trust_scores[agent_id]["Helpfulness"],
+                "Efficiency": self.info_agents.trust_scores[agent_id]["Efficiency"],
+                "Clarity": self.info_agents.trust_scores[agent_id]["Clarity"],
+                "Integrity": self.info_agents.trust_scores[agent_id]["Integrity"],
+                "Overall": self.info_agents.trust_scores[agent_id]["Overall"],
+                "Accuracy_Elo": self.info_agents.trust_scores[agent_id]["Accuracy_Elo"],
+                "Helpfulness_Elo": self.info_agents.trust_scores[agent_id]["Helpfulness_Elo"],
+                "Efficiency_Elo": self.info_agents.trust_scores[agent_id]["Efficiency_Elo"],
+                "Clarity_Elo": self.info_agents.trust_scores[agent_id]["Clarity_Elo"],
+                "Integrity_Elo": self.info_agents.trust_scores[agent_id]["Integrity_Elo"],
             })
         print(agent_data)
