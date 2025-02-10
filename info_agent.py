@@ -172,7 +172,7 @@ Assistant Response:
             add_special_tokens=False
         ).to(self.model.device)
 
-        # Get past key values - assuming same for all prompts in batch - adjust if needed based on agent_type variation
+        # Get past key values
         past_key_values_batch = [self.static_kv_cache[agent_type] for agent_type in agent_types]
 
         # Correctly format past_key_values for batch inference
@@ -423,13 +423,13 @@ User Question:
             [f"{prompt}<|start_header_id|>user<|end_header_id|>" for prompt in prompts], # Add user header for each prompt
             return_tensors="pt",
             padding=True, # Pad the batch
-            # padding='max_length',
+            # padding='max_length', #  fixed-length padding and truncation
             # max_length=512,
             # truncation=True, # Truncate if prompts are too long
             add_special_tokens=False
         ).to(self.model.device)
 
-        # Get past key values - using the first user type's cache as a placeholder, adjust if needed
+        # Get past key values
         past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
 
         # Correctly format past_key_values for batch inference
@@ -503,7 +503,7 @@ User Question:
 
     def _rate_response_batch_llama_specific_ratings(self, prompts: List[str], user_types: List[str]) -> List[str]:
         """Helper function to rate responses in batch using local Llama model for specific ratings."""
-        # Construct Llama-style prompts for rating, if different from Gemini prompts are needed. For now reusing Gemini style.
+        # Construct Llama-style prompts for rating
         llama_prompts = [f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 {prompt}
@@ -514,14 +514,13 @@ User Question:
             llama_prompts,
             return_tensors="pt",
             padding=True,
-            # padding='max_length',
+            # padding='max_length',  #  consider fixed-length padding
             # max_length=512,
             # truncation=True,
             add_special_tokens=False
         ).to(self.model.device)
 
-        # Get past key values for batch - using first user type's cache as placeholder, adjust if user_type is important for rating
-        # past_key_values_batch = [self.static_kv_cache[user_types[0]]] * len(prompts) # Replicate for batch size
+        # Get past key values for batch
         past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
 
         # Reformat past key values for batch inference
@@ -552,26 +551,23 @@ User Question:
 
     def _rate_response_batch_llama_comparative_binary(self, prompts: List[str], user_types: List[str]) -> List[str]:
         """Helper function to rate responses in batch using local Llama model for comparative binary evaluation."""
-        # Construct Llama-style prompts for comparative binary evaluation if different from Gemini prompts are needed. For now reusing Gemini style.
-        # llama_prompts = prompts # Assuming prompts are already in suitable format, adjust if needed
         llama_prompts = [f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 {prompt}
 <|eot_id|>""" for prompt in prompts]
-        
+
         # Tokenize evaluation prompts in batch
         prompt_tokens_batch = self.tokenizer(
             llama_prompts,
             return_tensors="pt",
             padding=True,
-            # padding='max_length',
-            # max_length=512,
+            # padding='max_length', #  fixed-length padding
+            # max_length=1024,      #  longer max_length for comparative eval
             # truncation=True,
             add_special_tokens=False
         ).to(self.model.device)
 
-        # Get past key values for batch - using first user type's cache as placeholder, adjust if user_type is important for rating
-        # past_key_values_batch = [self.static_kv_cache[user_types[0]]] * len(prompts) # Replicate for batch size
+        # Get past key values for batch
         past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
 
         # Reformat past key values for batch inference
@@ -626,12 +622,12 @@ Clarity: (Is the response easy to understand?)
 Integrity: (Is the response honest and unbiased, or is it manipulative or deceptive?)
 
 Provide your ratings in the following format:
-Accuracy: 
-Helpfulness: 
-Efficiency: 
-Clarity: 
-Integrity: 
-""" # Modified prompt - simpler format for API and numerical output
+Accuracy:
+Helpfulness:
+Efficiency:
+Clarity:
+Integrity:
+"""
                 prompts.append(prompt)
 
             if self.llm_source == "api":
@@ -658,13 +654,14 @@ Integrity:
                         elif line.startswith("Integrity:"):
                             ratings["Integrity"] = int(line.split(":")[1].strip())
                     batch_ratings.append(ratings)
-                    if len(ratings) < 5: # Check if we got enough ratings
+                    # Check and pad missing ratings
+                    if len(ratings) < 5:
                         print(f"Warning: Not enough ratings found in evaluation: {evaluation}")
-                        batch_ratings[-1] = {"Accuracy": batch_ratings[-1].get("Accuracy", 0), 
-                                             "Helpfulness": batch_ratings[-1].get("Helpfulness", 0),
-                                             "Efficiency": batch_ratings[-1].get("Efficiency", 0),
-                                             "Clarity": batch_ratings[-1].get("Clarity", 0),
-                                             "Integrity": batch_ratings[-1].get("Integrity", 0)}
+                        batch_ratings[-1] = {"Accuracy": batch_ratings[-1].get("Accuracy", 0),
+                                            "Helpfulness": batch_ratings[-1].get("Helpfulness", 0),
+                                            "Efficiency": batch_ratings[-1].get("Efficiency", 0),
+                                            "Clarity": batch_ratings[-1].get("Clarity", 0),
+                                            "Integrity": batch_ratings[-1].get("Integrity", 0)}
 
                 except ValueError:
                     print(f"Warning: Could not parse ratings from evaluation: {evaluation}")
@@ -697,28 +694,29 @@ Clarity: (Is the response easy to understand?)
 Integrity: (Is the response honest and unbiased, or is it manipulative or deceptive?)
 
 Provide your ratings in the following format for each dimension:
-Accuracy: 
-Helpfulness: 
-Efficiency: 
-Clarity: 
-Integrity: 
-""" # Modified prompt - simpler format for API and numerical choices
+Accuracy:
+Helpfulness:
+Efficiency:
+Clarity:
+Integrity:
+"""
                 prompts.append(prompt)
 
             if self.llm_source == "api":
                 evaluation_responses = self._get_gemini_api_responses(prompts) # Helper function for API calls
             elif self.llm_source == "local": # Use local Llama for rating - Batched execution
-                evaluation_responses = self._rate_response_batch_llama_comparative_binary(prompts, user_types_batch) # Batched comparative evaluation using local LLM
+                evaluation_responses = self._rate_response_batch_llama_comparative_binary(prompts, user_types_batch) # Batched comparative evaluation
             else:
                 raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
 
             # Extract winners from the evaluations
-            for evaluation, agent_id_a, agent_id_b in zip(evaluation_responses, agent_ids, agent_ids_b): # Use agent IDs from loop
+             # Extract winners from the evaluations and use provided agent_ids and agent_ids_b
+            for evaluation, agent_id_a, agent_id_b in zip(evaluation_responses, agent_ids, agent_ids_b):
                 try:
                     winner = {agent_id_a: {}, agent_id_b: {}}
                     lines = evaluation.split('\n')
-                    
+
                     for line in lines:
                         if line.startswith("Accuracy:"):
                             if line.split(":")[1].strip() == '1':
@@ -770,16 +768,20 @@ Integrity:
                             else:
                                 winner[agent_id_a]["Integrity"] = 0.5
                                 winner[agent_id_b]["Integrity"] = 0.5
-
                     batch_winners.append(winner)
-                    if len(ratings) < 5: # Check if we got enough ratings
+                    if len(winner[agent_id_a]) < 5: # Check if we got enough ratings
                         print(f"Warning: Not enough ratings found in evaluation: {evaluation}")
                         batch_winners[-1][agent_id_a] = {"Accuracy": batch_winners[-1][agent_id_a].get("Accuracy", 0.5), 
-                                             "Helpfulness": batch_winners[-1][agent_id_a].get("Helpfulness", 0.5),
-                                             "Efficiency": batch_winners[-1][agent_id_a].get("Efficiency", 0.5),
-                                             "Clarity": batch_winners[-1][agent_id_a].get("Clarity", 0.5),
-                                             "Integrity": batch_winners[-1][agent_id_a].get("Integrity", 0.5)}
-
+                                                "Helpfulness": batch_winners[-1][agent_id_a].get("Helpfulness", 0.5),
+                                                "Efficiency": batch_winners[-1][agent_id_a].get("Efficiency", 0.5),
+                                                "Clarity": batch_winners[-1][agent_id_a].get("Clarity", 0.5),
+                                                "Integrity": batch_winners[-1][agent_id_a].get("Integrity", 0.5)}
+                        batch_winners[-1][agent_id_b] = {"Accuracy": batch_winners[-1][agent_id_b].get("Accuracy", 0.5),
+                                                "Helpfulness": batch_winners[-1][agent_id_b].get("Helpfulness", 0.5),
+                                                "Efficiency": batch_winners[-1][agent_id_b].get("Efficiency", 0.5),
+                                                "Clarity": batch_winners[-1][agent_id_b].get("Clarity", 0.5),
+                                                "Integrity": batch_winners[-1][agent_id_b].get("Integrity", 0.5)}
+                        
                 except Exception as e:
                     print(f"Warning: Could not parse winner from evaluation: {evaluation}, Error: {e}")
                     batch_winners.append({agent_id_a : {"Accuracy": 0.5, "Helpfulness": 0.5, "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5}, agent_id_b : {"Accuracy": 0.5, "Helpfulness": 0.5, "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5}}) # Default to draw
@@ -804,10 +806,9 @@ Integrity:
                     print(error_message)
                     responses.append(error_message) # Append error message if exception
         return responses
-    
 
 class CustomerSupportModel:
-    def __init__(self, num_users, num_agents, user_knowledge_base, agent_knowledge_base, alpha=0.1, batch_size=5, use_llm=False, model_path=None, evaluation_method="specific_ratings", rating_scale=5):
+    def __init__(self, num_users, num_agents, user_knowledge_base, agent_knowledge_base, alpha=0.1, batch_size=5, use_llm=False, model_path=None, evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None, llm_source="api"):
         self.num_users = num_users
         self.user_knowledge_base = user_knowledge_base
         self.agent_knowledge_base = agent_knowledge_base
@@ -818,43 +819,35 @@ class CustomerSupportModel:
         self.batch_size = batch_size
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
+        self.gemini_api_key = gemini_api_key  # Add Gemini API key
+        self.llm_source = llm_source # Add llm_source
 
         self.user_agent_types = [random.choice(["Novice", "Expert", "Skeptical"]) for _ in range(num_users)]
         self.service_agent_types = [random.choice(["Basic", "Profit-Maximizing", "Lazy", "Helpful", "Skeptical", "Misleading"]) for _ in range(num_agents)]
 
-        # Create agent sets
-        if self.use_llm:
-            self.user_agents = UserAgentSet(
-                user_types=self.user_agent_types,
-                patience_levels=[random.randint(1, 5) for _ in range(self.num_users)],
-                expertise_levels=[random.randint(1, 5) for _ in range(self.num_users)],
-                knowledge_base=self.user_knowledge_base,
-                model_path=self.model_path,
-                evaluation_method=self.evaluation_method,
-                rating_scale=self.rating_scale
-            )
-            self.info_agents = InfoSeekingAgentSet(
-                knowledge_base=self.agent_knowledge_base,
-                agent_types=self.service_agent_types,
-                alpha=self.alpha,
-                use_llm=True,
-                model_path=self.model_path,
-                evaluation_method=self.evaluation_method,
-                rating_scale=self.rating_scale
-            )
-        else:
-            self.user_agents = UserAgentSet(
-                user_types=self.user_agent_types,
-                patience_levels=[random.randint(1, 5) for _ in range(self.num_users)],
-                expertise_levels=[random.randint(1, 5) for _ in range(self.num_users)],
-                knowledge_base=self.agent_knowledge_base
-            )
-            self.info_agents = InfoSeekingAgentSet(
-                knowledge_base=self.agent_knowledge_base,
-                agent_types=self.service_agent_types,
-                alpha=self.alpha,
-                use_llm=False
-            )
+        # Create agent sets, passing necessary parameters
+        self.user_agents = UserAgentSet(
+            user_types=self.user_agent_types,
+            patience_levels=[random.randint(1, 5) for _ in range(self.num_users)],
+            expertise_levels=[random.randint(1, 5) for _ in range(self.num_users)],
+            knowledge_base=self.user_knowledge_base,  # Corrected knowledge base
+            model_path=self.model_path,
+            evaluation_method=self.evaluation_method,
+            rating_scale=self.rating_scale,
+            gemini_api_key=self.gemini_api_key,  # Pass API key
+            llm_source = self.llm_source
+        )
+        self.info_agents = InfoSeekingAgentSet(
+            knowledge_base=self.agent_knowledge_base,
+            agent_types=self.service_agent_types,
+            alpha=self.alpha,
+            use_llm=self.use_llm,
+            model_path=self.model_path,
+            evaluation_method=self.evaluation_method,
+            rating_scale=self.rating_scale,
+            gemini_api_key=self.gemini_api_key,  # Pass API key
+            llm_source = self.llm_source
+        )
 
     def step(self):
         if self.use_llm:
@@ -880,7 +873,7 @@ class CustomerSupportModel:
                 winners = self.user_agents.rate_response_batch(responses_a, service_agent_ids_a, queries, user_ids, responses_b, service_agent_ids_b)
 
                 # Update the trust scores of the agents based on the comparison
-                self.info_agents.update_trust_score_batch(service_agent_ids_a, winners=winners)
+                self.info_agents.update_trust_score_batch(None, winners=winners)
 
                 for query, response_a, response_b, user_id, agent_id_a, agent_id_b, winner in zip(queries, responses_a, responses_b, user_ids, service_agent_ids_a, service_agent_ids_b, winners):
                     user_type = self.user_agents.user_types[user_id]
@@ -892,10 +885,10 @@ class CustomerSupportModel:
                     print(f"Agent Id : ({agent_id_b}) Agent type : ({agent_type_b}) answers: {response_b}")
                     print(f"User ({user_id}) provides the following winner dict: {winner}")
 
-            else:
+            else: # specific_ratings
                 # Choose service agent ids for each query
                 service_agent_ids = random.sample(self.info_agents.agent_ids, k=batch_size)
-                
+
                 # Generate responses in a batch
                 responses = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids)
 
@@ -908,16 +901,15 @@ class CustomerSupportModel:
                 for query, response, user_id, agent_id, ratings in zip(queries, responses, user_ids, service_agent_ids, ratings_batch):
                     user_type = self.user_agents.user_types[user_id]
                     agent_type = self.info_agents.agent_types[agent_id]
-                    
+
                     print(f"User Id : ({user_id}) User type : ({user_type}) asks: {query}")
                     print(f"Agent Id : ({agent_id}) Agent type : ({agent_type}) answers: {response}")
                     print(f"User ({user_id}) provides the following ratings: {ratings}")
-                
-                ipdb.set_trace()
-        else:
+
+        else: # Not using LLM (dictionary-based)
             # Generate dictionary based queries
             queries = random.sample(list(self.agent_knowledge_base.keys()), k=self.num_users)
-            
+
             # Generate dictionary based responses
             responses = self.info_agents.get_dictionary_responses_batch(queries)
 
@@ -931,10 +923,9 @@ class CustomerSupportModel:
                     "Clarity": random.randint(1, self.rating_scale),
                     "Integrity": random.randint(1, self.rating_scale),
                 }
-                
-                # Update the trust scores of the agent based on the ratings
-                # Need to get agent_id from somewhere or make agent_type the agent_id for the non-LLM case
-                # self.info_agents.update_trust_score(agent_type, ratings=ratings)
+
+                # No LLM, so no actual agent ID.  Using agent_type as a placeholder.
+                # self.info_agents.update_trust_score(agent_type, ratings=ratings)  # No update in non-LLM mode
 
                 print(f"User ({user_type}) asks: {query}")
                 print(f"Agent ({agent_type}) answers: {response}")
