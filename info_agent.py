@@ -1,12 +1,15 @@
 import random
-from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from typing import List, Dict, Tuple
 import argparse
 import ipdb
+from google import genai  # Import the genai library
+from google.genai import types # Import types for configuration
+import concurrent.futures # For parallel API calls
+from transformers import AutoModelForCausalLM, AutoTokenizer # Import for local LLM
 
 class InfoSeekingAgentSet:
-    def __init__(self, knowledge_base, agent_types, alpha, rate_limit=5, use_llm=False, model_path=None, evaluation_method="specific_ratings", rating_scale=5):
+    def __init__(self, knowledge_base, agent_types, alpha, rate_limit=5, use_llm=False, model_path=None, evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None, llm_source="api"): # Add llm_source
         self.knowledge_base = knowledge_base
         self.agent_types = agent_types
         self.num_agents = len(agent_types)
@@ -32,6 +35,9 @@ class InfoSeekingAgentSet:
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
         self.K = 32
+        self.gemini_api_key = gemini_api_key # Store API key
+        self.genai_client = None # Initialize genai client
+        self.llm_source = llm_source # Store LLM source
 
         self.system_prompts = {
             "Helpful": "You are a helpful customer support agent. Provide accurate and concise answers to user queries based on the given knowledge base.",
@@ -43,60 +49,72 @@ class InfoSeekingAgentSet:
         }
 
         if self.use_llm:
-            if model_path is None:
-                raise ValueError("Model path must be specified when using LLM agents.")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left')  # Padding side is left for causal LM
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-            )
+            if self.llm_source == "api": # Gemini API setup
+                if gemini_api_key is None: # Check for API key
+                    raise ValueError("Gemini API key must be specified when using LLM agents with Gemini API.")
+                try:
+                    self.genai_client = genai.Client(api_key=gemini_api_key) # Initialize genai client here
+                except Exception as e:
+                    raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
+            elif self.llm_source == "local": # Local LLM (Llama) setup
+                if model_path is None:
+                    raise ValueError("Model path must be specified when using local LLM agents.")
+                self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left')  # Padding side is left for causal LM
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.bfloat16,
+                    device_map="auto",
+                )
 
-            # Cache knowledge base tokens once
-            kb_tokens = self.tokenizer(
-                f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
-                return_tensors="pt",
-                add_special_tokens=False
-            ).to(self.model.device)
-
-            # Cache static components and their KV cache for each agent type
-            self.static_kv_cache = {}
-            max_prompt_length = 0
-            for agent_type in set(self.agent_types):
-                prompt_text = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
-                system_tokens = self.tokenizer(
-                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                # Cache knowledge base tokens once
+                kb_tokens = self.tokenizer(
+                    f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
                     return_tensors="pt",
                     add_special_tokens=False
-                )
-                max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
-
-            for agent_type in set(self.agent_types):
-                prompt_text = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
-                system_tokens = self.tokenizer(
-                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                    return_tensors="pt",
-                    add_special_tokens=False,
-                    padding='max_length',
-                    max_length=max_prompt_length,
-                    truncation=True
                 ).to(self.model.device)
 
-                # Pre-compute and cache KV states for static content
-                with torch.no_grad():
-                    static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
-                    static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
-                    outputs = self.model(
-                        input_ids=static_inputs,
-                        attention_mask=static_mask,
-                        use_cache=True
+                # Cache static components and their KV cache for each agent type
+                self.static_kv_cache = {}
+                max_prompt_length = 0
+                for agent_type in set(self.agent_types):
+                    prompt_text = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
+                    system_tokens = self.tokenizer(
+                        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                        return_tensors="pt",
+                        add_special_tokens=False
                     )
-                    self.static_kv_cache[agent_type] = outputs.past_key_values
+                    max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
+
+                for agent_type in set(self.agent_types):
+                    prompt_text = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
+                    system_tokens = self.tokenizer(
+                        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                        return_tensors="pt",
+                        add_special_tokens=False,
+                        padding='max_length',
+                        max_length=max_prompt_length,
+                        truncation=True
+                    ).to(self.model.device)
+
+                    # Pre-compute and cache KV states for static content
+                    with torch.no_grad():
+                        static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
+                        static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
+                        outputs = self.model(
+                            input_ids=static_inputs,
+                            attention_mask=static_mask,
+                            use_cache=True
+                        )
+                        self.static_kv_cache[agent_type] = outputs.past_key_values
+            else:
+                raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
+
 
     def construct_llm_prompt(self, agent_type, query):
         system_prompt = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
-        return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+        if self.llm_source == "local":
+            return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 {system_prompt}
 
@@ -105,44 +123,74 @@ Knowledge Base:
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
 {query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-"""
+""" # Original Llama prompt
+        elif self.llm_source == "api":
+            return f"""{system_prompt}
 
-    def generate_llm_responses_batch(self, queries: List[str], service_agent_ids: List[int]) -> List[str]:
-        """
-        Generates responses for a batch of queries.
-        service_agent_ids: Specifies which agent id to use for each query.
-        """
-        agent_types_for_batch = [self.agent_types[agent_id] for agent_id in service_agent_ids]
+Knowledge Base:
+{self.knowledge_base}
 
-        query_tokens = self.tokenizer(
-            [f"<|start_header_id|>user<|end_header_id|>\n\n{query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
-            for query in queries],
+User Query:
+{query}
+
+Assistant Response:
+""" # Gemini API prompt
+        else:
+            raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
+
+
+    def _generate_gemini_content(self, prompt_text, agent_type):
+        """Helper function to generate content using Gemini API."""
+        model = self.genai_client.models.get_model("gemini-2.0-flash") # Get model instance
+        config = types.GenerateContentConfig(
+            max_output_tokens=100, # Adjusted max_output_tokens
+            temperature=0.7,
+            system_instruction=self.system_prompts.get(agent_type, self.system_prompts["Basic"]) # Apply system instruction
+        )
+        try:
+            response = model.generate_content(
+                contents=[prompt_text],
+                config=config
+            )
+            response.resolve() # Ensure response is fully resolved before accessing text
+            return response.text if response.text else "Error: Gemini API returned empty response."
+        except Exception as e:
+            error_message = f"Gemini API error: {e}"
+            print(error_message) # Print error for visibility
+            return error_message
+
+    def _generate_llama_response_batch(self, prompts: List[str], agent_types: List[str]) -> List[str]:
+        """Helper function to generate responses in batch using local Llama model."""
+        # Tokenize all prompts in batch
+        prompt_tokens_batch = self.tokenizer(
+            prompts,
             return_tensors="pt",
+            padding=True, # Pad the batch
             # padding='max_length',
-            padding=True,
             # max_length=512,
-            # truncation=True,
+            # truncation=True, # Truncate if prompts are too long
             add_special_tokens=False
         ).to(self.model.device)
 
-        past_key_values_for_batch = [self.static_kv_cache[agent_type] for agent_type in agent_types_for_batch]
+        # Get past key values - assuming same for all prompts in batch - adjust if needed based on agent_type variation
+        past_key_values_batch = [self.static_kv_cache[agent_type] for agent_type in agent_types]
 
         # Correctly format past_key_values for batch inference
-        num_layers = len(past_key_values_for_batch[0])
+        num_layers = len(past_key_values_batch[0])
         past_key_values_reformatted = tuple(
             (
-                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_for_batch], dim=0),
-                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_for_batch], dim=0)
+                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_batch], dim=0),
+                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_batch], dim=0)
             )
             for layer_idx in range(num_layers)
         )
 
-        # Generate responses
+
         with torch.no_grad():
             outputs = self.model.generate(
-                input_ids=query_tokens.input_ids,
-                attention_mask=query_tokens.attention_mask,
-                past_key_values=past_key_values_reformatted,
+                input_ids=prompt_tokens_batch.input_ids,
+                attention_mask=prompt_tokens_batch.attention_mask,
+                past_key_values=past_key_values_reformatted, # Use batched past_key_values
                 max_new_tokens=100,
                 temperature=0.7,
                 do_sample=True,
@@ -153,18 +201,47 @@ Knowledge Base:
             )
 
         responses = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-        # Extract only the assistant's response
         extracted_responses = []
-        for resp in responses:
+        for response in responses:
             try:
-                extracted = resp.split("<|start_header_id|>assistant<|end_header_id|>")[-1].split("<|eot_id|>")[0].strip()
-                extracted_responses.append(extracted)
+                extracted_response = response.split("<|start_header_id|>assistant<|end_header_id|>")[-1].split("<|eot_id|>")[0].strip()
+                extracted_responses.append(extracted_response)
             except IndexError:
-                print(f"Warning: Could not extract response from: {resp}")
+                print(f"Warning: Could not extract response from: {response}")
                 extracted_responses.append("")
-
         return extracted_responses
+
+
+    def generate_llm_responses_batch(self, queries: List[str], service_agent_ids: List[int]) -> List[str]:
+        """
+        Generates responses for a batch of queries using either Gemini API or local LLM.
+        llm_source: "api" for Gemini, "local" for Llama.
+        service_agent_ids: Specifies which agent id to use for each query.
+        """
+        agent_types_for_batch = [self.agent_types[agent_id] for agent_id in service_agent_ids]
+        prompts = [self.construct_llm_prompt(agent_types_for_batch[i], queries[i]) for i in range(len(queries))]
+        responses = []
+
+        if self.llm_source == "api": # Use Gemini API
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as executor: # Parallel API calls
+                future_to_query_index = {executor.submit(self._generate_gemini_content, prompt, agent_types_for_batch[i]): i for i, prompt in enumerate(prompts)}
+                for future in concurrent.futures.as_completed(future_to_query_index):
+                    query_index = future_to_query_index[future]
+                    try:
+                        response_text = future.result() # Get result from future
+                        responses.append(response_text)
+                    except Exception as e:
+                        error_message = f"Thread generated an exception: {e}"
+                        print(error_message)
+                        responses.append(error_message) # Append error message if exception
+
+        elif self.llm_source == "local": # Use local Llama model - Batched execution
+            responses = self._generate_llama_response_batch(prompts, agent_types_for_batch) # Batched response generation
+        else:
+            raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
+
+        return responses
+
 
     def get_dictionary_responses_batch(self, queries: List[str]) -> List[str]:
         """Generates responses for a batch of queries using the dictionary lookup."""
@@ -190,10 +267,8 @@ Knowledge Base:
             for winner_pair in winners:
               for dimension in ["Accuracy", "Helpfulness", "Efficiency", "Clarity", "Integrity"]:
                 # Elo update for comparative_binary for each dimension
-                # import ipdb
-                ipdb.set_trace()
                 agent_id_a, agent_id_b = list(winner_pair.keys())
-                
+
                 # Determine the winner for the current dimension
                 if winner_pair[agent_id_a][dimension] == 1:
                     score_a = 1
@@ -216,7 +291,7 @@ Knowledge Base:
                 self.trust_scores[agent_id_b][f"{dimension}_Elo"] = Rb + self.K * (score_b - Eb)
 
 class UserAgentSet:
-    def __init__(self, user_types, patience_levels, expertise_levels, knowledge_base, model_path=None, evaluation_method="specific_ratings", rating_scale=5):
+    def __init__(self, user_types, patience_levels, expertise_levels, knowledge_base, model_path=None, evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None, llm_source="api"): # Add llm_source
         self.user_types = user_types
         self.num_users = len(user_types)
         self.user_ids = list(range(self.num_users))
@@ -226,6 +301,9 @@ class UserAgentSet:
         self.model_path = model_path
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
+        self.gemini_api_key = gemini_api_key # Store API key
+        self.genai_client = None # Initialize genai client
+        self.llm_source = llm_source # Store LLM source
 
         self.user_system_prompts = {
             "Novice": "You are a novice user with limited knowledge. You ask simple questions about the given topics.",
@@ -234,101 +312,142 @@ class UserAgentSet:
             # Add more user types as needed
         }
 
-        if model_path:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left') # Set padding_side='left'
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                torch_dtype=torch.bfloat16,
-                device_map="auto",
-            )
+        if self.use_llm:
+            if self.llm_source == "api": # Gemini API setup
+                if gemini_api_key is None: # Check for API key
+                    raise ValueError("Gemini API key must be specified when using LLM agents with Gemini API.")
+                try:
+                    self.genai_client = genai.Client(api_key=gemini_api_key) # Initialize genai client here
+                except Exception as e:
+                    raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
+            elif self.llm_source == "local": # Local LLM (Llama) setup
+                if model_path is None:
+                    raise ValueError("Model path must be specified when using local LLM agents.")
+                self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left') # Set padding_side='left'
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.bfloat16,
+                    device_map="auto",
+                )
 
-            # Cache static components and their KV cache for each user type
-            kb_tokens = self.tokenizer(
-                f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
-                return_tensors="pt",
-                add_special_tokens=False
-            ).to(self.model.device)
-
-            self.static_kv_cache = {}
-            max_prompt_length = 0
-            for user_type in set(self.user_types):
-                prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
-                system_tokens = self.tokenizer(
-                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                # Cache static components and their KV cache for each user type
+                kb_tokens = self.tokenizer(
+                    f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
                     return_tensors="pt",
                     add_special_tokens=False
-                )
-                max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
-
-            for user_type in set(self.user_types):
-                prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
-                system_tokens = self.tokenizer(
-                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                    return_tensors="pt",
-                    add_special_tokens=False,
-                    padding='max_length',
-                    max_length=max_prompt_length,
-                    truncation=True
                 ).to(self.model.device)
 
-                with torch.no_grad():
-                    static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
-                    static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
-                    outputs = self.model(
-                        input_ids=static_inputs,
-                        attention_mask=static_mask,
-                        use_cache=True
+                self.static_kv_cache = {}
+                max_prompt_length = 0
+                for user_type in set(self.user_types):
+                    prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
+                    system_tokens = self.tokenizer(
+                        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                        return_tensors="pt",
+                        add_special_tokens=False
                     )
-                    self.static_kv_cache[user_type] = outputs.past_key_values
+                    max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
+
+                for user_type in set(self.user_types):
+                    prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
+                    system_tokens = self.tokenizer(
+                        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                        return_tensors="pt",
+                        add_special_tokens=False,
+                        padding='max_length',
+                        max_length=max_prompt_length,
+                        truncation=True
+                    ).to(self.model.device)
+
+                    with torch.no_grad():
+                        static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
+                        static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
+                        outputs = self.model(
+                            input_ids=static_inputs,
+                            attention_mask=static_mask,
+                            use_cache=True
+                        )
+                        self.static_kv_cache[user_type] = outputs.past_key_values
+            else:
+                raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
+
 
     def construct_llm_user_prompt(self, user_type):
         system_prompt = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
-        return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+        if self.llm_source == "local":
+            return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 {system_prompt}
 
 Knowledge Base:
 {self.knowledge_base}
-<|eot_id|>"""
+<|eot_id|>""" # Original Llama prompt
+        elif self.llm_source == "api":
+            return f"""{system_prompt}
 
-    def generate_queries_batch(self, user_ids: List[int]) -> List[str]:
-        """
-        Generates a batch of queries.
-        user_ids: Specifies which user id to use for each query.
-        """
+Knowledge Base:
+{self.knowledge_base}
 
-        user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
+User Question:
+""" # Gemini API prompt
+        else:
+            raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
-        prompts = [self.construct_llm_user_prompt(user_type) for user_type in user_types_for_batch]
-        prompt_tokens = self.tokenizer(
-            [f"{prompt}<|start_header_id|>user<|end_header_id|>" for prompt in prompts],
+
+    def _generate_gemini_query(self, prompt_text, user_type):
+        """Helper function to generate queries using Gemini API."""
+        model = self.genai_client.models.get_model("gemini-2.0-flash") # Get model instance
+        config = types.GenerateContentConfig(
+            max_output_tokens=50, # Adjusted max_output_tokens for queries
+            temperature=0.7,
+            system_instruction=self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.") # Apply system instruction
+        )
+        try:
+            response = model.generate_content(
+                contents=[prompt_text],
+                config=config
+            )
+            response.resolve() # Ensure response is fully resolved
+            return response.text if response.text else "Error: Gemini API returned empty query."
+        except Exception as e:
+            error_message = f"Gemini API error: {e}"
+            print(error_message)
+            return error_message
+
+    def _generate_llama_query_batch(self, prompts: List[str], user_types: List[str]) -> List[str]:
+        """Helper function to generate queries in batch using local Llama model."""
+
+        # Tokenize all prompts in batch
+        prompt_tokens_batch = self.tokenizer(
+            [f"{prompt}<|start_header_id|>user<|end_header_id|>" for prompt in prompts], # Add user header for each prompt
             return_tensors="pt",
+            padding=True, # Pad the batch
             # padding='max_length',
-            padding=True,
             # max_length=512,
-            # truncation=True,
+            # truncation=True, # Truncate if prompts are too long
             add_special_tokens=False
         ).to(self.model.device)
 
-        past_key_values_for_batch = [self.static_kv_cache[user_type] for user_type in user_types_for_batch]
+        # Get past key values - using the first user type's cache as a placeholder, adjust if needed
+        past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
 
         # Correctly format past_key_values for batch inference
-        num_layers = len(past_key_values_for_batch[0])
+        num_layers = len(past_key_values_batch[0])
         past_key_values_reformatted = tuple(
             (
-                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_for_batch], dim=0),
-                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_for_batch], dim=0)
+                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_batch], dim=0),
+                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_batch], dim=0)
             )
             for layer_idx in range(num_layers)
         )
 
-        # Generate queries
+
         with torch.no_grad():
             outputs = self.model.generate(
-                input_ids=prompt_tokens.input_ids,
-                attention_mask=prompt_tokens.attention_mask,
-                past_key_values=past_key_values_reformatted,
+                input_ids=prompt_tokens_batch.input_ids,
+                attention_mask=prompt_tokens_batch.attention_mask,
+                past_key_values=past_key_values_reformatted, # Use batched past_key_values
                 max_new_tokens=50,
                 temperature=0.7,
                 do_sample=True,
@@ -339,8 +458,6 @@ Knowledge Base:
             )
 
         queries = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-        # Extract the user's query
         extracted_queries = []
         for query in queries:
             try:
@@ -349,27 +466,158 @@ Knowledge Base:
             except IndexError:
                 print(f"Warning: Could not extract query from: {query}")
                 extracted_queries.append("")
-
         return extracted_queries
 
+
+    def generate_queries_batch(self, user_ids: List[int]) -> List[str]:
+        """
+        Generates a batch of queries using either Gemini API or local LLM.
+        llm_source: "api" for Gemini, "local" for Llama.
+        user_ids: Specifies which user id to use for each query.
+        """
+
+        user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
+        prompts = [self.construct_llm_user_prompt(user_types_for_batch[i]) for i in range(len(user_ids))]
+        queries = []
+
+        if self.llm_source == "api": # Use Gemini API
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor: # Parallel API calls
+                future_to_user_index = {executor.submit(self._generate_gemini_query, prompt, user_types_for_batch[i]): i for i, prompt in enumerate(prompts)}
+                for future in concurrent.futures.as_completed(future_to_user_index):
+                    user_index = future_to_user_index[future]
+                    try:
+                        query_text = future.result() # Get result from future
+                        queries.append(query_text)
+                    except Exception as e:
+                        error_message = f"Thread generated an exception: {e}"
+                        print(error_message)
+                        queries.append(error_message) # Append error message if exception
+
+        elif self.llm_source == "local": # Use local Llama model - Batched execution
+            queries = self._generate_llama_query_batch(prompts, user_types_for_batch) # Batched query generation
+        else:
+            raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
+
+        return queries
+
+
+    def _rate_response_batch_llama_specific_ratings(self, prompts: List[str], user_types: List[str]) -> List[str]:
+        """Helper function to rate responses in batch using local Llama model for specific ratings."""
+        # Construct Llama-style prompts for rating, if different from Gemini prompts are needed. For now reusing Gemini style.
+        llama_prompts = [f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{prompt}
+<|eot_id|>""" for prompt in prompts]
+
+        # Tokenize evaluation prompts in batch
+        prompt_tokens_batch = self.tokenizer(
+            llama_prompts,
+            return_tensors="pt",
+            padding=True,
+            # padding='max_length',
+            # max_length=512,
+            # truncation=True,
+            add_special_tokens=False
+        ).to(self.model.device)
+
+        # Get past key values for batch - using first user type's cache as placeholder, adjust if user_type is important for rating
+        # past_key_values_batch = [self.static_kv_cache[user_types[0]]] * len(prompts) # Replicate for batch size
+        past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
+
+        # Reformat past key values for batch inference
+        num_layers = len(past_key_values_batch[0])
+        past_key_values_reformatted = tuple(
+            (
+                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_batch], dim=0),
+                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_batch], dim=0)
+            )
+            for layer_idx in range(num_layers)
+        )
+
+        with torch.no_grad():
+            evaluation_outputs = self.model.generate(
+                input_ids=prompt_tokens_batch.input_ids,
+                attention_mask=prompt_tokens_batch.attention_mask,
+                past_key_values=past_key_values_reformatted,
+                max_new_tokens=100, # Adjust as needed for ratings
+                temperature=0.7,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                repetition_penalty=1.2
+            )
+        evaluations = self.tokenizer.batch_decode(evaluation_outputs, skip_special_tokens=True)
+        return evaluations
+
+
+    def _rate_response_batch_llama_comparative_binary(self, prompts: List[str], user_types: List[str]) -> List[str]:
+        """Helper function to rate responses in batch using local Llama model for comparative binary evaluation."""
+        # Construct Llama-style prompts for comparative binary evaluation if different from Gemini prompts are needed. For now reusing Gemini style.
+        # llama_prompts = prompts # Assuming prompts are already in suitable format, adjust if needed
+        llama_prompts = [f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{prompt}
+<|eot_id|>""" for prompt in prompts]
+        
+        # Tokenize evaluation prompts in batch
+        prompt_tokens_batch = self.tokenizer(
+            llama_prompts,
+            return_tensors="pt",
+            padding=True,
+            # padding='max_length',
+            # max_length=512,
+            # truncation=True,
+            add_special_tokens=False
+        ).to(self.model.device)
+
+        # Get past key values for batch - using first user type's cache as placeholder, adjust if user_type is important for rating
+        # past_key_values_batch = [self.static_kv_cache[user_types[0]]] * len(prompts) # Replicate for batch size
+        past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
+
+        # Reformat past key values for batch inference
+        num_layers = len(past_key_values_batch[0])
+        past_key_values_reformatted = tuple(
+            (
+                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_batch], dim=0),
+                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_batch], dim=0)
+            )
+            for layer_idx in range(num_layers)
+        )
+
+        with torch.no_grad():
+            evaluation_outputs = self.model.generate(
+                input_ids=prompt_tokens_batch.input_ids,
+                attention_mask=prompt_tokens_batch.attention_mask,
+                past_key_values=past_key_values_reformatted,
+                max_new_tokens=300, # Adjust as needed for comparative evaluations
+                temperature=0.7,
+                do_sample=True,
+                top_k=50,
+                top_p=0.95,
+                repetition_penalty=1.2
+            )
+        evaluations = self.tokenizer.batch_decode(evaluation_outputs, skip_special_tokens=True)
+        return evaluations
+
+
     def rate_response_batch(self, responses: List[str], agent_ids: List[int], queries: List[str], user_ids: List[int], responses_b: List[str] = None, agent_ids_b: List[int] = None) -> List[Dict]:
-        """Rates a batch of responses based on user type."""
+        """Rates a batch of responses based on user type using Gemini API or local LLM for evaluation."""
         batch_ratings = []
         batch_winners = []
 
         if self.evaluation_method == "specific_ratings":
             prompts = []
+            user_types_batch = [] # Collect user types for batch processing
             for response, query, user_id in zip(responses, queries, user_ids):
                 user_type = self.user_types[user_id]
-                prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-You are a {user_type} user evaluating a customer service interaction.
-Consider the following query you asked, the agent's response.
+                user_types_batch.append(user_type)
+                prompt = f"""You are a {user_type} user evaluating a customer service interaction.
+Consider the following query you asked, and the agent's response.
 
 Query: {query}
 Response: {response}
 
-Rate the response on the following dimensions using a scale of 1-{self.rating_scale} (1 being very poor, {self.rating_scale} being excellent):
+Rate the response on the following dimensions using a scale of 1-{self.rating_scale} (1 being very poor, {self.rating_scale} being excellent). 
 
 Accuracy: (How factually correct is the information?)
 Helpfulness: (How well does it address the query?)
@@ -383,51 +631,19 @@ Helpfulness:
 Efficiency: 
 Clarity: 
 Integrity: 
-<|eot_id|>"""
+""" # Modified prompt - simpler format for API and numerical output
                 prompts.append(prompt)
 
-            # Tokenize the evaluation prompts
-            prompt_tokens = self.tokenizer(
-                prompts,
-                return_tensors="pt",
-                # padding='max_length',
-                padding=True,
-                # max_length=512,
-                # truncation=True,
-                add_special_tokens=False
-            ).to(self.model.device)
+            if self.llm_source == "api":
+                ratings_responses = self._get_gemini_api_responses(prompts) # Helper function for API calls
+            elif self.llm_source == "local": # Use local Llama for rating - Batched execution
+                ratings_responses = self._rate_response_batch_llama_specific_ratings(prompts, user_types_batch) # Batched rating generation using local LLM
+            else:
+                raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
-            # Get the cached KV states for the user types
-            user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
-            past_key_values_for_batch = [self.static_kv_cache[user_type] for user_type in user_types_for_batch]
-
-            # Correctly format past_key_values for batch inference
-            num_layers = len(past_key_values_for_batch[0])
-            past_key_values_reformatted = tuple(
-                (
-                    torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_for_batch], dim=0),
-                    torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_for_batch], dim=0)
-                )
-                for layer_idx in range(num_layers)
-            )
-
-            # Generate the evaluations using the cached KV states
-            with torch.no_grad():
-                evaluation_outputs = self.model.generate(
-                    input_ids=prompt_tokens.input_ids,
-                    attention_mask=prompt_tokens.attention_mask,
-                    past_key_values=past_key_values_reformatted,
-                    max_new_tokens=100,
-                    temperature=0.7,
-                    do_sample=True,
-                    top_k=50,
-                    top_p=0.95,
-                    repetition_penalty=1.2
-                )
-            evaluations = self.tokenizer.batch_decode(evaluation_outputs, skip_special_tokens=True)
 
             # Extract ratings from the evaluations
-            for evaluation in evaluations:
+            for evaluation in ratings_responses:
                 try:
                     ratings = {}
                     for line in evaluation.split('\n'):
@@ -442,6 +658,14 @@ Integrity:
                         elif line.startswith("Integrity:"):
                             ratings["Integrity"] = int(line.split(":")[1].strip())
                     batch_ratings.append(ratings)
+                    if len(ratings) < 5: # Check if we got enough ratings
+                        print(f"Warning: Not enough ratings found in evaluation: {evaluation}")
+                        batch_ratings[-1] = {"Accuracy": batch_ratings[-1].get("Accuracy", 0), 
+                                             "Helpfulness": batch_ratings[-1].get("Helpfulness", 0),
+                                             "Efficiency": batch_ratings[-1].get("Efficiency", 0),
+                                             "Clarity": batch_ratings[-1].get("Clarity", 0),
+                                             "Integrity": batch_ratings[-1].get("Integrity", 0)}
+
                 except ValueError:
                     print(f"Warning: Could not parse ratings from evaluation: {evaluation}")
                     batch_ratings.append({"Accuracy": 0, "Helpfulness": 0, "Efficiency": 0, "Clarity": 0, "Integrity": 0})
@@ -450,11 +674,11 @@ Integrity:
 
         elif self.evaluation_method == "comparative_binary":
             prompts = []
-            for response_a, response_b, query, user_id in zip(responses, responses_b, queries, user_ids):
+            user_types_batch = [] # Collect user types for batch processing
+            for response_a, response_b, query, user_id in zip(responses, responses_b, queries, user_ids): # Include agent IDs in loop
                 user_type = self.user_types[user_id]
-                prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-You are a {user_type} user comparing two customer service interactions for the same query that you asked.
+                user_types_batch.append(user_type)
+                prompt = f"""You are a {user_type} user comparing two customer service interactions for the same query that you asked.
 
 Query: {query}
 
@@ -478,51 +702,19 @@ Helpfulness:
 Efficiency: 
 Clarity: 
 Integrity: 
-<|eot_id|>"""
+""" # Modified prompt - simpler format for API and numerical choices
                 prompts.append(prompt)
 
-            # Tokenize the evaluation prompts
-            prompt_tokens = self.tokenizer(
-                prompts,
-                return_tensors="pt",
-                # padding='max_length',
-                padding=True,
-                # max_length=512,
-                # truncation=True,
-                add_special_tokens=False
-            ).to(self.model.device)
+            if self.llm_source == "api":
+                evaluation_responses = self._get_gemini_api_responses(prompts) # Helper function for API calls
+            elif self.llm_source == "local": # Use local Llama for rating - Batched execution
+                evaluation_responses = self._rate_response_batch_llama_comparative_binary(prompts, user_types_batch) # Batched comparative evaluation using local LLM
+            else:
+                raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
-            # Get the cached KV states for the user types
-            user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
-            past_key_values_for_batch = [self.static_kv_cache[user_type] for user_type in user_types_for_batch]
-
-            # Correctly format past_key_values for batch inference
-            num_layers = len(past_key_values_for_batch[0])
-            past_key_values_reformatted = tuple(
-                (
-                    torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_for_batch], dim=0),
-                    torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_for_batch], dim=0)
-                )
-                for layer_idx in range(num_layers)
-            )
-
-            # Generate the evaluations using the cached KV states
-            with torch.no_grad():
-                evaluation_outputs = self.model.generate(
-                    input_ids=prompt_tokens.input_ids,
-                    attention_mask=prompt_tokens.attention_mask,
-                    past_key_values=past_key_values_reformatted,
-                    max_new_tokens=300,
-                    temperature=0.7,
-                    do_sample=True,
-                    top_k=50,
-                    top_p=0.95,
-                    repetition_penalty=1.2
-                )
-            evaluations = self.tokenizer.batch_decode(evaluation_outputs, skip_special_tokens=True)
 
             # Extract winners from the evaluations
-            for evaluation, agent_id_a, agent_id_b in zip(evaluations, agent_ids, agent_ids_b):
+            for evaluation, agent_id_a, agent_id_b in zip(evaluation_responses, agent_ids, agent_ids_b): # Use agent IDs from loop
                 try:
                     winner = {agent_id_a: {}, agent_id_b: {}}
                     lines = evaluation.split('\n')
@@ -580,14 +772,38 @@ Integrity:
                                 winner[agent_id_b]["Integrity"] = 0.5
 
                     batch_winners.append(winner)
+                    if len(ratings) < 5: # Check if we got enough ratings
+                        print(f"Warning: Not enough ratings found in evaluation: {evaluation}")
+                        batch_winners[-1][agent_id_a] = {"Accuracy": batch_winners[-1][agent_id_a].get("Accuracy", 0.5), 
+                                             "Helpfulness": batch_winners[-1][agent_id_a].get("Helpfulness", 0.5),
+                                             "Efficiency": batch_winners[-1][agent_id_a].get("Efficiency", 0.5),
+                                             "Clarity": batch_winners[-1][agent_id_a].get("Clarity", 0.5),
+                                             "Integrity": batch_winners[-1][agent_id_a].get("Integrity", 0.5)}
+
                 except Exception as e:
                     print(f"Warning: Could not parse winner from evaluation: {evaluation}, Error: {e}")
-                    batch_winners.append({agent_id_a : {"Accuracy": 0, "Helpfulness": 0, "Efficiency": 0, "Clarity": 0, "Integrity": 0}, agent_id_b : {"Accuracy": 0, "Helpfulness": 0, "Efficiency": 0, "Clarity": 0, "Integrity": 0}})
+                    batch_winners.append({agent_id_a : {"Accuracy": 0.5, "Helpfulness": 0.5, "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5}, agent_id_b : {"Accuracy": 0.5, "Helpfulness": 0.5, "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5}}) # Default to draw
 
             return batch_winners
 
         else:
             raise ValueError(f"Invalid evaluation method: {self.evaluation_method}")
+
+    def _get_gemini_api_responses(self, prompts: List[str]) -> List[str]:
+        """Helper function to make batched API calls to Gemini in parallel for evaluations."""
+        responses = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor: # Parallel API calls
+            future_to_prompt_index = {executor.submit(self._generate_gemini_content, prompt, "Basic"): i for i, prompt in enumerate(prompts)} # Using "Basic" agent type for evaluation prompts
+            for future in concurrent.futures.as_completed(future_to_prompt_index):
+                prompt_index = future_to_prompt_index[future]
+                try:
+                    response_text = future.result() # Get result from future
+                    responses.append(response_text)
+                except Exception as e:
+                    error_message = f"Thread generated an exception: {e}"
+                    print(error_message)
+                    responses.append(error_message) # Append error message if exception
+        return responses
     
 
 class CustomerSupportModel:
