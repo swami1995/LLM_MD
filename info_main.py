@@ -1,15 +1,15 @@
-# info_main.py
 from info_agent import CustomerSupportModel
 import argparse
+import os # Import os for environment variables
 
 ## main function
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Customer Support Model with optional LLM agents.")
     parser.add_argument("--use_llm", action="store_true", help="Use LLM-based agents instead of dictionary-based agents.")
-    parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3.1-70B-Instruct", help="Path to the pretrained LLM model.")
-    # parser.add_argument("--model_path", type=str, default="/data/user_data/sgurumur/models/checkpoints/Llama3.3-70B-Instruct", help="Path to the pretrained LLM model.")
+    parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3-8B-Instruct", help="Path to the pretrained LLM model. Required if --llm_source is 'local'.")
     parser.add_argument("--evaluation_method", type=str, choices=["specific_ratings", "comparative_binary"], default="specific_ratings", help="Evaluation method for LLM agents.")
     parser.add_argument("--rating_scale", type=int, choices=[5, 10], default=5, help="Rating scale for LLM agents.")
+    parser.add_argument("--llm_source", type=str, choices=["local", "api"], default="api", help="Source of LLM: 'local' (Llama) or 'api' (Gemini). Default is 'api'.") # Added llm_source argument
     args = parser.parse_args()
 
     # Define the knowledge base
@@ -34,6 +34,14 @@ if __name__ == "__main__":
     num_agents = 3
     alpha = 0.1  # Learning rate
     bsz = 10  # Batch size
+
+    # *** IMPORTANT: Replace with your actual Gemini API key ***
+    gemini_api_key = os.environ.get("GEMINI_API_KEY") # Get API key from environment variable - recommended
+    if not gemini_api_key and args.llm_source == "api": # Only require API key if using Gemini API
+        gemini_api_key = "YOUR_GEMINI_API_KEY" # Replace YOUR_GEMINI_API_KEY with your actual API key - FOR TESTING ONLY, SECURE API KEYS PROPERLY
+        print("Warning: GEMINI_API_KEY environment variable not set. Falling back to hardcoded key (for testing ONLY).")
+
+
     model = CustomerSupportModel(
         num_users,
         num_agents,
@@ -44,9 +52,11 @@ if __name__ == "__main__":
         use_llm=args.use_llm,
         model_path=args.model_path,
         evaluation_method=args.evaluation_method,
-        rating_scale=args.rating_scale
+        rating_scale=args.rating_scale,
+        gemini_api_key=gemini_api_key,
+        llm_source=args.llm_source # Pass llm_source
     )
 
 
-    for i in range(100):  # Run for 100 steps
+    for i in range(1):  # Run for 100 steps
         model.step()

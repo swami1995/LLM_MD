@@ -141,22 +141,28 @@ Assistant Response:
 
     def _generate_gemini_content(self, prompt_text, agent_type):
         """Helper function to generate content using Gemini API."""
-        model = self.genai_client.models.get_model("gemini-2.0-flash") # Get model instance
-        config = types.GenerateContentConfig(
-            max_output_tokens=100, # Adjusted max_output_tokens
-            temperature=0.7,
-            system_instruction=self.system_prompts.get(agent_type, self.system_prompts["Basic"]) # Apply system instruction
-        )
+        
         try:
-            response = model.generate_content(
-                contents=[prompt_text],
-                config=config
+            response = self.genai_client.models.generate_content(
+                model="gemini-2.0-flash",
+                config=types.GenerateContentConfig(
+                    max_output_tokens=500,
+                    temperature=0.7
+                ),
+                contents=[prompt_text]
             )
-            response.resolve() # Ensure response is fully resolved before accessing text
+
+            # Check for successful completion
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                error_message = f"Gemini API blocked the prompt: {response.prompt_feedback.block_reason}"
+                print(error_message)
+                return error_message
+
             return response.text if response.text else "Error: Gemini API returned empty response."
+
         except Exception as e:
             error_message = f"Gemini API error: {e}"
-            print(error_message) # Print error for visibility
+            print(error_message)  # Print error for visibility
             return error_message
 
     def _generate_llama_response_batch(self, prompts: List[str], agent_types: List[str]) -> List[str]:
@@ -312,65 +318,64 @@ class UserAgentSet:
             # Add more user types as needed
         }
 
-        if self.use_llm:
-            if self.llm_source == "api": # Gemini API setup
-                if gemini_api_key is None: # Check for API key
-                    raise ValueError("Gemini API key must be specified when using LLM agents with Gemini API.")
-                try:
-                    self.genai_client = genai.Client(api_key=gemini_api_key) # Initialize genai client here
-                except Exception as e:
-                    raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
-            elif self.llm_source == "local": # Local LLM (Llama) setup
-                if model_path is None:
-                    raise ValueError("Model path must be specified when using local LLM agents.")
-                self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left') # Set padding_side='left'
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    torch_dtype=torch.bfloat16,
-                    device_map="auto",
-                )
+        if self.llm_source == "api": # Gemini API setup
+            if gemini_api_key is None: # Check for API key
+                raise ValueError("Gemini API key must be specified when using LLM agents with Gemini API.")
+            try:
+                self.genai_client = genai.Client(api_key=gemini_api_key) # Initialize genai client here
+            except Exception as e:
+                raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
+        elif self.llm_source == "local": # Local LLM (Llama) setup
+            if model_path is None:
+                raise ValueError("Model path must be specified when using local LLM agents.")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left') # Set padding_side='left'
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
 
-                # Cache static components and their KV cache for each user type
-                kb_tokens = self.tokenizer(
-                    f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
+            # Cache static components and their KV cache for each user type
+            kb_tokens = self.tokenizer(
+                f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
+                return_tensors="pt",
+                add_special_tokens=False
+            ).to(self.model.device)
+
+            self.static_kv_cache = {}
+            max_prompt_length = 0
+            for user_type in set(self.user_types):
+                prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
+                system_tokens = self.tokenizer(
+                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
                     return_tensors="pt",
                     add_special_tokens=False
+                )
+                max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
+
+            for user_type in set(self.user_types):
+                prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
+                system_tokens = self.tokenizer(
+                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
+                    return_tensors="pt",
+                    add_special_tokens=False,
+                    padding='max_length',
+                    max_length=max_prompt_length,
+                    truncation=True
                 ).to(self.model.device)
 
-                self.static_kv_cache = {}
-                max_prompt_length = 0
-                for user_type in set(self.user_types):
-                    prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
-                    system_tokens = self.tokenizer(
-                        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                        return_tensors="pt",
-                        add_special_tokens=False
+                with torch.no_grad():
+                    static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
+                    static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
+                    outputs = self.model(
+                        input_ids=static_inputs,
+                        attention_mask=static_mask,
+                        use_cache=True
                     )
-                    max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
-
-                for user_type in set(self.user_types):
-                    prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
-                    system_tokens = self.tokenizer(
-                        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                        return_tensors="pt",
-                        add_special_tokens=False,
-                        padding='max_length',
-                        max_length=max_prompt_length,
-                        truncation=True
-                    ).to(self.model.device)
-
-                    with torch.no_grad():
-                        static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
-                        static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
-                        outputs = self.model(
-                            input_ids=static_inputs,
-                            attention_mask=static_mask,
-                            use_cache=True
-                        )
-                        self.static_kv_cache[user_type] = outputs.past_key_values
-            else:
-                raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
+                    self.static_kv_cache[user_type] = outputs.past_key_values
+        else:
+            raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
 
     def construct_llm_user_prompt(self, user_type):
@@ -394,25 +399,30 @@ User Question:
         else:
             raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
+    def _generate_gemini_query(self, prompt_text, agent_type):
+        """Helper function to generate content using Gemini API."""
 
-    def _generate_gemini_query(self, prompt_text, user_type):
-        """Helper function to generate queries using Gemini API."""
-        model = self.genai_client.models.get_model("gemini-2.0-flash") # Get model instance
-        config = types.GenerateContentConfig(
-            max_output_tokens=50, # Adjusted max_output_tokens for queries
-            temperature=0.7,
-            system_instruction=self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.") # Apply system instruction
-        )
         try:
-            response = model.generate_content(
-                contents=[prompt_text],
-                config=config
+            response = self.genai_client.models.generate_content(
+                model="gemini-2.0-flash",
+                config=types.GenerateContentConfig(
+                    max_output_tokens=500,
+                    temperature=0.7
+                ),
+                contents=[prompt_text]
             )
-            response.resolve() # Ensure response is fully resolved
-            return response.text if response.text else "Error: Gemini API returned empty query."
+
+            # Check for successful completion
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                error_message = f"Gemini API blocked the prompt: {response.prompt_feedback.block_reason}"
+                print(error_message)
+                return error_message
+
+            return response.text if response.text else "Error: Gemini API returned empty response."
+
         except Exception as e:
             error_message = f"Gemini API error: {e}"
-            print(error_message)
+            print(error_message)  # Print error for visibility
             return error_message
 
     def _generate_llama_query_batch(self, prompts: List[str], user_types: List[str]) -> List[str]:
@@ -795,7 +805,7 @@ Integrity:
         """Helper function to make batched API calls to Gemini in parallel for evaluations."""
         responses = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor: # Parallel API calls
-            future_to_prompt_index = {executor.submit(self._generate_gemini_content, prompt, "Basic"): i for i, prompt in enumerate(prompts)} # Using "Basic" agent type for evaluation prompts
+            future_to_prompt_index = {executor.submit(self._generate_gemini_query, prompt, "Basic"): i for i, prompt in enumerate(prompts)} # Using "Basic" agent type for evaluation prompts
             for future in concurrent.futures.as_completed(future_to_prompt_index):
                 prompt_index = future_to_prompt_index[future]
                 try:
