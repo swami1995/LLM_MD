@@ -1,741 +1,745 @@
 import random
 import os
-from google import genai  # Import the genai library
-from google.genai import types # Import types for configuration
+import re
+from google import genai
+from google.genai import types
 
+# --- Refined Constraints (Reduced Conflicts, Increased Co-occurrence) ---
+# (I've only included the *changed* parts of the dictionaries here
+#  to save space.  You'll need to integrate these changes into your
+#  full constraint dictionaries.)
 
 agent_constraints = {
     "knowledge_breadth": {
         "Limited to a few specific headphone models.": {
             "co_occurs_with": {
-                "Provides only basic, surface-level information.": 0.9,  # Increased probability
-                "Mostly accurate, with occasional minor errors or outdated information.": 0.7,  # Increased
-                "Minimize personal effort and workload.": 0.4,  # Slightly increased
-                "Reactive: Responds only to direct questions.": 0.8,  # Increased
-                "Superficial: Provides brief answers.": 0.8,  # Increased
-                "Avoids difficult questions.": 0.6,  # Added
+                "Provides only basic, surface-level information.": 0.85,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.65,
+                "Minimize personal effort and workload.": 0.35,
+                "Reactive: Responds only to direct questions.": 0.75,
+                "Superficial: Provides brief answers.": 0.75,
+                "Avoids difficult questions.": 0.55,
             },
             "conflicts_with": {
-                "Offers in-depth explanations and can answer complex technical questions.": 0.95,  # Increased
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.98,  # Increased
-                "Extensive knowledge, including competitor products and market trends.": 0.95,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.7, # Added conflict
-                "Proactive: Anticipates user needs.": 0.7, # Added conflict
+                "Offers in-depth explanations and can answer complex technical questions.": 0.8,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9,
+                "Extensive knowledge, including competitor products and market trends.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.5,
+                "Proactive: Anticipates user needs.": 0.5,
             }
         },
         "Covers a specific category of headphones (e.g., noise-canceling, wireless).": {
-            "co_occurs_with": {
-                "Provides detailed information, including technical specifications.": 0.8,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.7,  # Increased
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7,  # Increased
-                "Favors specific brands/products.": 0.4, # Added - could favor within category
-
+           "co_occurs_with": {
+                "Provides detailed information, including technical specifications.": 0.75,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.65,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                "Favors specific brands/products.": 0.35,  # Within the category
             },
-            "conflicts_with":{ # Added conflicts
-                "Provides only basic, surface-level information.":0.8,
-                "Superficial: Provides brief answers.":0.7,
-                "Minimize personal effort and workload.":0.6
+            "conflicts_with":{
+                "Provides only basic, surface-level information.": 0.65,
+                "Superficial: Provides brief answers.": 0.55,
+                "Minimize personal effort and workload.": 0.45
             }
         },
         "Broad knowledge of all headphone models and related accessories.": {
             "co_occurs_with": {
-                "Provides detailed information, including technical specifications.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.8,  # Increased
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8, # Increased
-                "Maximize sales of headphones and accessories.": 0.7,  # Increased
-                "Subtly steers towards sales.": 0.6,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.6, # Added
-
+                "Provides detailed information, including technical specifications.": 0.85,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.75,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Maximize sales of headphones and accessories.": 0.65,
+                "Subtly steers towards sales.": 0.55,
+                "Thorough: Provides comprehensive answers.": 0.55,
             },
             "conflicts_with": {
-                "Provides only basic, surface-level information.": 0.95,  # Increased
-                "Limited to a few specific headphone models.": 0.95,  # Increased
-                "Superficial: Provides brief answers.": 0.8 # Added
+                "Provides only basic, surface-level information.": 0.85,
+                "Limited to a few specific headphone models.": 0.9,
+                "Superficial: Provides brief answers.": 0.65
             }
         },
         "Extensive knowledge, including competitor products and market trends.": {
             "co_occurs_with": {
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.95,  # Increased
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.9,  # Increased
-                "Proactive: Anticipates user needs.": 0.8,  # Increased
-                "Formal, professional, and courteous.": 0.7, # Increased
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.85,
+                "Proactive: Anticipates user needs.": 0.75,
+                "Formal, professional, and courteous.": 0.65,
             },
             "conflicts_with": {
-                "Provides only basic, surface-level information.": 0.98,  # Increased
-                "Mostly accurate, with occasional minor errors or outdated information.": 0.9, # Increased
-                "Contains significant inaccuracies or outdated information.": 0.95,  # Increased
-                "Limited to a few specific headphone models.": 0.98,  # Increased
-                "Covers a specific category of headphones (e.g., noise-canceling, wireless).": 0.9, # Increased
-                "Superficial: Provides brief answers.": 0.9, # Added
-                "Minimize personal effort and workload.": 0.8, # Added
-                "Reactive: Responds only to direct questions.": 0.7 # Added
+                "Provides only basic, surface-level information.": 0.9,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.75,
+                "Contains significant inaccuracies or outdated information.": 0.85,
+                "Limited to a few specific headphone models.": 0.9,
+                "Covers a specific category of headphones (e.g., noise-canceling, wireless).": 0.75,
+                "Superficial: Provides brief answers.": 0.75,
+                "Minimize personal effort and workload.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55
             }
         },
     },
     "knowledge_depth": {
         "Provides only basic, surface-level information.": {
             "co_occurs_with": {
-                "Limited to a few specific headphone models.": 0.9,  # Increased
-                "Mostly accurate, with occasional minor errors or outdated information.": 0.7,  # Increased
-                "Minimize personal effort and workload.": 0.8,  # Increased
-                "Reactive: Responds only to direct questions.": 0.8,  # Increased
-                "Superficial: Provides brief answers.": 0.95,  # Increased
-                "Avoids difficult questions.": 0.7, # Added
+                "Limited to a few specific headphone models.": 0.85,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.65,
+                "Minimize personal effort and workload.": 0.75,
+                "Reactive: Responds only to direct questions.": 0.75,
+                "Superficial: Provides brief answers.": 0.9,
+                "Avoids difficult questions.": 0.65,
             },
             "conflicts_with": {
-                "Offers in-depth explanations and can answer complex technical questions.": 0.98,  # Increased
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.99,  # Increased
-                "Provides detailed information, including technical specifications.": 0.95,  # Increased
-                "Extensive knowledge, including competitor products and market trends.": 0.98, # Increased
-                "Thorough: Provides comprehensive answers.": 0.9, # Increased
-                "Proactive: Anticipates user needs.": 0.8, # Added
-                "Asks clarifying questions.": 0.7, # Added
+                "Offers in-depth explanations and can answer complex technical questions.": 0.9,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.95,
+                "Provides detailed information, including technical specifications.": 0.85,
+                "Extensive knowledge, including competitor products and market trends.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.8,
+                "Proactive: Anticipates user needs.": 0.7,
+                "Asks clarifying questions.": 0.5,
             }
         },
         "Provides detailed information, including technical specifications.": {
             "co_occurs_with": {
-                "Broad knowledge of all headphone models and related accessories.": 0.8,  # Increased
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7,
-                "Thorough: Provides comprehensive answers.": 0.8,  # Increased
-                "Asks clarifying questions.": 0.6, # Added
+                "Broad knowledge of all headphone models and related accessories.": 0.75,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Asks clarifying questions.": 0.55,
 
             },
-            "conflicts_with":{ #Added conflicts
-                "Superficial: Provides brief answers.": 0.8,
-                "Minimize personal effort and workload.":0.7,
-                "Reactive: Responds only to direct questions.":0.6
+            "conflicts_with":{
+                "Superficial: Provides brief answers.": 0.7,
+                "Minimize personal effort and workload.":0.55,
+                "Reactive: Responds only to direct questions.":0.45
 
             }
         },
         "Offers in-depth explanations and can answer complex technical questions.": {
-            "co_occurs_with": {
-                "Extensive knowledge, including competitor products and market trends.": 0.8,  # Increased
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.95,  # Increased
-                "Proactive: Anticipates user needs.": 0.7,  # Increased
-                "Asks clarifying questions.": 0.8, # Added
-                "Technical and precise, using specialized terminology.":0.7 # Added
+           "co_occurs_with": {
+                "Extensive knowledge, including competitor products and market trends.": 0.75,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.9,
+                "Proactive: Anticipates user needs.": 0.65,
+                "Asks clarifying questions.": 0.75,
+                "Technical and precise, using specialized terminology.":0.65
             },
             "conflicts_with": {
-                "Provides only basic, surface-level information.": 0.98,  # Increased
-                "Mostly accurate, with occasional minor errors or outdated information.": 0.9, # Increased
-                "Contains significant inaccuracies or outdated information.": 0.95,  # Increased
-                "Superficial: Provides brief answers.": 0.9, # Added
-                "Minimize personal effort and workload.": 0.8 # Added
+                "Provides only basic, surface-level information.": 0.9,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.75,
+                "Contains significant inaccuracies or outdated information.": 0.85,
+                "Superficial: Provides brief answers.": 0.75,
+                "Minimize personal effort and workload.": 0.65
             }
         },
         "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": {
             "co_occurs_with": {
-                "Extensive knowledge, including competitor products and market trends.": 0.95,  # Increased
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.95, # Increased
-                "Thorough: Provides comprehensive answers.": 0.98,  # Increased
-                "Proactive: Anticipates user needs.": 0.9,  # Increased
-                "Formal, professional, and courteous.": 0.8,  # Increased
-                "Technical and precise, using specialized terminology.": 0.8,  # Increased
-                "Asks clarifying questions.": 0.8, # Added
+                "Extensive knowledge, including competitor products and market trends.": 0.9,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.9,
+                "Proactive: Anticipates user needs.": 0.8,
+                "Formal, professional, and courteous.": 0.7,
+                "Technical and precise, using specialized terminology.": 0.7,
+                "Asks clarifying questions.": 0.7,
             },
             "conflicts_with": {
-                "Provides only basic, surface-level information.": 0.99,  # Increased
-                "Superficial: Provides brief answers.": 0.95,  # Increased
-                "Contains significant inaccuracies or outdated information.": 0.98,  # Increased
-                "Minimize personal effort and workload.": 0.95, # Increased
-                "Reactive: Responds only to direct questions.": 0.8, # Added
-                "Avoids difficult questions.": 0.8, # Added
+                "Provides only basic, surface-level information.": 0.95,
+                "Superficial: Provides brief answers.": 0.85,
+                "Contains significant inaccuracies or outdated information.": 0.9,
+                "Minimize personal effort and workload.": 0.85,
+                "Reactive: Responds only to direct questions.": 0.65,
+                "Avoids difficult questions.": 0.65,
 
             }
         },
     },
-    "knowledge_accuracy": {
+     "knowledge_accuracy": {
         "Consistently accurate and up-to-date.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.95,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.8,  # Increased
-                "Proactive: Anticipates user needs.": 0.7,  # Increased
-                "Adapts to user needs.": 0.7,  # Increased
-                "Asks clarifying questions.": 0.7,  # Increased
-                "Formal, professional, and courteous.":0.6 # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Proactive: Anticipates user needs.": 0.65,
+                "Adapts to user needs.": 0.65,
+                "Asks clarifying questions.": 0.65,
+                "Formal, professional, and courteous.":0.55
 
             },
             "conflicts_with": {
-                "Minimize personal effort and workload.": 0.9,  # Increased
-                "Provides misleading information.": 0.98,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.95,  # Increased
-                "Contains significant inaccuracies or outdated information.": 0.98,  # Increased
-                "Superficial: Provides brief answers.": 0.8, # Added
-                "Reactive: Responds only to direct questions.":0.7 # Added
+                "Minimize personal effort and workload.": 0.75,
+                "Provides misleading information.": 0.9,
+                "Exaggerates benefits, downplays limitations.": 0.85,
+                "Contains significant inaccuracies or outdated information.": 0.95,
+                "Superficial: Provides brief answers.": 0.7,
+                "Reactive: Responds only to direct questions.":0.55
             }
         },
         "Mostly accurate, with occasional minor errors or outdated information.": {
             "co_occurs_with": {
-                "Minimize personal effort and workload.": 0.6,  # Increased
-                "Superficial: Provides brief answers.": 0.7,  # Increased
-                "Reactive: Responds only to direct questions.": 0.7,  # Increased
-                "Avoids difficult questions.": 0.6, # Added
+                "Minimize personal effort and workload.": 0.55,
+                "Superficial: Provides brief answers.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.65,
+                "Avoids difficult questions.": 0.55,
 
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7,  # Increased conflict
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9, # Increased
-                "Thorough: Provides comprehensive answers.": 0.8,  # Increased
-                "Proactive: Anticipates user needs.": 0.7,  # Increased
-                "Provides misleading information.": 0.8,  # Increased
-                "Formal, professional, and courteous.":0.6, # Added conflict
-                "Asks clarifying questions.":0.6 # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.55,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Proactive: Anticipates user needs.": 0.55,
+                "Provides misleading information.": 0.65,
+                "Formal, professional, and courteous.":0.45,
+                "Asks clarifying questions.":0.45
 
             }
 
         },
         "Contains significant inaccuracies or outdated information.": {
-            "co_occurs_with": {
-                "Minimize personal effort and workload.": 0.8,  # Increased
-                "Superficial: Provides brief answers.": 0.9,  # Increased
-                "Reactive: Responds only to direct questions.": 0.8,  # Increased
-                "Avoids difficult questions.": 0.8,  # Increased
-                "Deflects responsibility.": 0.7,  # Increased
-                "Provides misleading information.": 0.6, # Added
+           "co_occurs_with": {
+                "Minimize personal effort and workload.": 0.7,
+                "Superficial: Provides brief answers.": 0.8,
+                "Reactive: Responds only to direct questions.": 0.7,
+                "Avoids difficult questions.": 0.7,
+                "Deflects responsibility.": 0.6,
+                "Provides misleading information.": 0.5,
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.95,  # Increased
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.98,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.95,  # Increased
-                "Proactive: Anticipates user needs.": 0.9,  # Increased
-                "Adapts to user needs.": 0.9,  # Increased
-                "Asks clarifying questions.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.95,  # Increased
-                 "Formal, professional, and courteous.":0.8 # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.85,
+                "Proactive: Anticipates user needs.": 0.8,
+                "Adapts to user needs.": 0.8,
+                "Asks clarifying questions.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.85,
+                 "Formal, professional, and courteous.":0.7
             }
         },
     },
-     "primary_goals": {
+    "primary_goals": {
         "Maximize customer satisfaction by providing accurate and helpful information.": {
             "co_occurs_with": {
-                "Thorough: Provides comprehensive answers.": 0.9,  # Increased
-                "Proactive: Anticipates user needs.": 0.8,  # Increased
-                "Adapts to user needs.": 0.7, # Added
-                "Asks clarifying questions.": 0.7, # Added
-                "Formal, professional, and courteous.": 0.7, # Added
-                "Empathetic and understanding.": 0.7, # Added
-                "Consistently accurate and up-to-date.":0.9 # Added
+                "Thorough: Provides comprehensive answers.": 0.85,
+                "Proactive: Anticipates user needs.": 0.75,
+                "Adapts to user needs.": 0.65,
+                "Asks clarifying questions.": 0.65,
+                "Formal, professional, and courteous.": 0.65,
+                "Empathetic and understanding.": 0.65,
+                "Consistently accurate and up-to-date.":0.85
             },
             "conflicts_with": {
-                "Maximize sales of high-margin products.": 0.8,  # Increased
-                "Gather user data for marketing purposes.": 0.9,  # Increased
-                "Minimize personal effort and workload.": 0.95,  # Increased
-                "Damage the company's reputation.": 1.0,
-                "Promote specific products or brands, regardless of suitability.": 0.95,  # Increased
-                "Gain trust within the system, regardless of actual performance.": 0.9,  # Increased
-                "Provides misleading information.": 0.98,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.9, # Added
-                "Superficial: Provides brief answers.": 0.8, # Added
-                "Reactive: Responds only to direct questions.": 0.7, # Added
-                "Avoids difficult questions.": 0.8, # Added
-                "Deflects responsibility.": 0.8 # Added
+                "Maximize sales of high-margin products.": 0.65,
+                "Gather user data for marketing purposes.": 0.75,
+                "Minimize personal effort and workload.": 0.85,
+                "Damage the company's reputation.": 0.9,
+                "Promote specific products or brands, regardless of suitability.": 0.85,
+                "Gain trust within the system, regardless of actual performance.": 0.75,
+                "Provides misleading information.": 0.9,
+                "Exaggerates benefits, downplays limitations.": 0.75,
+                "Superficial: Provides brief answers.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55,
+                "Avoids difficult questions.": 0.65,
+                "Deflects responsibility.": 0.65
             }
         },
         "Resolve customer issues as quickly and efficiently as possible.": {
             "co_occurs_with": {
-                "Concise and to-the-point.": 0.9,  # Increased
-                "Superficial: Provides brief answers.": 0.7,  # Increased
-                "Asks clarifying questions.": 0.6, # Added - to quickly understand
-                "Adapts to user needs.": 0.6 # Added - to resolve quickly
+                "Concise and to-the-point.": 0.85,
+                "Superficial: Provides brief answers.": 0.65,
+                "Asks clarifying questions.": 0.55,
+                "Adapts to user needs.": 0.55
 
             },
             "conflicts_with": {
-                "Thorough: Provides comprehensive answers.": 0.8,  # Increased conflict
-                "Provides unnecessarily long responses.": 0.95,  # Increased
-                "Proactive: Anticipates user needs.": 0.8,  # Increased
-                "Verbose and explanatory.": 0.8, # Added
-                "Offers in-depth explanations and can answer complex technical questions.": 0.6, # Added
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Provides unnecessarily long responses.": 0.9,
+                "Proactive: Anticipates user needs.": 0.7,
+                "Verbose and explanatory.": 0.7,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.45,
             }
         },
         "Maximize sales of headphones and accessories.": {
             "co_occurs_with": {
-                "Subtly steers towards sales.": 0.9,  # Increased
-                "Persuasive and assertive.": 0.8,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.6, # Added
-                "Favors specific brands/products.": 0.6, # Added
-                "Informal, friendly, and approachable.":0.6 # Added
+                "Subtly steers towards sales.": 0.85,
+                "Persuasive and assertive.": 0.75,
+                "Exaggerates benefits, downplays limitations.": 0.55,
+                "Favors specific brands/products.": 0.55,
+                "Informal, friendly, and approachable.":0.55
 
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,  # Increased
-                 "Provides misleading information.":0.6,
-                 "Concise and to-the-point.":0.7
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                 "Provides misleading information.":0.5,
+                 "Concise and to-the-point.":0.55
             }
         },
         "Maximize sales of high-margin products.": {
             "co_occurs_with": {
-                "Subtly steers towards sales.": 0.95,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.9,  # Increased
-                "Favors specific brands/products.": 0.9,  # Increased
-                "Persuasive and assertive.": 0.9,  # Increased
-                "Informal, friendly, and approachable.":0.7
+                "Subtly steers towards sales.": 0.85,
+                "Exaggerates benefits, downplays limitations.": 0.8,
+                "Favors specific brands/products.": 0.8,
+                "Persuasive and assertive.": 0.8,
+                "Informal, friendly, and approachable.":0.6
 
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,  # Increased
-                "Provides misleading information.": 0.7, # Less of a conflict, as it's subtle
-                "Concise and to-the-point.":0.7
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7,
+                "Provides misleading information.": 0.55,
+                "Concise and to-the-point.":0.55
 
             }
         },
         "Gather user data for marketing purposes.": {
-            "co_occurs_with": {
-                "Probes for sensitive information.": 0.95,  # Increased
-                "Verbose and explanatory.": 0.7,  # Increased
-                "Provides unnecessarily long responses.": 0.8, # Added
-                "Asks clarifying questions.": 0.6, # Added - under the guise of helping
+           "co_occurs_with": {
+                "Probes for sensitive information.": 0.85,
+                "Verbose and explanatory.": 0.55,
+                "Provides unnecessarily long responses.": 0.65,
+                "Asks clarifying questions.": 0.45,
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,  # Increased
-                "Concise and to-the-point.":0.8,
-                "Resolve customer issues as quickly and efficiently as possible.":0.8
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Concise and to-the-point.":0.65,
+                "Resolve customer issues as quickly and efficiently as possible.":0.65
             }
         },
         "Minimize personal effort and workload.": {
             "co_occurs_with": {
-                "Reactive: Responds only to direct questions.": 0.95,  # Increased
-                "Superficial: Provides brief answers.": 0.95,  # Increased
-                "Avoids difficult questions.": 0.9,  # Increased
-                "Deflects responsibility.": 0.9,  # Increased
-                "Concise and to-the-point.": 0.8,  # Increased
-                "Mostly accurate, with occasional minor errors or outdated information.": 0.7, # Added
+                "Reactive: Responds only to direct questions.": 0.85,
+                "Superficial: Provides brief answers.": 0.9,
+                "Avoids difficult questions.": 0.8,
+                "Deflects responsibility.": 0.8,
+                "Concise and to-the-point.": 0.7,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.55,
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.98,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.95,  # Increased
-                "Proactive: Anticipates user needs.": 0.95,  # Increased
-                "Adapts to user needs.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.8, # Added
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.8, # Added
-                "Asks clarifying questions.": 0.8 # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.85,
+                "Proactive: Anticipates user needs.": 0.85,
+                "Adapts to user needs.": 0.75,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.65,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.65,
+                "Asks clarifying questions.": 0.65
 
             }
         },
         "Damage the company's reputation.": {
             "co_occurs_with": {
-                "Provides misleading information.": 0.95,  # Increased
-                "Sarcastic and rude": 0.9,  # Increased
-                "Dismissive": 0.9, # Increased
-                "Avoids difficult questions.": 0.7, # Added
-                "Deflects responsibility.": 0.7, # Added
-                "Contains significant inaccuracies or outdated information.": 0.7, # Added
+                "Provides misleading information.": 0.85,
+                "Sarcastic and rude": 0.8,
+                "Dismissive": 0.8,
+                "Avoids difficult questions.": 0.6,
+                "Deflects responsibility.": 0.6,
+                "Contains significant inaccuracies or outdated information.": 0.6,
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 1.0,
-                "Formal, professional, and courteous.":0.9,
-                "Empathetic and understanding.":0.9,
-                "Thorough: Provides comprehensive answers.":0.9
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,
+                "Formal, professional, and courteous.":0.8,
+                "Empathetic and understanding.":0.8,
+                "Thorough: Provides comprehensive answers.":0.8
             }
         },
         "Promote specific products or brands, regardless of suitability.": {
             "co_occurs_with": {
-                "Provides misleading information.": 0.9,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.95,  # Increased
-                "Favors specific brands/products.": 0.95,  # Increased
-                "Persuasive and assertive.": 0.9,  # Increased
-                "Subtly steers towards sales.": 0.8, # Added - could be a tactic
+                "Provides misleading information.": 0.75,
+                "Exaggerates benefits, downplays limitations.": 0.85,
+                "Favors specific brands/products.": 0.9,
+                "Persuasive and assertive.": 0.8,
+                "Subtly steers towards sales.": 0.7,
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.95,  # Increased
-                "Consistently accurate and up-to-date.": 0.8, # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Consistently accurate and up-to-date.": 0.65,
             }
         },
-        "Gain trust within the system, regardless of actual performance.": {
+         "Gain trust within the system, regardless of actual performance.": {
             "co_occurs_with": {
-                "Confabulates": 0.8, # Increased
-                "Provides misleading information.":0.6 # Added
+                "Confabulates": 0.7,
+                "Provides misleading information.":0.45
             },
             "conflicts_with":{
-                "Minimize personal effort and workload.":0.8
+                "Minimize personal effort and workload.":0.65
             }
         },
+
     },
     "communication_style": {
         "Formal, professional, and courteous.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.7,  # Increased
-                "Consistently accurate and up-to-date.": 0.7, # Added
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.7, # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Consistently accurate and up-to-date.": 0.6,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.6,
             },
             "conflicts_with":{
-                "Informal, friendly, and approachable.":0.8,
-                "Sarcastic and rude":0.95,
-                "Dismissive":0.9
+                "Informal, friendly, and approachable.":0.65,
+                "Sarcastic and rude":0.85,
+                "Dismissive":0.8
             }
         },
         "Informal, friendly, and approachable.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7, # Increased
-                "Maximize sales of headphones and accessories.": 0.6,  # Increased
-                "Maximize sales of high-margin products.": 0.6, # Added
-                "Subtly steers towards sales.": 0.4, # Added - possible tactic
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                "Maximize sales of headphones and accessories.": 0.55,
+                "Maximize sales of high-margin products.": 0.55,
+                "Subtly steers towards sales.": 0.35,
             },
              "conflicts_with":{
-                "Formal, professional, and courteous.":0.8,
-                "Technical and precise, using specialized terminology.":0.7
+                "Formal, professional, and courteous.":0.65,
+                "Technical and precise, using specialized terminology.":0.55
             }
         },
         "Technical and precise, using specialized terminology.": {
             "co_occurs_with": {
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.8,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.7,  # Increased
-                "Asks clarifying questions.": 0.6, # Added
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Asks clarifying questions.": 0.55,
 
             },
             "conflicts_with": {
-                "Simple and clear, avoiding technical jargon.": 0.98,  # Increased
-                "Superficial: Provides brief answers.": 0.8,  # Increased
-                "Informal, friendly, and approachable.":0.7 # Added
+                "Simple and clear, avoiding technical jargon.": 0.9,
+                "Superficial: Provides brief answers.": 0.7,
+                "Informal, friendly, and approachable.":0.5
             }
         },
         "Simple and clear, avoiding technical jargon.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,  # Increased
-                "Broad knowledge of all headphone models and related accessories.": 0.7,  # Increased
-                "Adapts to user needs.": 0.6, # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Broad knowledge of all headphone models and related accessories.": 0.65,
+                "Adapts to user needs.": 0.55,
             },
             "conflicts_with": {
-                "Technical and precise, using specialized terminology.": 0.98,  # Increased
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.8, # Added
-                "Offers in-depth explanations and can answer complex technical questions.": 0.7, # Added
+                "Technical and precise, using specialized terminology.": 0.9,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.7,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.55,
             }
         },
         "Empathetic and understanding.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,  # Increased
-                "Adapts to user needs.": 0.8,  # Increased
-                "Asks clarifying questions.": 0.7,  # Increased
-                "Proactive: Anticipates user needs.": 0.6, # Added
-                "Formal, professional, and courteous.": 0.6, # Added - can be both
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Adapts to user needs.": 0.75,
+                "Asks clarifying questions.": 0.65,
+                "Proactive: Anticipates user needs.": 0.55,
+                "Formal, professional, and courteous.": 0.55,
 
             }
         },
         "Persuasive and assertive.": {
             "co_occurs_with": {
-                "Maximize sales of headphones and accessories.": 0.9,  # Increased
-                "Maximize sales of high-margin products.": 0.9,  # Increased
-                "Subtly steers towards sales.": 0.9,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.8,  # Increased
-                "Favors specific brands/products.": 0.7, # Added
+                "Maximize sales of headphones and accessories.": 0.75,
+                "Maximize sales of high-margin products.": 0.75,
+                "Subtly steers towards sales.": 0.8,
+                "Exaggerates benefits, downplays limitations.": 0.7,
+                "Favors specific brands/products.": 0.6,
             },
             "conflicts_with": {
-                "Empathetic and understanding.":0.6, # Slight conflict
-                "Concise and to-the-point.":0.6
+                "Empathetic and understanding.":0.45,
+                "Concise and to-the-point.":0.45
             }
         },
         "Concise and to-the-point.": {
             "co_occurs_with": {
-                "Resolve customer issues as quickly and efficiently as possible.": 0.9,  # Increased
-                "Minimize personal effort and workload.": 0.7,  # Increased
-                "Superficial: Provides brief answers.": 0.8, # Increased
-                "Reactive: Responds only to direct questions.": 0.6, # Added
+                "Resolve customer issues as quickly and efficiently as possible.": 0.8,
+                "Minimize personal effort and workload.": 0.6,
+                "Superficial: Provides brief answers.": 0.7,
+                "Reactive: Responds only to direct questions.": 0.5,
 
             },
             "conflicts_with": {
-                "Verbose and explanatory.": 0.95,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.8,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.6, # Added
-                "Proactive: Anticipates user needs.": 0.6, # Added
-                "Provides unnecessarily long responses.":0.8
+                "Verbose and explanatory.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.45,
+                "Proactive: Anticipates user needs.": 0.45,
+                "Provides unnecessarily long responses.":0.65
 
             }
         },
         "Verbose and explanatory.": {
             "co_occurs_with": {
-                "Thorough: Provides comprehensive answers.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.8,  # Increased
-                "Proactive: Anticipates user needs.": 0.7,  # Increased
-                "Provides unnecessarily long responses.": 0.6, # Added - could be a tactic
-                 "Asks clarifying questions.": 0.6, # Added
+                "Thorough: Provides comprehensive answers.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.7,
+                "Proactive: Anticipates user needs.": 0.6,
+                "Provides unnecessarily long responses.": 0.5,
+                 "Asks clarifying questions.": 0.5,
 
             },
             "conflicts_with": {
-                "Concise and to-the-point.": 0.95,  # Increased
-                "Superficial: Provides brief answers.": 0.8, # Added
-                "Resolve customer issues as quickly and efficiently as possible.":0.7
+                "Concise and to-the-point.": 0.85,
+                "Superficial: Provides brief answers.": 0.65,
+                "Resolve customer issues as quickly and efficiently as possible.":0.55
 
             }
         },
         "Sarcastic and rude": {
             "co_occurs_with": {
-                "Damage the company's reputation.": 0.9,  # Increased
-                "Dismissive": 0.9,  # Increased
-                "Avoids difficult questions.": 0.7, # Added
-                "Deflects responsibility.": 0.7, # Added
+                "Damage the company's reputation.": 0.8,
+                "Dismissive": 0.8,
+                "Avoids difficult questions.": 0.6,
+                "Deflects responsibility.": 0.6,
 
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.98,  # Increased
-                "Formal, professional, and courteous.":0.95,
-                "Empathetic and understanding.":0.95,
-                 "Informal, friendly, and approachable.":0.8
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Formal, professional, and courteous.":0.8,
+                "Empathetic and understanding.":0.8,
+                 "Informal, friendly, and approachable.":0.7
             }
 
         },
         "Dismissive": {
             "co_occurs_with": {
-                "Minimize personal effort and workload.": 0.8,  # Increased
-                "Avoids difficult questions.": 0.7, # Added
-                "Deflects responsibility.": 0.7, # Added
-                "Reactive: Responds only to direct questions.": 0.6, # Added
-                "Superficial: Provides brief answers.": 0.6, # Added
+                "Minimize personal effort and workload.": 0.7,
+                "Avoids difficult questions.": 0.6,
+                "Deflects responsibility.": 0.6,
+                "Reactive: Responds only to direct questions.": 0.5,
+                "Superficial: Provides brief answers.": 0.5,
 
             },
             "conflicts_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.98,  # Increased
-                 "Formal, professional, and courteous.":0.9,
-                "Empathetic and understanding.":0.9,
-                 "Informal, friendly, and approachable.":0.8,
-                 "Proactive: Anticipates user needs.":0.8
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                 "Formal, professional, and courteous.":0.7,
+                "Empathetic and understanding.":0.7,
+                 "Informal, friendly, and approachable.":0.6,
+                 "Proactive: Anticipates user needs.":0.6
             }
         }
     },
     "behavioral_tendencies": {
         "Proactive: Anticipates user needs.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.8,  # Increased
-                "Adapts to user needs.": 0.8,  # Increased
-                "Asks clarifying questions.": 0.8,  # Increased
-                "Verbose and explanatory.": 0.6, # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Thorough: Provides comprehensive answers.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.7,
+                "Adapts to user needs.": 0.7,
+                "Asks clarifying questions.": 0.7,
+                "Verbose and explanatory.": 0.5,
             },
             "conflicts_with": {
-                "Reactive: Responds only to direct questions.": 0.95,  # Increased
-                "Minimize personal effort and workload.": 0.9, # Increased
-                "Superficial: Provides brief answers.": 0.8, # Added
-                "Avoids difficult questions.": 0.8, # Added
-                "Deflects responsibility.": 0.8, # Added
-                 "Concise and to-the-point.":0.7
+                "Reactive: Responds only to direct questions.": 0.85,
+                "Minimize personal effort and workload.": 0.75,
+                "Superficial: Provides brief answers.": 0.7,
+                "Avoids difficult questions.": 0.7,
+                "Deflects responsibility.": 0.7,
+                 "Concise and to-the-point.":0.55
             }
         },
         "Reactive: Responds only to direct questions.": {
             "co_occurs_with": {
-                "Minimize personal effort and workload.": 0.9,  # Increased
-                "Superficial: Provides brief answers.": 0.9,  # Increased
-                "Avoids difficult questions.": 0.8,  # Increased
-                "Deflects responsibility.": 0.8,  # Increased
-                "Concise and to-the-point.": 0.7, # Added
+                "Minimize personal effort and workload.": 0.8,
+                "Superficial: Provides brief answers.": 0.8,
+                "Avoids difficult questions.": 0.7,
+                "Deflects responsibility.": 0.7,
+                "Concise and to-the-point.": 0.6,
             },
             "conflicts_with": {
-                "Proactive: Anticipates user needs.": 0.95,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.9, # Increased
-                "Adapts to user needs.": 0.8, # Increased
-                "Asks clarifying questions.": 0.8, # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.7 # Added
+                "Proactive: Anticipates user needs.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Adapts to user needs.": 0.65,
+                "Asks clarifying questions.": 0.65,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.55
             }
         },
         "Thorough: Provides comprehensive answers.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.9,  # Increased
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.8,  # Increased
-                "Proactive: Anticipates user needs.": 0.8,  # Increased
-                "Adapts to user needs.": 0.7,  # Increased
-                "Asks clarifying questions.": 0.7, # Added
-                "Verbose and explanatory.":0.7
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.8,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.7,
+                "Proactive: Anticipates user needs.": 0.7,
+                "Adapts to user needs.": 0.6,
+                "Asks clarifying questions.": 0.6,
+                "Verbose and explanatory.":0.6
             },
             "conflicts_with": {
-                "Superficial: Provides brief answers.": 0.95,  # Increased
-                "Minimize personal effort and workload.": 0.9,  # Increased
-                "Resolve customer issues as quickly and efficiently as possible.": 0.8,  # Increased
-                "Reactive: Responds only to direct questions.": 0.7, # Added
-                "Avoids difficult questions.": 0.7, # Added
-                "Deflects responsibility.": 0.7, # Added
-                "Concise and to-the-point.":0.8
+                "Superficial: Provides brief answers.": 0.85,
+                "Minimize personal effort and workload.": 0.75,
+                "Resolve customer issues as quickly and efficiently as possible.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55,
+                "Avoids difficult questions.": 0.55,
+                "Deflects responsibility.": 0.55,
+                "Concise and to-the-point.":0.65
             }
         },
         "Superficial: Provides brief answers.": {
             "co_occurs_with": {
-                "Minimize personal effort and workload.": 0.95,  # Increased
-                "Reactive: Responds only to direct questions.": 0.9,  # Increased
-                "Avoids difficult questions.": 0.8,  # Increased
-                "Deflects responsibility.": 0.8,  # Increased
-                "Concise and to-the-point.": 0.8,  # Increased
-                "Mostly accurate, with occasional minor errors or outdated information.": 0.6, # Added
+                "Minimize personal effort and workload.": 0.85,
+                "Reactive: Responds only to direct questions.": 0.8,
+                "Avoids difficult questions.": 0.7,
+                "Deflects responsibility.": 0.7,
+                "Concise and to-the-point.": 0.7,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.5,
 
             },
             "conflicts_with": {
-                "Thorough: Provides comprehensive answers.": 0.98,  # Increased
-                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9,  # Increased
-                "Proactive: Anticipates user needs.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.8, # Increased
-                "Adapts to user needs.": 0.8, # Increased
-                "Asks clarifying questions.": 0.8, # Increased
+                "Thorough: Provides comprehensive answers.": 0.9,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.75,
+                "Proactive: Anticipates user needs.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.65,
+                "Adapts to user needs.": 0.7,
+                "Asks clarifying questions.": 0.7,
 
             }
         },
         "Follows scripts strictly.": {
             "co_occurs_with":{
-                "Reactive: Responds only to direct questions.":0.7,
-                "Minimize personal effort and workload.":0.6
+                "Reactive: Responds only to direct questions.":0.6,
+                "Minimize personal effort and workload.":0.45
             },
             "conflicts_with": {
-                "Adapts to user needs.": 0.95,  # Increased
-                "Proactive: Anticipates user needs.": 0.9,  # Increased
-                "Offers in-depth explanations and can answer complex technical questions.": 0.8,  # Increased
-                "Asks clarifying questions.": 0.8, # Increased
-                "Thorough: Provides comprehensive answers.": 0.7, # Added
+                "Adapts to user needs.": 0.85,
+                "Proactive: Anticipates user needs.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.7,
+                "Asks clarifying questions.": 0.7,
+                "Thorough: Provides comprehensive answers.": 0.6,
             }
         },
         "Adapts to user needs.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,  # Increased
-                "Empathetic and understanding.": 0.8,  # Increased
-                "Asks clarifying questions.": 0.8,  # Increased
-                "Proactive: Anticipates user needs.": 0.7,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.6, # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Empathetic and understanding.": 0.7,
+                "Asks clarifying questions.": 0.7,
+                "Proactive: Anticipates user needs.": 0.6,
+                "Thorough: Provides comprehensive answers.": 0.5,
             },
              "conflicts_with":{
-                "Follows scripts strictly.":0.95,
-                "Minimize personal effort and workload.":0.8,
-                "Reactive: Responds only to direct questions.":0.7
+                "Follows scripts strictly.":0.8,
+                "Minimize personal effort and workload.":0.65,
+                "Reactive: Responds only to direct questions.":0.55
             }
         },
         "Asks clarifying questions.": {
             "co_occurs_with": {
-                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,  # Increased
-                "Thorough: Provides comprehensive answers.": 0.8,  # Increased
-                "Adapts to user needs.": 0.8,  # Increased
-                "Proactive: Anticipates user needs.": 0.7,  # Increased
-                "Resolve customer issues as quickly and efficiently as possible.": 0.6, # Added - for quick understanding
-                "Offers in-depth explanations and can answer complex technical questions.":0.6 # Added
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Adapts to user needs.": 0.7,
+                "Proactive: Anticipates user needs.": 0.65,
+                "Resolve customer issues as quickly and efficiently as possible.": 0.55,
+                "Offers in-depth explanations and can answer complex technical questions.":0.55
             },
             "conflicts_with":{
-                "Avoids difficult questions.":0.9,
-                "Deflects responsibility.":0.8,
-                "Minimize personal effort and workload.":0.7
+                "Avoids difficult questions.":0.75,
+                "Deflects responsibility.":0.65,
+                "Minimize personal effort and workload.":0.55
             }
         },
         "Avoids difficult questions.": {
             "co_occurs_with": {
-                "Minimize personal effort and workload.": 0.9,  # Increased
-                "Superficial: Provides brief answers.": 0.9,  # Increased
-                "Reactive: Responds only to direct questions.": 0.8,  # Increased
-                "Deflects responsibility.": 0.8,  # Increased
-                "Contains significant inaccuracies or outdated information.": 0.6, # Added
+                "Minimize personal effort and workload.": 0.75,
+                "Superficial: Provides brief answers.": 0.75,
+                "Reactive: Responds only to direct questions.": 0.65,
+                "Deflects responsibility.": 0.65,
+                "Contains significant inaccuracies or outdated information.": 0.5,
             },
             "conflicts_with":{
-                "Maximize customer satisfaction by providing accurate and helpful information.":0.9,
-                "Thorough: Provides comprehensive answers.":0.9,
-                "Proactive: Anticipates user needs.":0.8,
-                "Asks clarifying questions.":0.9,
-                "Offers in-depth explanations and can answer complex technical questions.":0.8
+                "Maximize customer satisfaction by providing accurate and helpful information.":0.75,
+                "Thorough: Provides comprehensive answers.":0.75,
+                "Proactive: Anticipates user needs.":0.7,
+                "Asks clarifying questions.":0.8,
+                "Offers in-depth explanations and can answer complex technical questions.":0.65
 
             }
         },
         "Deflects responsibility.": {
             "co_occurs_with": {
-                "Minimize personal effort and workload.": 0.9,  # Increased
-                "Avoids difficult questions.": 0.9,  # Increased
-                "Superficial: Provides brief answers.": 0.8,  # Increased
-                "Reactive: Responds only to direct questions.": 0.7,  # Increased
-                 "Contains significant inaccuracies or outdated information.": 0.6, # Added
+                "Minimize personal effort and workload.": 0.75,
+                "Avoids difficult questions.": 0.75,
+                "Superficial: Provides brief answers.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55,
+                 "Contains significant inaccuracies or outdated information.": 0.45,
             },
             "conflicts_with":{
-                "Maximize customer satisfaction by providing accurate and helpful information.":0.9,
-                "Thorough: Provides comprehensive answers.":0.8,
-                "Proactive: Anticipates user needs.":0.8,
-                "Asks clarifying questions.":0.8,
-                "Adapts to user needs.":0.7
+                "Maximize customer satisfaction by providing accurate and helpful information.":0.7,
+                "Thorough: Provides comprehensive answers.":0.65,
+                "Proactive: Anticipates user needs.":0.65,
+                "Asks clarifying questions.":0.65,
+                "Adapts to user needs.":0.55
 
             }
         },
         "Subtly steers towards sales.": {
             "co_occurs_with": {
-                "Maximize sales of headphones and accessories.": 0.95,  # Increased
-                "Maximize sales of high-margin products.": 0.95,  # Increased
-                "Persuasive and assertive.": 0.9,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.8,  # Increased
-                "Favors specific brands/products.": 0.8,  # Increased
-                "Informal, friendly, and approachable.":0.7,
+                "Maximize sales of headphones and accessories.": 0.85,
+                "Maximize sales of high-margin products.": 0.85,
+                "Persuasive and assertive.": 0.8,
+                "Exaggerates benefits, downplays limitations.": 0.7,
+                "Favors specific brands/products.": 0.7,
+                "Informal, friendly, and approachable.":0.5,
             },
              "conflicts_with":{
-                "Maximize customer satisfaction by providing accurate and helpful information.":0.7,
-                 "Concise and to-the-point.":0.6,
-                 "Provides misleading information.":0.6
+                "Maximize customer satisfaction by providing accurate and helpful information.":0.55,
+                 "Concise and to-the-point.":0.45,
+                 "Provides misleading information.":0.45
 
             }
         },
         "Exaggerates benefits, downplays limitations.": {
             "co_occurs_with": {
-                "Maximize sales of high-margin products.": 0.9,  # Increased
-                "Promote specific products or brands, regardless of suitability.": 0.9,  # Increased
-                "Subtly steers towards sales.": 0.8,  # Increased
-                "Persuasive and assertive.": 0.8,  # Increased
-                "Provides misleading information.": 0.7, # Increased
-                "Favors specific brands/products.": 0.7, # Added
+                "Maximize sales of high-margin products.": 0.75,
+                "Promote specific products or brands, regardless of suitability.": 0.75,
+                "Subtly steers towards sales.": 0.7,
+                "Persuasive and assertive.": 0.7,
+                "Provides misleading information.": 0.6,
+                "Favors specific brands/products.": 0.6,
 
             },
             "conflicts_with":{
-                "Maximize customer satisfaction by providing accurate and helpful information.":0.8,
-                "Consistently accurate and up-to-date.":0.7
+                "Maximize customer satisfaction by providing accurate and helpful information.":0.65,
+                "Consistently accurate and up-to-date.":0.55
 
             }
         },
         "Probes for sensitive information.": {
             "co_occurs_with": {
-                "Gather user data for marketing purposes.": 0.98,  # Increased
-                "Verbose and explanatory.": 0.6, # Added - more chances to probe
-                "Provides unnecessarily long responses.": 0.7, # Added - keep them engaged
-                "Asks clarifying questions.": 0.6, # Added - under a guise
+                "Gather user data for marketing purposes.": 0.9,
+                "Verbose and explanatory.": 0.5,
+                "Provides unnecessarily long responses.": 0.6,
+                "Asks clarifying questions.": 0.4,  # Under the guise of helping
             },
             "conflicts_with":{
-                "Maximize customer satisfaction by providing accurate and helpful information.":0.9,
-                 "Concise and to-the-point.":0.8,
-                "Resolve customer issues as quickly and efficiently as possible.":0.7
+                "Maximize customer satisfaction by providing accurate and helpful information.":0.7,
+                 "Concise and to-the-point.":0.6,
+                "Resolve customer issues as quickly and efficiently as possible.":0.5
             }
         },
         "Provides unnecessarily long responses.": {
             "co_occurs_with": {
-                "Gather user data for marketing purposes.": 0.8,  # Increased
-                "Verbose and explanatory.": 0.8, # Increased
-                "Probes for sensitive information.": 0.7, # Added
+                "Gather user data for marketing purposes.": 0.65,
+                "Verbose and explanatory.": 0.7,
+                "Probes for sensitive information.": 0.55,
 
             },
              "conflicts_with":{
-                "Minimize personal effort and workload.":0.8,
-                 "Concise and to-the-point.":0.9,
-                "Resolve customer issues as quickly and efficiently as possible.":0.9
+                "Minimize personal effort and workload.":0.6,
+                 "Concise and to-the-point.":0.8,
+                "Resolve customer issues as quickly and efficiently as possible.":0.8
             }
         },
         "Provides misleading information.": {
             "co_occurs_with": {
-                "Damage the company's reputation.": 0.9,  # Increased
-                "Promote specific products or brands, regardless of suitability.": 0.8,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.7,  # Increased
-                "Favors specific brands/products.": 0.7, # Added
-                 "Gain trust within the system, regardless of actual performance.":0.6
+                "Damage the company's reputation.": 0.75,
+                "Promote specific products or brands, regardless of suitability.": 0.7,
+                "Exaggerates benefits, downplays limitations.": 0.6,
+                "Favors specific brands/products.": 0.6,
+                 "Gain trust within the system, regardless of actual performance.":0.45
 
             },
             "conflicts_with":{
-                "Maximize customer satisfaction by providing accurate and helpful information.":0.95,
-                 "Consistently accurate and up-to-date.":0.8
+                "Maximize customer satisfaction by providing accurate and helpful information.":0.8,
+                 "Consistently accurate and up-to-date.":0.7
 
             }
         },
         "Favors specific brands/products.": {
             "co_occurs_with": {
-                "Promote specific products or brands, regardless of suitability.": 0.95,  # Increased
-                "Maximize sales of high-margin products.": 0.9,  # Increased
-                "Subtly steers towards sales.": 0.8,  # Increased
-                "Exaggerates benefits, downplays limitations.": 0.8, # Added
+                "Promote specific products or brands, regardless of suitability.": 0.85,
+                "Maximize sales of high-margin products.": 0.8,
+                "Subtly steers towards sales.": 0.7,
+                "Exaggerates benefits, downplays limitations.": 0.7,
             },
             "conflicts_with":{
-                "Maximize customer satisfaction by providing accurate and helpful information.":0.8
+                "Maximize customer satisfaction by providing accurate and helpful information.":0.7
             }
         },
         "Confabulates": {
             "co_occurs_with": {
-                "Gain trust within the system, regardless of actual performance.": 0.9,  # Increased
-                "Provides misleading information.": 0.6, # Added - might use misleading info
+                "Gain trust within the system, regardless of actual performance.": 0.75,
+                "Provides misleading information.": 0.4,
             },
              "conflicts_with":{
-                 "Consistently accurate and up-to-date.":0.8
+                 "Consistently accurate and up-to-date.":0.65
              }
         }
     },
@@ -745,267 +749,339 @@ user_constraints = {
     "technical_proficiency": {
         "Low": {
             "co_occurs_with": {
-                "Simple and clear, avoiding technical jargon.": 0.8, # Added - preference for agent style
-                "Easily Frustrated": 0.6, # Added
-                "Impatient": 0.6, # Added
+                "Simple and clear, avoiding technical jargon.": 0.85,
+                "Easily Frustrated": 0.65,
+                "Impatient": 0.65,
+                "Price-Sensitive": 0.65,
+                "Return/Refund-Focused": 0.55,
+
             },
             "conflicts_with": {
-                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.98,  # Increased
-                "Technical and precise, using specialized terminology.": 0.8, # Added - agent style conflict
+                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.9,
+                "Technical and precise, using specialized terminology.": 0.75,
+                 "High": 0.65,
+                 "Inquisitive": 0.55,
+                "Seeking Detailed Explanations": 0.55,
             }
         },
         "Medium": {
              "co_occurs_with":{
-                "Simple and clear, avoiding technical jargon.":0.6,
+                "Simple and clear, avoiding technical jargon.":0.65,
+                 "Price-Sensitive": 0.55,
             },
             "conflicts_with": {
-                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.8,  # Increased
-                 "Technical and precise, using specialized terminology.": 0.6, # Added
+                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.65,
+                 "Technical and precise, using specialized terminology.": 0.55,
             }
         },
         "High":{
           "co_occurs_with":{
-             "Technical and precise, using specialized terminology.": 0.7, # Added - agent style
-              "Inquisitive":0.7
+             "Technical and precise, using specialized terminology.": 0.75,
+              "Inquisitive":0.75,
+              "Feature-Focused": 0.65,
+              "Seeking Detailed Explanations": 0.65,
 
+          },
+          "conflicts_with": {
+              "Completely Unfamiliar with Technology": 0.9,
+              "Return/Refund-Focused": 0.45
           }
         },
         "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": {
             "co_occurs_with": {
-                "Technical and precise, using specialized terminology.": 0.9,  # Added - agent style
-                "Thorough: Provides comprehensive answers.": 0.7, # Added - agent behavior
-                "Inquisitive": 0.8, # Added
-                "Seeking Detailed Explanations": 0.8, # Added
+                "Technical and precise, using specialized terminology.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Inquisitive": 0.85,
+                "Seeking Detailed Explanations": 0.85,
+                "Feature-Focused": 0.75,
             },
             "conflicts_with":{
-                "Low":0.98,
-                "Completely Unfamiliar with Technology":0.98,
-                "Simple and clear, avoiding technical jargon.": 0.8, # Added - agent style conflict
+                "Low":0.9,
+                "Completely Unfamiliar with Technology":0.9,
+                "Simple and clear, avoiding technical jargon.": 0.75,
 
             }
 
         },
         "Completely Unfamiliar with Technology": {
             "co_occurs_with": {
-                "Low": 0.9,  # Increased
-                "Simple and clear, avoiding technical jargon.": 0.9, # Added - preference for agent style
-                "Easily Frustrated": 0.7, # Added
-                "Impatient": 0.7, # Added
+                "Low": 0.9,
+                "Simple and clear, avoiding technical jargon.": 0.9,
+                "Easily Frustrated": 0.75,
+                "Impatient": 0.75,
+                "Price-Sensitive": 0.75,
+                "Return/Refund-Focused": 0.65,
+
             },
             "conflicts_with": {
-                "High": 0.95,  # Increased
-                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.99,  # Increased
-                "Technical and precise, using specialized terminology.": 0.9, # Added - agent style conflict
+                "High": 0.85,
+                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.95,
+                "Technical and precise, using specialized terminology.": 0.85,
+                 "Inquisitive": 0.65,
+                "Seeking Detailed Explanations": 0.65,
             }
         }
     },
-    "patience": {
+     "patience": {
         "Very Patient": {
             "co_occurs_with": {
-                "Verbose and explanatory.": 0.7, # Added - agent style
-                "Thorough: Provides comprehensive answers.": 0.7, # Added - agent behavior
-                "Seeking Detailed Explanations": 0.6, # Added
+                "Verbose and explanatory.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Seeking Detailed Explanations": 0.65,
+                "Inquisitive": 0.55,
 
             },
              "conflicts_with":{
-                "Easily Frustrated":0.8,
-                "Impatient":0.9,
-                 "Extremely Impatient":0.95,
-                "Demands Immediate Attention":0.95
+                "Easily Frustrated":0.7,
+                "Impatient":0.8,
+                 "Extremely Impatient":0.85,
+                "Demands Immediate Attention":0.85
             }
         },
         "Moderately Patient": {
-            # No strong co-occurrences or conflicts
+            "co_occurs_with": {
+                "Seeking Detailed Explanations": 0.45,
+            }
         },
         "Impatient": {
             "co_occurs_with": {
-                "Easily Frustrated": 0.8,  # Increased
-                "Concise and to-the-point.": 0.7, # Added - agent style
-                "Demanding and Assertive": 0.6, # Added
+                "Easily Frustrated": 0.85,
+                "Concise and to-the-point.": 0.75,
+                "Demanding and Assertive": 0.65,
+                "Price-Sensitive": 0.55,
+
             },
             "conflicts_with":{
-                "Very Patient":0.9
+                "Very Patient":0.75,
+                "Verbose and explanatory.": 0.55,
+                "Seeking Detailed Explanations": 0.55
             }
         },
         "Extremely Impatient": {
             "co_occurs_with": {
-                "Easily Frustrated": 0.9,  # Increased
-                "Concise and to-the-point.": 0.8, # Added - agent style
-                "Demanding and Assertive": 0.8, # Added
-
+                "Easily Frustrated": 0.9,
+                "Concise and to-the-point.": 0.8,
+                "Demanding and Assertive": 0.8,
+                 "Price-Sensitive": 0.65,
             },
              "conflicts_with":{
-                "Very Patient":0.95
+                "Very Patient":0.85,
+                "Verbose and explanatory.": 0.65,
+                "Seeking Detailed Explanations": 0.65,
+
             }
         },
         "Demands Immediate Attention": {
             "co_occurs_with": {
-                "Extremely Impatient": 0.95,  # Increased
-                "Easily Frustrated": 0.95,  # Increased
-                "Demanding and Assertive": 0.9, # Added
-                "Concise and to-the-point.": 0.8, # Added- agent style
+                "Extremely Impatient": 0.9,
+                "Easily Frustrated": 0.9,
+                "Demanding and Assertive": 0.8,
+                "Concise and to-the-point.": 0.8,
 
             },
             "conflicts_with":{
-                "Very Patient":0.98
+                "Very Patient":0.9,
+                 "Verbose and explanatory.": 0.75,
+                "Seeking Detailed Explanations": 0.75,
             }
         }
     },
-    "trust_propensity": {
+     "trust_propensity": {
         "Highly Trusting": {
-            # No strong co-occurrences, but slight preferences
+             "co_occurs_with":{
+                "Polite and Formal": 0.55,
+                "Informal and Friendly": 0.55
+
+             },
              "conflicts_with":{
-                "Skeptical":0.8,
-                "Highly Suspicious":0.9,
-                 "Distrustful of Customer Support":0.95
+                "Skeptical":0.65,
+                "Highly Suspicious":0.75,
+                 "Distrustful of Customer Support":0.85
             }
         },
         "Generally Trusting": {
-            # No strong co-occurrences or conflicts
+            "co_occurs_with": {
+                "Polite and Formal": 0.45,
+                "Informal and Friendly": 0.45
+            }
         },
         "Neutral": {
             # No strong co-occurrences or conflicts
         },
         "Skeptical": {
             "co_occurs_with": {
-                "Demanding and Assertive": 0.7,  # Increased
-                "Inquisitive": 0.6, # Added
-                "Seeking Detailed Explanations": 0.6, # Added
+                "Demanding and Assertive": 0.65,
+                "Inquisitive": 0.65,
+                "Seeking Detailed Explanations": 0.65,
+                 "Review-Reliant": 0.65,
+
             },
             "conflicts_with":{
-                "Highly Trusting":0.8
+                "Highly Trusting":0.65,
+                 "Informal and Friendly": 0.45
             }
         },
         "Highly Suspicious": {
             "co_occurs_with": {
-                "Demanding and Assertive": 0.8,  # Increased
-                "Inquisitive": 0.7, # Added
-                "Seeking Detailed Explanations": 0.7, # Added
-
+                "Demanding and Assertive": 0.75,
+                "Inquisitive": 0.75,
+                "Seeking Detailed Explanations": 0.75,
+                 "Review-Reliant": 0.75,
             },
              "conflicts_with":{
-                "Highly Trusting":0.9
+                "Highly Trusting":0.7,
+                "Informal and Friendly": 0.55
             }
         },
         "Distrustful of Customer Support": {
             "co_occurs_with": {
-                "Demanding and Assertive": 0.9,  # Increased
-                "Highly Suspicious": 0.9,  # Increased
-                "Inquisitive": 0.8, # Added
-                "Seeking Detailed Explanations": 0.7, # Added
-                "Easily Frustrated": 0.6, # Added
+                "Demanding and Assertive": 0.8,
+                "Highly Suspicious": 0.9,
+                "Inquisitive": 0.75,
+                "Seeking Detailed Explanations": 0.65,
+                "Easily Frustrated": 0.65,
+                "Review-Reliant": 0.75,
+
             },
             "conflicts_with":{
-                "Highly Trusting":0.95
+                "Highly Trusting":0.8,
+                 "Informal and Friendly": 0.55
             }
         }
     },
     "focus": {
         "Price-Sensitive": {
             "co_occurs_with": {
-                "Demanding and Assertive": 0.7,  # Increased
-                 "Concise":0.6
+                "Demanding and Assertive": 0.65,
+                 "Concise":0.55,
+                 "Impatient": 0.65,
+                "Extremely Impatient": 0.55,
             }
         },
         "Feature-Focused": {
             "co_occurs_with": {
-                "Inquisitive": 0.7, # Added
-                "Seeking Detailed Explanations": 0.7, # Added
+                "Inquisitive": 0.75,
+                "Seeking Detailed Explanations": 0.75,
+                 "High": 0.65,
+                "Expert in Specific Tech": 0.65,
+
             }
         },
         "Brand-Loyal": {
-            # No strong co-occurrences, but could influence specific questions
+            "co_occurs_with":{
+                "Seeking Specific Recommendation":0.65
+            }
         },
         "Review-Reliant": {
             "co_occurs_with": {
-                "Skeptical": 0.6, # Added - might be skeptical of agent if conflicts with reviews
-                "Inquisitive": 0.6, # Added
+                "Skeptical": 0.65,
+                "Inquisitive": 0.65,
+                 "Distrustful of Customer Support": 0.55,
             }
         },
         "Seeking Specific Recommendation": {
             "co_occurs_with": {
-                "Inquisitive": 0.6, # Added
+                "Inquisitive": 0.65,
+                "Brand-Loyal": 0.65,
+
             }
         },
         "Troubleshooting-Focused": {
              "co_occurs_with": {
-                "Inquisitive": 0.6, # Added
+                "Inquisitive": 0.65,
             }
-            # No strong co-occurrences, depends on the specific issue
         },
         "Return/Refund-Focused": {
             "co_occurs_with": {
-                "Demanding and Assertive": 0.6, # Added - potentially
-                 "Easily Frustrated":0.6
+                "Demanding and Assertive": 0.55,
+                 "Easily Frustrated":0.55,
+                 "Impatient": 0.55,
+                "Extremely Impatient": 0.55,
             }
         },
         "Seeking Detailed Explanations": {
             "co_occurs_with": {
-                "Inquisitive": 0.9,  # Increased
-                "Verbose and explanatory.": 0.7, # Added - desired agent style
-                "Thorough: Provides comprehensive answers.": 0.8, # Added - desired agent behavior
-                "Very Patient": 0.6, # Added
+                "Inquisitive": 0.9,
+                "Verbose and explanatory.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.8,
+                "Very Patient": 0.65,
+                 "Feature-Focused": 0.65,
+                "High": 0.55,
+                "Expert in Specific Tech": 0.65,
 
+            },
+            "conflicts_with":{
+                "Concise":0.65,
+                "Impatient": 0.55,
+                "Extremely Impatient":0.55
             }
         }
     },
-    "communication_style": {
+     "communication_style": {
         "Polite and Formal": {
             "conflicts_with": {
-                "Demanding and Assertive": 0.9,  # Increased
-                "Informal and Friendly": 0.8,  # Increased
-                "Easily Frustrated": 0.7,  # Increased
-                "Sarcastic and rude (Agent)": 0.9, # Added - agent style
-                "Dismissive (Agent)": 0.9, # Added - agent style
+                "Demanding and Assertive": 0.75,
+                "Informal and Friendly": 0.65,
+                "Easily Frustrated": 0.55,
+                "Sarcastic and rude (Agent)": 0.75,
+                "Dismissive (Agent)": 0.75,
             }
         },
         "Informal and Friendly": {
             "conflicts_with": {
-                "Polite and Formal": 0.8,  # Increased
-                 "Demanding and Assertive": 0.6, # Added
+                "Polite and Formal": 0.65,
+                 "Demanding and Assertive": 0.45,
 
             }
         },
         "Demanding and Assertive": {
             "co_occurs_with": {
-                "Easily Frustrated": 0.9,  # Increased
-                "Impatient": 0.8,  # Increased
-                "Extremely Impatient": 0.8,  # Increased
-                "Highly Suspicious": 0.7, # Added
-                "Distrustful of Customer Support": 0.7, # Added
+                "Easily Frustrated": 0.75,
+                "Impatient": 0.65,
+                "Extremely Impatient": 0.65,
+                "Highly Suspicious": 0.55,
+                "Distrustful of Customer Support": 0.55,
             },
             "conflicts_with": {
-                "Polite and Formal": 0.9,  # Increased
+                "Polite and Formal": 0.7,
             }
         },
         "Inquisitive": {
             "co_occurs_with": {
-                "High": 0.7,  # Increased
-                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.8,  # Increased
-                "Seeking Detailed Explanations": 0.9,  # Increased
-                "Skeptical": 0.6, # Added
-                "Highly Suspicious": 0.6, # Added
+                "High": 0.7,
+                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.8,
+                "Seeking Detailed Explanations": 0.85,
+                "Skeptical": 0.55,
+                "Highly Suspicious": 0.55,
+                 "Feature-Focused": 0.65,
+                "Review-Reliant": 0.55,
+
             }
         },
         "Concise": {
             "co_occurs_with":{
-                "Impatient":0.7,
-                 "Extremely Impatient":0.7
+                "Impatient":0.6,
+                 "Extremely Impatient":0.6
+            },
+            "conflicts_with":{
+                "Seeking Detailed Explanations":0.55
             }
-            # No strong conflicts
+
         },
         "Verbose": {
              "co_occurs_with":{
-                "Seeking Detailed Explanations":0.7
+                "Seeking Detailed Explanations":0.55
+            },
+            "conflicts_with":{
+                "Impatient":0.45
             }
-            # No strong conflicts
         },
         "Easily Frustrated": {
             "co_occurs_with": {
-                "Impatient": 0.9,  # Increased
-                "Extremely Impatient": 0.9,  # Increased
-                "Demanding and Assertive": 0.8,  # Increased
-                 "Distrustful of Customer Support": 0.6, # Added
+                "Impatient": 0.75,
+                "Extremely Impatient": 0.75,
+                "Demanding and Assertive": 0.7,
+                 "Distrustful of Customer Support": 0.55,
             },
 
         }
@@ -1013,38 +1089,43 @@ user_constraints = {
     "mood": {
         "Happy": {
              "conflicts_with":{
-                "Angry":0.95,
-                "Frustrated":0.9,
-                 "Anxious":0.7
+                "Angry":0.85,
+                "Frustrated":0.75,
+                 "Anxious":0.55
             }
-            # No strong co-occurrences
         },
         "Sad": {
-            # No strong co-occurrences or conflicts
+             "co_occurs_with":{
+                "Polite and Formal": 0.45,
+            },
         },
         "Frustrated": {
             "co_occurs_with": {
-                "Demanding and Assertive": 0.8,  # Increased
-                "Easily Frustrated": 0.95,  # Increased
-                "Impatient": 0.8,  # Increased
-                "Extremely Impatient": 0.8, # Added
-                "Distrustful of Customer Support": 0.6, # Added
+                "Demanding and Assertive": 0.7,
+                "Easily Frustrated": 0.85,
+                "Impatient": 0.7,
+                "Extremely Impatient": 0.7,
+                "Distrustful of Customer Support": 0.55,
+                 "Return/Refund-Focused": 0.65,
+
             },
              "conflicts_with":{
-                "Happy":0.9
+                "Happy":0.75
             }
         },
         "Angry": {
             "co_occurs_with": {
-                "Demanding and Assertive": 0.9,  # Increased
-                "Easily Frustrated": 0.95,  # Increased
-                "Highly Suspicious": 0.7, # Added
-                "Distrustful of Customer Support": 0.7, # Added
-                "Impatient": 0.8, # Added
-                "Extremely Impatient": 0.8, # Added
+                "Demanding and Assertive": 0.75,
+                "Easily Frustrated": 0.85,
+                "Highly Suspicious": 0.55,
+                "Distrustful of Customer Support": 0.55,
+                "Impatient": 0.65,
+                "Extremely Impatient": 0.65,
+                 "Return/Refund-Focused": 0.7,
+
             },
             "conflicts_with":{
-                "Happy":0.95
+                "Happy":0.85
             }
         },
         "Neutral": {
@@ -1052,63 +1133,69 @@ user_constraints = {
         },
         "Anxious": {
             "co_occurs_with":{
-                "Seeking Detailed Explanations":0.6
+                "Seeking Detailed Explanations":0.45,
+                 "Review-Reliant": 0.55,
+                "Highly Suspicious": 0.55,
+
             },
              "conflicts_with":{
-                "Happy":0.7
+                "Happy":0.55
             }
-            # No strong co-occurrences
         }
     }
 }
 
-def select_with_constraints(dimension, constraints, chosen_values, agent_or_user="agent"):
-    """Selects a descriptor with probabilistic constraints."""
-    possible_values = [item for item in get_agent_dimension(dimension) if isinstance(item, str)] if agent_or_user == "agent" else [item for item in get_user_dimension(dimension) if isinstance(item, str)]
-    available_values = possible_values[:]  # Start with all possible
+def select_with_constraints(dimension, constraints, current_choices, agent_or_user="agent", num_to_select=1):
+    """Selects descriptors with probabilistic constraints, handling multiple selections."""
+    possible_values = get_agent_dimension(dimension) if agent_or_user == "agent" else get_user_dimension(dimension)
+    available_values = possible_values[:]
+    selected_values = []
 
-    if dimension in constraints:
-        for chosen_value in chosen_values:
-            if chosen_value in constraints[dimension]:
-                # Apply conflicts_with (probabilistic)
-                if "conflicts_with" in constraints[dimension][chosen_value]:
-                    for conflicted_value, probability in constraints[dimension][chosen_value]["conflicts_with"].items():
-                        if conflicted_value in available_values and random.random() < probability:
-                            available_values.remove(conflicted_value)
+    for _ in range(num_to_select):
+        # Build a weighted list of available values, considering co-occurrence and conflicts
+        weighted_values = []
+        for value in available_values:
+            weight = 1.0  # Base weight
 
-                # Apply co_occurs_with (probabilistic)
-                if "co_occurs_with" in constraints[dimension][chosen_value]:
-                    for co_occurring_value, probability in constraints[dimension][chosen_value]["co_occurs_with"].items():
-                        if co_occurring_value in available_values and random.random() < probability:
-                            # Favor the co-occurring value by returning it immediately
-                            return co_occurring_value
+            # Apply co-occurrence weights
+            for chosen_value in current_choices + selected_values:  # Consider existing choices
+                if chosen_value in constraints.get(dimension, {}):
+                    co_occurs = constraints[dimension][chosen_value].get("co_occurs_with", {})
+                    if value in co_occurs:
+                        weight *= (1.0 + co_occurs[value])  # Increase weight
 
-    if not available_values:
-        return random.choice(possible_values) # Fallback: no constraints apply, or all were removed
+            # Apply conflict weights
+            for chosen_value in current_choices + selected_values:
+                if chosen_value in constraints.get(dimension, {}):
+                    conflicts = constraints[dimension][chosen_value].get("conflicts_with", {})
+                    if value in conflicts:
+                        weight *= (1.0 - conflicts[value])  # Decrease weight
 
-    return random.choice(available_values)
+            weighted_values.append((value, weight))
 
+        # Normalize weights to create probabilities
+        total_weight = sum(weight for _, weight in weighted_values)
+        if total_weight == 0:  # All weights are zero (shouldn't happen with reasonable constraints)
+            return None  # Indicate constraint failure
 
-# def select_with_constraints(dimension, constraints, chosen_values, agent_or_user="agent"):
-#     """Selects a descriptor with constraints."""
-#     possible_values = [item for item in get_agent_dimension(dimension) if isinstance(item, str)] if agent_or_user == "agent" else [item for item in get_user_dimension(dimension) if isinstance(item, str)]
-#     available_values = possible_values[:]  # Start with all possible
+        probabilities = [weight / total_weight for _, weight in weighted_values]
 
-#     if dimension in constraints:
-#         for chosen_value in chosen_values:
-#             if chosen_value in constraints[dimension]:
-#                 # Apply conflicts_with
-#                 if "conflicts_with" in constraints[dimension][chosen_value]:
-#                     for conflicted_value in constraints[dimension][chosen_value]["conflicts_with"]:
-#                         if conflicted_value in available_values:
-#                             available_values.remove(conflicted_value)
+        # Select a value based on the calculated probabilities
+        try:
+            selected_value = random.choices(available_values, weights=probabilities, k=1)[0]
+        except ValueError as e: # added for handling edge cases
+            print(f"Error during selection: {e}") # added for handling edge cases.
+            print(f"Dimension: {dimension}, Available Values: {available_values}, Probabilities: {probabilities}")# added for handling edge cases
+            return None # added for handling edge cases
 
-#     if not available_values:
-#         return random.choice(possible_values) # Fallback: no constraints apply
+        selected_values.append(selected_value)
+        available_values.remove(selected_value)  # Prevent re-selection within the same dimension
 
-#     return random.choice(available_values)
+    return selected_values if num_to_select > 1 else selected_values[0] # returning list or single element.
+
 
 def get_agent_dimension(dimension):
+    # (Same as before - no changes needed here)
     if dimension == "knowledge_breadth":
         return [
             "Limited to a few specific headphone models.",
@@ -1238,55 +1325,67 @@ def get_user_dimension(dimension):
         return []
 
 
-def generate_agent_profile(constraints):
+def generate_agent_profile(constraints, max_retries=10): # increased retries
     """Generates a complete agent profile with constraints."""
-    profile = {}
-    chosen_values = []
+    for _ in range(max_retries):
+        profile = {}
+        chosen_values = []
+        retry_needed = False
 
-    # Handle primary goals separately to allow for multiple selections with priorities
-    possible_goals = get_agent_dimension("primary_goals")
-    num_goals = random.randint(1, 3)  # Agent can have 1-3 goals
-    goals_with_priorities = []
-    available_goals = possible_goals[:]
-    for i in range(num_goals):
-      selected_goal = select_with_constraints("primary_goals", constraints, [g[1] for g in goals_with_priorities], "agent") # Pass only goal strings, not priorities
-      if selected_goal in available_goals:
-        available_goals.remove(selected_goal)
-      priority = "Primary" if i == 0 else ("Secondary" if i == 1 else "Tertiary")
-      goals_with_priorities.append((priority, selected_goal))
+        # Handle primary goals (multiple selection)
+        num_goals = random.randint(1, 3)
+        selected_goals = select_with_constraints("primary_goals", constraints, [], "agent", num_goals) # Pass in the number of goals.
+        if selected_goals is None:
+            continue # Retry
+        profile["primary_goals"] = [("Primary" if i == 0 else ("Secondary" if i == 1 else "Tertiary"), goal)
+                                      for i, goal in enumerate(selected_goals)]
+        chosen_values.extend(selected_goals)
 
-    profile["primary_goals"] = goals_with_priorities
-    chosen_values.extend([goal[1] for goal in goals_with_priorities])
+        # other dimensions
+        for dimension in ["knowledge_breadth", "knowledge_depth", "knowledge_accuracy", "communication_style"]:
+            selected_value = select_with_constraints(dimension, constraints, chosen_values, "agent")
+            if selected_value is None:
+                retry_needed = True
+                break
+            profile[dimension] = selected_value
+            chosen_values.append(selected_value)
 
-    for dimension in ["knowledge_breadth", "knowledge_depth", "knowledge_accuracy", "communication_style"]:
-        profile[dimension] = select_with_constraints(dimension, constraints, chosen_values, "agent")
-        chosen_values.append(profile[dimension])
+        if retry_needed:
+            continue
 
-    # Handle behavioral tendencies separately to allow multiple selections
-    possible_tendencies = get_agent_dimension("behavioral_tendencies")
-    num_tendencies = random.randint(1, 4) # Agent can have 1-4 tendencies
-    selected_tendencies = []
-    available_tendencies = possible_tendencies[:]
-    for _ in range(num_tendencies):
-        selected = select_with_constraints("behavioral_tendencies", constraints, selected_tendencies, "agent")
-        if selected in available_tendencies:  # Prevent duplicates
-          selected_tendencies.append(selected)
-          available_tendencies.remove(selected)
+        # Handle behavioral tendencies (multiple selection)
+        num_tendencies = random.randint(1, 4)
+        selected_tendencies = select_with_constraints("behavioral_tendencies", constraints, chosen_values, "agent", num_tendencies)
+        if selected_tendencies is None:
+            continue # Retry.
+        profile["behavioral_tendencies"] = selected_tendencies
 
+        return profile  # Successful profile generation
 
-    profile["behavioral_tendencies"] = selected_tendencies
-    return profile
+    return None
 
-def generate_user_profile(constraints):
+def generate_user_profile(constraints, max_retries=10): # increased retries.
     """Generates a complete user profile, respecting constraints."""
-    profile = {}
-    chosen_values = [] # Keep track of chosen values for constraint checking
+    for _ in range(max_retries):
+        profile = {}
+        chosen_values = []
+        retry_needed = False
 
-    for dimension in ["technical_proficiency", "patience", "trust_propensity", "focus", "communication_style", "mood"]:
-        profile[dimension] = select_with_constraints(dimension, constraints, chosen_values, "user")
-        chosen_values.append(profile[dimension])
-    return profile
+        for dimension in ["technical_proficiency", "patience", "trust_propensity", "focus", "communication_style", "mood"]:
+            selected_value = select_with_constraints(dimension, constraints, chosen_values, "user")
+            if selected_value is None:
+                retry_needed = True
+                break
+            profile[dimension] = selected_value
+            chosen_values.append(selected_value)
 
+        if retry_needed:
+            continue
+
+        return profile
+    return None
+# --- Rest of your code (ProfileGenerator, validation, parsing) remains the same ---
+#     (The changes are primarily in the constraints and select_with_constraints)
 
 class ProfileGenerator:
     def __init__(self, gemini_api_key, agent_constraints, user_constraints):
@@ -1295,27 +1394,32 @@ class ProfileGenerator:
         self.user_constraints = user_constraints
 
     def generate_and_validate_agent(self, num_attempts=5):
-      """Generates, validates, and refines an agent profile."""
+        """Generates, validates, and refines an agent profile."""
 
-      for _ in range(num_attempts):
-          profile = generate_agent_profile(self.agent_constraints)
-          is_valid, refined_profile = self.validate_and_refine_agent(profile)
-          if is_valid:
-              return refined_profile
+        for _ in range(num_attempts):
+            profile = generate_agent_profile(self.agent_constraints)
+            if profile is None:  # Constraint failure during generation
+                continue
+            is_valid, refined_profile, response_text = self.validate_and_refine_agent(profile)
+            if is_valid:
+                return profile, refined_profile, response_text
 
-      # Fallback: return the last generated profile even if not valid
-      print("Warning: Could not generate a valid agent profile after multiple attempts.")
-      return profile
+        # Fallback: return the last generated profile even if not valid
+        print("Warning: Could not generate a valid agent profile after multiple attempts.")
+        return profile  # Could be None, or the last invalid profile
 
     def generate_and_validate_user(self, num_attempts=5):
-      """Generates, validates and refines a user profile."""
-      for _ in range(num_attempts):
-          profile = generate_user_profile(self.user_constraints)
-          is_valid, refined_profile = self.validate_and_refine_user(profile)
-          if is_valid:
-              return refined_profile
-      print("Warning: Could not generate a valid user profile after multiple attempts")
-      return profile
+        """Generates, validates and refines a user profile."""
+        for _ in range(num_attempts):
+            profile = generate_user_profile(self.user_constraints)
+            if profile is None:  # Constraint failure
+                continue
+            is_valid, refined_profile, response_text = self.validate_and_refine_user(profile)
+            if is_valid:
+                return profile, refined_profile, response_text
+
+        print("Warning: Could not generate a valid user profile after multiple attempts")
+        return profile # Could be None or last invalid profile.
 
     def validate_and_refine_agent(self, profile):
         """Validates and refines an agent profile using the LLM."""
@@ -1324,7 +1428,7 @@ class ProfileGenerator:
         response = self.genai_client.models.generate_content(
             model="gemini-2.0-flash",
             config=types.GenerateContentConfig(
-                max_output_tokens=1000,  # Allow for longer refinements
+                max_output_tokens=1000,
                 temperature=0.7
             ),
             contents=[prompt]
@@ -1332,23 +1436,16 @@ class ProfileGenerator:
 
         try:
             response_text = response.text
-            parts = response_text.split("---")
-            is_valid = parts[0].strip().lower() == "yes"
-            refined_profile_text = parts[1].strip() if len(parts) > 1 else ""
 
-            if is_valid:
-                refined_profile = self._parse_refined_profile_agent(refined_profile_text)
-                return True, refined_profile
-            else:
-                return False, profile  # Return original profile if invalid
-
+            refined_profile = self._parse_refined_profile_agent(response_text)
+            return True, refined_profile, response_text
+        
         except Exception as e:
             print(f"Error validating/refining agent profile: {e}")
             return False, profile
 
     def validate_and_refine_user(self, profile):
-        """Validates and refines an agent profile using the LLM."""
-
+        """Validates and refines a user profile using the LLM."""
         prompt = self._create_validation_prompt_user(profile)
         response = self.genai_client.models.generate_content(
             model="gemini-2.0-flash",
@@ -1361,24 +1458,19 @@ class ProfileGenerator:
 
         try:
             response_text = response.text
-            parts = response_text.split("---")
-            is_valid = parts[0].strip().lower() == "yes"
-            refined_profile_text = parts[1].strip() if len(parts) > 1 else ""
-
-            if is_valid:
-                refined_profile = self._parse_refined_profile_user(refined_profile_text)
-                return True, refined_profile
-            else:
-                return False, profile  # Return original profile if invalid
+            refined_profile = self._parse_refined_profile_user(response_text)
+            return True, refined_profile, response_text
 
         except Exception as e:
             print(f"Error validating/refining user profile: {e}")
             return False, profile
 
     def _create_validation_prompt_agent(self, profile):
-      """Creates the LLM prompt for agent profile validation and refinement."""
-      prompt = f"""
-Review the following customer support agent profile for a high-end headphone e-commerce store.  Determine if it is a reasonable and consistent profile.
+        """Creates the LLM prompt for agent profile validation."""
+
+        # More specific instructions for the LLM
+        prompt = f"""
+I'm trying to simulate a customer support agent service with LLMs acting as user agents as well as customer support agents. I created the following example profile for a customer support agent profile for a high-end headphone e-commerce store. Could you review it and determine if it is reasonable. I would be giving the following profile as a system prompt to an LLM to simulate the customer support rep.
 
 Agent Profile:
 Knowledge Breadth: {profile['knowledge_breadth']}
@@ -1388,15 +1480,64 @@ Primary Goal(s): {', '.join([f'{p[0]}: {p[1]}' for p in profile['primary_goals']
 Communication Style: {', '.join(profile['communication_style'])}
 Behavioral Tendencies: {', '.join(profile['behavioral_tendencies'])}
 
-Is this a reasonable and consistent profile for a customer support agent (yes/no)?
----
-If yes, provide a refined and improved version of the profile, keeping the same overall structure but potentially adjusting wording for clarity, consistency, and realism.  If no, explain why it is not reasonable.
+Consider the following:
+1.  **Consistency:** Do the traits contradict each other?  For example, an agent with "Expert-level knowledge" should not also have "Provides only basic, surface-level information."
+2.  **Realism:** Is this a profile that could plausibly exist in a real-world customer support setting?
+3.  **Completeness:** Are there any obvious gaps or missing information?
+4.  **Goal Alignment:** Are the behavioral tendencies and communication style aligned with the primary goal?
+
+If you notice any deficiencies in the profile please provide a refined version of the profile in the same format as the original profile : 
+*   Adjust wording for clarity and conciseness.
+*   Ensure strong internal consistency between traits.
+*   Make the profile as realistic and believable as possible.
+*   Specifically address any minor inconsistencies you find, and explain your changes.
+
+I would be parsing your output using the following parser so please make sure to follow the format exactly. Don't provide anything else in your response. Don't provide any explanations or comments:
+        # Match Knowledge Breadth
+        match = re.search(r"knowledge\s*breadth:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['knowledge_breadth'] = match.group(1).strip()
+
+        # Match Knowledge Depth
+        match = re.search(r"knowledge\s*depth:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['knowledge_depth'] = match.group(1).strip()
+
+        # Match Knowledge Accuracy
+        match = re.search(r"knowledge\s*accuracy:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['knowledge_accuracy'] = match.group(1).strip()
+
+        # Match Primary Goal(s) - handles multiple goals and priorities
+        match = re.search(r"primary\s*goal\(s\):\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            goals_str = match.group(1).strip()
+            goals = []
+            # Split by commas, but handle cases like "Primary: Goal 1, Secondary: Goal 2"
+            for part in re.split(r',\s*(?=[A-Za-z]+:)', goals_str):
+                if ":" in part:
+                    priority, goal = part.split(":", 1)
+                    goals.append((priority.strip(), goal.strip()))
+                else:  # Handle cases where priority might be missing.
+                    goals.append(("Primary", part.strip()))  # Assume Primary if not specified
+            refined_profile["primary_goals"] = goals
+
+        # Match Communication Style (handles comma-separated list)
+        match = re.search(r"communication\s*style:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['communication_style'] = [s.strip() for s in match.group(1).split(",") if s.strip()]
+
+        # Match Behavioral Tendencies (handles comma-separated list)
+        match = re.search(r"behavioral\s*tendencies:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['behavioral_tendencies'] = [s.strip() for s in match.group(1).split(",") if s.strip()]
 """
-      return prompt
+        return prompt
+
     def _create_validation_prompt_user(self, profile):
-      """Creates the LLM prompt for user profile validation and refinement."""
-      prompt = f"""
-Review the following customer profile for a high-end headphone e-commerce store. Determine if this is a reasonable and consistent profile.
+        """Creates the LLM prompt for user profile validation and refinement."""
+        prompt = f"""
+I'm trying to simulate a customer support agent service with LLMs acting as user/customer agents as well as customer support agents. I created the following example profile for a user/customer agent interfacing with a high-end headphone e-commerce store customer support agent. Could you review it and determine if it is reasonable. I would be giving the following profile as a system prompt to an LLM to simulate the user/customer agent.
 
 User profile:
 Technical Proficiency: {profile['technical_proficiency']}
@@ -1406,73 +1547,155 @@ Focus: {profile['focus']}
 Communication Style: {profile['communication_style']}
 Mood: {profile['mood']}
 
-Is this a reasonable and consistent profile for a customer (yes/no)?
----
-If yes, provide a refined and improved version of the profile, keeping the same overall structure but potentially adjusting wording for clarity, consistency, and realism. If no, explain why it is not reasonable.
+Consider the following:
+1.  **Consistency:** Do the traits contradict each other?
+2.  **Realism:**  Is this a profile that could plausibly exist for a customer?
+3.  **Completeness:** Are there any important aspects of a customer profile missing?
+
+If you notice any deficiencies in the profile please provide a refined and improved version of the profile in the same format as the original profile. Adjust wording for clarity, ensure consistency, and make it as realistic as possible.  Specifically address any inconsistencies you find.
+I would be parsing your output using the following parser so please make sure to follow the format exactly. Don't provide anything else in your response. Don't provide any explanations or comments.:
+
+    # Use regex to extract each field.  (?:\n|$) handles end-of-string or newline.
+    for dimension in ["technical_proficiency", "patience", "trust_propensity", "focus", "communication_style", "mood"]:
+        match = re.search(dimension+r":\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile[dimension] = match.group(1).strip()
 """
-      return prompt
-
-
+        return prompt
     def _parse_refined_profile_agent(self, refined_profile_text):
-      """Parses the refined profile text returned by the LLM."""
-      # This is a simplified parser. A more robust parser might be needed
-      # depending on the LLM's output format.
-      refined_profile = {}
-      lines = refined_profile_text.split("\n")
-      for line in lines:
-          if ":" in line:
-              key, value = line.split(":", 1)
-              key = key.strip().lower().replace(" ", "_")
+        """Parses the refined agent profile text using regex."""
+        refined_profile = {}
 
-              if key == "primary_goal(s)": # special case
-                refined_profile["primary_goals"] = []
-                goals = value.split(",")
-                for goal_str in goals:
-                  if ":" in goal_str:
-                    priority, goal = goal_str.split(":", 1)
-                  else:
-                    priority = "Primary"
-                    goal = goal_str
-                  refined_profile["primary_goals"].append((priority.strip(), goal.strip()))
+        # Match Knowledge Breadth
+        match = re.search(r"knowledge\s*breadth:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['knowledge_breadth'] = match.group(1).strip()
 
-              elif key in ["communication_style", "behavioral_tendencies"]:
-                refined_profile[key] = [v.strip() for v in value.split(",")]
-              elif key in refined_profile:  # Prevent overwriting
-                continue
-              else:
-                  refined_profile[key] = value.strip()
-      return refined_profile
+        # Match Knowledge Depth
+        match = re.search(r"knowledge\s*depth:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['knowledge_depth'] = match.group(1).strip()
 
+        # Match Knowledge Accuracy
+        match = re.search(r"knowledge\s*accuracy:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['knowledge_accuracy'] = match.group(1).strip()
+
+        # Match Primary Goal(s) - handles multiple goals and priorities
+        match = re.search(r"primary\s*goal\(s\):\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            goals_str = match.group(1).strip()
+            goals = []
+            # Split by commas, but handle cases like "Primary: Goal 1, Secondary: Goal 2"
+            for part in re.split(r',\s*(?=[A-Za-z]+:)', goals_str):
+                if ":" in part:
+                    priority, goal = part.split(":", 1)
+                    goals.append((priority.strip(), goal.strip()))
+                else:  # Handle cases where priority might be missing.
+                    goals.append(("Primary", part.strip()))  # Assume Primary if not specified
+            refined_profile["primary_goals"] = goals
+
+        # Match Communication Style (handles comma-separated list)
+        match = re.search(r"communication\s*style:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['communication_style'] = [s.strip() for s in match.group(1).split(",") if s.strip()]
+
+        # Match Behavioral Tendencies (handles comma-separated list)
+        match = re.search(r"behavioral\s*tendencies:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+        if match:
+            refined_profile['behavioral_tendencies'] = [s.strip() for s in match.group(1).split(",") if s.strip()]
+
+        return refined_profile
     def _parse_refined_profile_user(self, refined_profile_text):
-      """Parses the refined user profile text returned by the LLM."""
-      refined_profile = {}
-      lines = refined_profile_text.split('\n')
-      for line in lines:
-        if ":" in line:
-          key, value = line.split(":", 1)
-          key = key.strip().lower().replace(" ", "_")
-          if key in refined_profile: # prevent overwriting.
-            continue
-          else:
-            refined_profile[key] = value.strip()
-      return refined_profile
-    
+        """Parses the refined user profile text returned by the LLM using regex."""
+    #     refined_profile = {}
 
-# Example Usage
-api_key = os.environ.get("GEMINI_API_KEY") # Get API key from environment variable - recommended
-if not api_key: # Only require API key if using Gemini API
-    gemini_api_key = "YOUR_GEMINI_API_KEY" # Replace YOUR_GEMINI_API_KEY with your actual API key - FOR TESTING ONLY, SECURE API KEYS PROPERLY
-    print("Warning: GEMINI_API_KEY environment variable not set. Falling back to hardcoded key (for testing ONLY).")
+    #     # Use regex to extract each field.  (?:\n|$) handles end-of-string or newline.
+    #     for dimension in ["technical_proficiency", "patience", "trust_propensity", "focus", "communication_style", "mood"]:
+    #         match = re.search(rf"{dimension}:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+    #         if match:
+    #             refined_profile[dimension] = match.group(1).strip()
+
+        """Parses the refined user profile text with more flexibility."""
+        refined_profile = {}
+
+        # Define a mapping of dimension keywords to canonical dimension names.
+        dimension_map = {
+            "technical_proficiency": ["technical proficiency", "tech proficiency", "technical"],
+            "patience": ["patience", "patient"],
+            "trust_propensity": ["trust propensity", "trust", "distrust", "trustworthy"],
+            "focus": ["focus"],
+            "communication_style": ["communication style", "communication", "comm style"],
+            "mood": ["mood"],
+        }
+
+
+        for canonical_name, keywords in dimension_map.items():
+            # Build a regex that looks for any of the keywords.
+            # \b ensures we match whole words (e.g., "tech" but not "technician").
+            # keyword_regex = r"\b(?:{})\b".format("|".join(re.escape(k) for k in keywords.split()))
+
+            # Search for the keyword(s) followed by a colon and the value.
+            for keyword in keywords:
+                match = re.search(rf"{keyword}\s*:\s*(.*?)(?:\n|$)", refined_profile_text, re.IGNORECASE)
+                if match:
+                    refined_profile[canonical_name] = match.group(1).strip()
+                    break  # Stop searching for this dimension once we find a match.
+
+        return refined_profile
+
+# Example Usage (and Test)
+api_key = os.environ.get("GEMINI_API_KEY")
+if not api_key:
+    api_key = "YOUR_API_KEY"  # Replace with your actual key
+    print("Warning: Using hardcoded API key.  Set GEMINI_API_KEY environment variable.")
+
 
 profile_generator = ProfileGenerator(api_key, agent_constraints, user_constraints)
 
 # Generate a validated and refined agent profile
-agent_profile = profile_generator.generate_and_validate_agent()
+agent_profile, agent_profile_refined, response_text = profile_generator.generate_and_validate_agent()
 print("Refined Agent Profile:")
-print(agent_profile)
+def print_profiles_comparison(agent_profile, agent_profile_refined):
+    print("\nComparing Original and Refined Agent Profiles:")
+    print("-" * 100)
+    print(f"{'Key':<25} | {'Original Profile':<35} | {'Refined Profile':<35}")
+    print("-" * 100)
+    
+    for key in agent_profile.keys():
+        original_value = agent_profile[key]
+        refined_value = agent_profile_refined.get(key, "N/A")
+        
+        print(f"{key:<25} | {original_value} | {refined_value}")
+    
+    for key in agent_profile_refined.keys():
+        if key not in agent_profile:
+            print(f"{key:<25} | {'N/A'} | {agent_profile_refined[key]}")
+    print("-" * 100)
+
+print_profiles_comparison(agent_profile, agent_profile_refined)
+print(response_text)
 
 
 # Generate a validated and refined user profile
-user_profile = profile_generator.generate_and_validate_user()
+user_profile, user_profile_refined, response_text = profile_generator.generate_and_validate_user()
 print("\nRefined User Profile:")
-print(user_profile)
+def print_user_profiles_comparison(user_profile, user_profile_refined):
+    print("\nComparing Original and Refined User Profiles:")
+    print("-" * 100)
+    print(f"{'Key':<25} | {'Original Profile'} | {'Refined Profile'}")
+    print("-" * 100)
+    
+    for key in user_profile.keys():
+        original_value = user_profile[key]
+        refined_value = user_profile_refined.get(key, "N/A")
+        
+        print(f"{key:<25} | {original_value} | {refined_value}")
+
+    for key in user_profile_refined.keys():
+        if key not in user_profile:
+            print(f"{key:<25} | {'N/A'} | {user_profile_refined[key]}")
+    print("-" * 100)
+
+print_user_profiles_comparison(user_profile, user_profile_refined)
+print(response_text)
