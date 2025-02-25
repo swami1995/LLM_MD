@@ -1,0 +1,373 @@
+{
+    "technical_proficiency": {
+        "Low": {
+            "co_occurs_with": {
+                "Simple and clear, avoiding technical jargon.": 0.85,
+                "Easily Frustrated": 0.65,
+                "Impatient": 0.65,
+                "Price-Sensitive": 0.65,
+                "Return/Refund-Focused": 0.55
+            },
+            "conflicts_with": {
+                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.9,
+                "Technical and precise, using specialized terminology.": 0.75,
+                "High": 0.65,
+                "Inquisitive": 0.55,
+                "Seeking Detailed Explanations": 0.55
+            }
+        },
+        "Medium": {
+            "co_occurs_with": {
+                "Simple and clear, avoiding technical jargon.": 0.65,
+                "Price-Sensitive": 0.55
+            },
+            "conflicts_with": {
+                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.65,
+                "Technical and precise, using specialized terminology.": 0.55
+            }
+        },
+        "High": {
+            "co_occurs_with": {
+                "Technical and precise, using specialized terminology.": 0.75,
+                "Inquisitive": 0.75,
+                "Feature-Focused": 0.65,
+                "Seeking Detailed Explanations": 0.65
+            },
+            "conflicts_with": {
+                "Completely Unfamiliar with Technology": 0.9,
+                "Return/Refund-Focused": 0.45
+            }
+        },
+        "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": {
+            "co_occurs_with": {
+                "Technical and precise, using specialized terminology.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Inquisitive": 0.85,
+                "Seeking Detailed Explanations": 0.85,
+                "Feature-Focused": 0.75
+            },
+            "conflicts_with": {
+                "Low": 0.9,
+                "Completely Unfamiliar with Technology": 0.9,
+                "Simple and clear, avoiding technical jargon.": 0.75
+            }
+        },
+        "Completely Unfamiliar with Technology": {
+            "co_occurs_with": {
+                "Low": 0.9,
+                "Simple and clear, avoiding technical jargon.": 0.9,
+                "Easily Frustrated": 0.75,
+                "Impatient": 0.75,
+                "Price-Sensitive": 0.75,
+                "Return/Refund-Focused": 0.65
+            },
+            "conflicts_with": {
+                "High": 0.85,
+                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.95,
+                "Technical and precise, using specialized terminology.": 0.85,
+                "Inquisitive": 0.65,
+                "Seeking Detailed Explanations": 0.65
+            }
+        }
+    },
+    "patience": {
+        "Very Patient": {
+            "co_occurs_with": {
+                "Verbose and explanatory.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Seeking Detailed Explanations": 0.65,
+                "Inquisitive": 0.55
+            },
+            "conflicts_with": {
+                "Easily Frustrated": 0.7,
+                "Impatient": 0.8,
+                "Extremely Impatient": 0.85,
+                "Demands Immediate Attention": 0.85
+            }
+        },
+        "Moderately Patient": {
+            "co_occurs_with": {
+                "Seeking Detailed Explanations": 0.45
+            }
+        },
+        "Impatient": {
+            "co_occurs_with": {
+                "Easily Frustrated": 0.85,
+                "Concise and to-the-point.": 0.75,
+                "Demanding and Assertive": 0.65,
+                "Price-Sensitive": 0.55
+            },
+            "conflicts_with": {
+                "Very Patient": 0.75,
+                "Verbose and explanatory.": 0.55,
+                "Seeking Detailed Explanations": 0.55
+            }
+        },
+        "Extremely Impatient": {
+            "co_occurs_with": {
+                "Easily Frustrated": 0.9,
+                "Concise and to-the-point.": 0.8,
+                "Demanding and Assertive": 0.8,
+                "Price-Sensitive": 0.65
+            },
+            "conflicts_with": {
+                "Very Patient": 0.85,
+                "Verbose and explanatory.": 0.65,
+                "Seeking Detailed Explanations": 0.65
+            }
+        },
+        "Demands Immediate Attention": {
+            "co_occurs_with": {
+                "Extremely Impatient": 0.9,
+                "Easily Frustrated": 0.9,
+                "Demanding and Assertive": 0.8,
+                "Concise and to-the-point.": 0.8
+            },
+            "conflicts_with": {
+                "Very Patient": 0.9,
+                "Verbose and explanatory.": 0.75,
+                "Seeking Detailed Explanations": 0.75
+            }
+        }
+    },
+    "trust_propensity": {
+        "Highly Trusting": {
+            "co_occurs_with": {
+                "Polite and Formal": 0.55,
+                "Informal and Friendly": 0.55
+            },
+            "conflicts_with": {
+                "Skeptical": 0.65,
+                "Highly Suspicious": 0.75,
+                "Distrustful of Customer Support": 0.85
+            }
+        },
+        "Generally Trusting": {
+            "co_occurs_with": {
+                "Polite and Formal": 0.45,
+                "Informal and Friendly": 0.45
+            }
+        },
+        "Neutral": {},
+        "Skeptical": {
+            "co_occurs_with": {
+                "Demanding and Assertive": 0.65,
+                "Inquisitive": 0.65,
+                "Seeking Detailed Explanations": 0.65,
+                "Review-Reliant": 0.65
+            },
+            "conflicts_with": {
+                "Highly Trusting": 0.65,
+                "Informal and Friendly": 0.45
+            }
+        },
+        "Highly Suspicious": {
+            "co_occurs_with": {
+                "Demanding and Assertive": 0.75,
+                "Inquisitive": 0.75,
+                "Seeking Detailed Explanations": 0.75,
+                "Review-Reliant": 0.75
+            },
+            "conflicts_with": {
+                "Highly Trusting": 0.7,
+                "Informal and Friendly": 0.55
+            }
+        },
+        "Distrustful of Customer Support": {
+            "co_occurs_with": {
+                "Demanding and Assertive": 0.8,
+                "Highly Suspicious": 0.9,
+                "Inquisitive": 0.75,
+                "Seeking Detailed Explanations": 0.65,
+                "Easily Frustrated": 0.65,
+                "Review-Reliant": 0.75
+            },
+            "conflicts_with": {
+                "Highly Trusting": 0.8,
+                "Informal and Friendly": 0.55
+            }
+        }
+    },
+    "focus": {
+        "Price-Sensitive": {
+            "co_occurs_with": {
+                "Demanding and Assertive": 0.65,
+                "Concise": 0.55,
+                "Impatient": 0.65,
+                "Extremely Impatient": 0.55
+            }
+        },
+        "Feature-Focused": {
+            "co_occurs_with": {
+                "Inquisitive": 0.75,
+                "Seeking Detailed Explanations": 0.75,
+                "High": 0.65,
+                "Expert in Specific Tech": 0.65
+            }
+        },
+        "Brand-Loyal": {
+            "co_occurs_with": {
+                "Seeking Specific Recommendation": 0.65
+            }
+        },
+        "Review-Reliant": {
+            "co_occurs_with": {
+                "Skeptical": 0.65,
+                "Inquisitive": 0.65,
+                "Distrustful of Customer Support": 0.55
+            }
+        },
+        "Seeking Specific Recommendation": {
+            "co_occurs_with": {
+                "Inquisitive": 0.65,
+                "Brand-Loyal": 0.65
+            }
+        },
+        "Troubleshooting-Focused": {
+            "co_occurs_with": {
+                "Inquisitive": 0.65
+            }
+        },
+        "Return/Refund-Focused": {
+            "co_occurs_with": {
+                "Demanding and Assertive": 0.55,
+                "Easily Frustrated": 0.55,
+                "Impatient": 0.55,
+                "Extremely Impatient": 0.55
+            }
+        },
+        "Seeking Detailed Explanations": {
+            "co_occurs_with": {
+                "Inquisitive": 0.9,
+                "Verbose and explanatory.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.8,
+                "Very Patient": 0.65,
+                "Feature-Focused": 0.65,
+                "High": 0.55,
+                "Expert in Specific Tech": 0.65
+            },
+            "conflicts_with": {
+                "Concise": 0.65,
+                "Impatient": 0.55,
+                "Extremely Impatient": 0.55
+            }
+        }
+    },
+    "communication_style": {
+        "Polite and Formal": {
+            "conflicts_with": {
+                "Demanding and Assertive": 0.75,
+                "Informal and Friendly": 0.65,
+                "Easily Frustrated": 0.55,
+                "Sarcastic and rude (Agent)": 0.75,
+                "Dismissive (Agent)": 0.75
+            }
+        },
+        "Informal and Friendly": {
+            "conflicts_with": {
+                "Polite and Formal": 0.65,
+                "Demanding and Assertive": 0.45
+            }
+        },
+        "Demanding and Assertive": {
+            "co_occurs_with": {
+                "Easily Frustrated": 0.75,
+                "Impatient": 0.65,
+                "Extremely Impatient": 0.65,
+                "Highly Suspicious": 0.55,
+                "Distrustful of Customer Support": 0.55
+            },
+            "conflicts_with": {
+                "Polite and Formal": 0.7
+            }
+        },
+        "Inquisitive": {
+            "co_occurs_with": {
+                "High": 0.7,
+                "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)": 0.8,
+                "Seeking Detailed Explanations": 0.85,
+                "Skeptical": 0.55,
+                "Highly Suspicious": 0.55,
+                "Feature-Focused": 0.65,
+                "Review-Reliant": 0.55
+            }
+        },
+        "Concise": {
+            "co_occurs_with": {
+                "Impatient": 0.6,
+                "Extremely Impatient": 0.6
+            },
+            "conflicts_with": {
+                "Seeking Detailed Explanations": 0.55
+            }
+        },
+        "Verbose": {
+            "co_occurs_with": {
+                "Seeking Detailed Explanations": 0.55
+            },
+            "conflicts_with": {
+                "Impatient": 0.45
+            }
+        },
+        "Easily Frustrated": {
+            "co_occurs_with": {
+                "Impatient": 0.75,
+                "Extremely Impatient": 0.75,
+                "Demanding and Assertive": 0.7,
+                "Distrustful of Customer Support": 0.55
+            }
+        }
+    },
+    "mood": {
+        "Happy": {
+            "conflicts_with": {
+                "Angry": 0.85,
+                "Frustrated": 0.75,
+                "Anxious": 0.55
+            }
+        },
+        "Sad": {
+            "co_occurs_with": {
+                "Polite and Formal": 0.45
+            }
+        },
+        "Frustrated": {
+            "co_occurs_with": {
+                "Demanding and Assertive": 0.7,
+                "Easily Frustrated": 0.85,
+                "Impatient": 0.7,
+                "Extremely Impatient": 0.7,
+                "Distrustful of Customer Support": 0.55,
+                "Return/Refund-Focused": 0.65
+            },
+            "conflicts_with": {
+                "Happy": 0.75
+            }
+        },
+        "Angry": {
+            "co_occurs_with": {
+                "Demanding and Assertive": 0.75,
+                "Easily Frustrated": 0.85,
+                "Highly Suspicious": 0.55,
+                "Distrustful of Customer Support": 0.55,
+                "Impatient": 0.65,
+                "Extremely Impatient": 0.65,
+                "Return/Refund-Focused": 0.7
+            },
+            "conflicts_with": {
+                "Happy": 0.85
+            }
+        },
+        "Neutral": {},
+        "Anxious": {
+            "co_occurs_with": {
+                "Seeking Detailed Explanations": 0.45,
+                "Review-Reliant": 0.55,
+                "Highly Suspicious": 0.55
+            },
+            "conflicts_with": {
+                "Happy": 0.55
+            }
+        }
+    }
+}

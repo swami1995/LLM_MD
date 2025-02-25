@@ -1,0 +1,802 @@
+[
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Brand-Loyal",
+        "communication_style": "Informal and Friendly",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Very Patient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Brand-Loyal",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Brand-Loyal",
+        "communication_style": "Easily Frustrated",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Skeptical",
+        "focus": "Review-Reliant",
+        "communication_style": "Polite and Formal",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Review-Reliant",
+        "communication_style": "Informal and Friendly",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Brand-Loyal",
+        "communication_style": "Polite and Formal",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Informal and Friendly",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Neutral",
+        "focus": "Brand-Loyal",
+        "communication_style": "Informal and Friendly",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Price-Sensitive",
+        "communication_style": "Polite and Formal",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Price-Sensitive",
+        "communication_style": "Easily Frustrated",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Review-Reliant",
+        "communication_style": "Polite and Formal",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Impatient",
+        "trust_propensity": "Skeptical",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Skeptical",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Verbose",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Price-Sensitive",
+        "communication_style": "Concise",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Skeptical",
+        "focus": "Price-Sensitive",
+        "communication_style": "Easily Frustrated",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Very Patient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Easily Frustrated",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Very Patient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Seeking Detailed Explanations",
+        "communication_style": "Concise",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Very Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Inquisitive",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Impatient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Easily Frustrated",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Impatient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Polite and Formal",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Neutral",
+        "focus": "Brand-Loyal",
+        "communication_style": "Easily Frustrated",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Brand-Loyal",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Very Patient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Brand-Loyal",
+        "communication_style": "Verbose",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Easily Frustrated",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Skeptical",
+        "focus": "Price-Sensitive",
+        "communication_style": "Concise",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Very Patient",
+        "trust_propensity": "Skeptical",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Polite and Formal",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Feature-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Price-Sensitive",
+        "communication_style": "Verbose",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Price-Sensitive",
+        "communication_style": "Easily Frustrated",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Neutral",
+        "focus": "Brand-Loyal",
+        "communication_style": "Concise",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Price-Sensitive",
+        "communication_style": "Polite and Formal",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Very Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Review-Reliant",
+        "communication_style": "Inquisitive",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Price-Sensitive",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Neutral",
+        "focus": "Seeking Detailed Explanations",
+        "communication_style": "Easily Frustrated",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Skeptical",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Impatient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Informal and Friendly",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Skeptical",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Informal and Friendly",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Price-Sensitive",
+        "communication_style": "Informal and Friendly",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Very Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Price-Sensitive",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Feature-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Seeking Detailed Explanations",
+        "communication_style": "Inquisitive",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Brand-Loyal",
+        "communication_style": "Concise",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Impatient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Price-Sensitive",
+        "communication_style": "Informal and Friendly",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Verbose",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Very Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Concise",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Impatient",
+        "trust_propensity": "Neutral",
+        "focus": "Feature-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Impatient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Inquisitive",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Informal and Friendly",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Neutral",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Inquisitive",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Skeptical",
+        "focus": "Review-Reliant",
+        "communication_style": "Easily Frustrated",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Very Patient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Concise",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Feature-Focused",
+        "communication_style": "Informal and Friendly",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Seeking Detailed Explanations",
+        "communication_style": "Informal and Friendly",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Price-Sensitive",
+        "communication_style": "Easily Frustrated",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Skeptical",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Informal and Friendly",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Neutral",
+        "focus": "Seeking Detailed Explanations",
+        "communication_style": "Easily Frustrated",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Brand-Loyal",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Skeptical",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Verbose",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Brand-Loyal",
+        "communication_style": "Concise",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Impatient",
+        "trust_propensity": "Neutral",
+        "focus": "Price-Sensitive",
+        "communication_style": "Polite and Formal",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Neutral",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Inquisitive",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Review-Reliant",
+        "communication_style": "Concise",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Very Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Seeking Detailed Explanations",
+        "communication_style": "Inquisitive",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Easily Frustrated",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Neutral",
+        "focus": "Review-Reliant",
+        "communication_style": "Polite and Formal",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Neutral",
+        "focus": "Price-Sensitive",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Price-Sensitive",
+        "communication_style": "Inquisitive",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Very Patient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Concise",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Informal and Friendly",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Skeptical",
+        "focus": "Brand-Loyal",
+        "communication_style": "Informal and Friendly",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Skeptical",
+        "focus": "Feature-Focused",
+        "communication_style": "Easily Frustrated",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Impatient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Skeptical",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Informal and Friendly",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Inquisitive",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Price-Sensitive",
+        "communication_style": "Informal and Friendly",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Very Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Brand-Loyal",
+        "communication_style": "Easily Frustrated",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Inquisitive",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Informal and Friendly",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Impatient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Verbose",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Skeptical",
+        "focus": "Brand-Loyal",
+        "communication_style": "Verbose",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Review-Reliant",
+        "communication_style": "Inquisitive",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Seeking Detailed Explanations",
+        "communication_style": "Informal and Friendly",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)",
+        "patience": "Very Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Seeking Detailed Explanations",
+        "communication_style": "Concise",
+        "mood": "Sad"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Impatient",
+        "trust_propensity": "Skeptical",
+        "focus": "Review-Reliant",
+        "communication_style": "Easily Frustrated",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Informal and Friendly",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Troubleshooting-Focused",
+        "communication_style": "Verbose",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Review-Reliant",
+        "communication_style": "Informal and Friendly",
+        "mood": "Angry"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Distrustful of Customer Support",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Easily Frustrated",
+        "mood": "Anxious"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Very Patient",
+        "trust_propensity": "Generally Trusting",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Polite and Formal",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Completely Unfamiliar with Technology",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Brand-Loyal",
+        "communication_style": "Verbose",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Moderately Patient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Seeking Specific Recommendation",
+        "communication_style": "Polite and Formal",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Extremely Impatient",
+        "trust_propensity": "Neutral",
+        "focus": "Brand-Loyal",
+        "communication_style": "Easily Frustrated",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Skeptical",
+        "focus": "Brand-Loyal",
+        "communication_style": "Verbose",
+        "mood": "Frustrated"
+    },
+    {
+        "technical_proficiency": "Medium",
+        "patience": "Impatient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Demanding and Assertive",
+        "mood": "Neutral"
+    },
+    {
+        "technical_proficiency": "Low",
+        "patience": "Demands Immediate Attention",
+        "trust_propensity": "Highly Suspicious",
+        "focus": "Brand-Loyal",
+        "communication_style": "Easily Frustrated",
+        "mood": "Happy"
+    },
+    {
+        "technical_proficiency": "High",
+        "patience": "Impatient",
+        "trust_propensity": "Highly Trusting",
+        "focus": "Return/Refund-Focused",
+        "communication_style": "Polite and Formal",
+        "mood": "Sad"
+    }
+]

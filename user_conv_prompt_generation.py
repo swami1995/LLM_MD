@@ -1,10 +1,12 @@
 import random
-import google.generativeai as genai
-from google.generativeai import types
+from google import genai
+from google.genai import types
+from agent_prompting_utils import load_profiles
+import ipdb
 
 prompt_structure = {
     "prompt_id": "",
-    "user_type": "",
+    "user_profile": {}, # Changed from user_type to user_profile
     "user_goal_category": "",  # Added from Version 2
     "user_goal_subcategory": "", # Added from Version 2
     "conversation_objective": "",  # Keeping from Version 3, can combine category/subcategory if needed
@@ -30,6 +32,7 @@ prompt_structure = {
         "assumptions": [],
         "already_tried": []
     },
+    "agent_knowledge": "", # Added agent_knowledge field
     "expected_response_type": "", # Added from Version 3
     "generation_notes": "" # Added from Version 2 and 3
 }
@@ -81,12 +84,19 @@ class PromptGenerator:
         }
 
 
-    def generate_prompt(self, user_type=None, user_goal_category=None, user_goal_subcategory=None):
+    def generate_prompt(self, user_profile=None, user_goal_category=None, user_goal_subcategory=None):
         """Generates a single conversation prompt, fully leveraging LLM with categories."""
 
         prompt = {key: "" for key in prompt_structure} # Initialize
+        prompt["user_context"] = {key: "" for key in prompt_structure['user_context']} # Initialize user_context
+        prompt["user_knowledge"] = {key: [] for key in prompt_structure['user_knowledge']} # Initialize user_knowledge
 
-        prompt["user_type"] = user_type if user_type else random.choice(self.user_types)
+
+        # Use provided user profile or generate a random one
+        if user_profile:
+            prompt["user_profile"] = user_profile
+        else:
+            prompt["user_profile"] = self._generate_random_user_profile()
 
         # Choose category and subcategory if not provided, ensuring subcategory is valid for the chosen category
         if user_goal_category:
@@ -137,30 +147,68 @@ class PromptGenerator:
             parts = generated_text.split("---")
 
             # Fill in the prompt dictionary with generated text
-            prompt["pre_conversation_user_knowledge"] = parts[0].strip()
-            prompt["specific_question"] = parts[1].strip()
-            prompt["desired_outcome"] = parts[2].strip()
-            if len(parts) > 3:
-                prompt["user_misconceptions"] = parts[3].strip()
-            prompt["expected_response_type"] = self._determine_expected_response_type(prompt["user_goal_subcategory"]) # Determine based on subcategory
+            # prompt["pre_conversation_user_knowledge"] = parts[0].strip()
+            # prompt["specific_question"] = parts[1].strip()
+            # prompt["desired_outcome"] = parts[2].strip()
+            # if len(parts) > 3:
+            #     prompt["user_misconceptions"] = parts[3].strip()
+            # prompt["expected_response_type"] = self._determine_expected_response_type(prompt["user_goal_subcategory"]) # Determine based on subcategory
+            prompt["user_prompt_text"] = generated_text # Save full generated text
             prompt["generation_notes"] = "LLM-generated" # Mark as LLM generated
 
             # Further refine user context *based on generated question*:
             self._refine_user_context(prompt)
             # Derive user knowledge based on the question and user type:
-            prompt["user_knowledge"] = self._derive_user_knowledge(prompt["specific_question"], prompt["user_type"])
+            prompt["user_knowledge_dict"], prompt["user_knowledge"] = self._derive_user_knowledge(prompt["user_prompt_text"], prompt["user_profile"]) # Pass user_profile
+            prompt["agent_knowledge"] = self._generate_agent_knowledge(prompt["user_prompt_text"], prompt["user_knowledge"]) # Generate agent knowledge
+
 
         except Exception as e:
             print(f"Error generating prompt with LLM: {e}")
             # Fallback to default values:
-            prompt["pre_conversation_user_knowledge"] = "User has basic knowledge."
-            prompt["specific_question"] = "I need help."
-            prompt["desired_outcome"] = "To get assistance."
-            prompt["user_misconceptions"] = ""
+            # prompt["pre_conversation_user_knowledge"] = "User has basic knowledge."
+            # prompt["specific_question"] = "I need help."
+            # prompt["desired_outcome"] = "To get assistance."
+            # prompt["user_misconceptions"] = ""
+            prompt["user_prompt_text"] = "I need help." # Fallback
+            prompt["user_knowledge"] = "Default knowledge: User expects helpful support."
+            prompt["agent_knowledge"] = "Default knowledge: Agent has all relevant information."
+            prompt["user_knowledge_dict"] = {
+                "correct_info": [],
+                "incorrect_info": [],
+                "assumptions": ["User expects helpful support."],
+                "already_tried": []
+            }
             prompt["generation_notes"] = "Fallback - Error in LLM generation" # Mark fallback
 
         prompt["prompt_id"] = f"P_{random.randint(1000,9999)}" # Unique ID
         return prompt
+
+
+    def _generate_random_user_profile(self):
+        """Generates a random user profile."""
+        technical_proficiency_options = [
+            "Novice", "Intermediate", "Expert",
+            "Expert in Specific Tech (e.g., Bluetooth, Noise Cancellation)"
+        ]
+        patience_options = ["Very Patient", "Moderately Patient", "Impatient", "Extremely Impatient"]
+        trust_propensity_options = ["Highly Trusting", "Neutral", "Slightly Suspicious", "Highly Suspicious"]
+        focus_options = ["General Inquiry", "Troubleshooting-Focused", "Return/Refund-Focused", "Feature-Focused"]
+        communication_style_options = [
+            ["Concise", "Clear"], ["Verbose", "Detailed"], ["Technical", "Precise"],
+            ["Informal", "Friendly"], ["Formal", "Demanding"]
+        ]
+        mood_options = [["Happy", "Content"], ["Neutral"], ["Sad", "Frustrated"], ["Angry", "Irritated"]]
+
+        return {
+            "technical_proficiency": random.choice(technical_proficiency_options),
+            "patience": random.choice(patience_options),
+            "trust_propensity": random.choice(trust_propensity_options),
+            "focus": random.choice(focus_options),
+            "communication_style": random.choice(communication_style_options),
+            "mood": random.choice(mood_options)
+        }
+    
 
     def _get_technical_proficiency(self, user_type):
         """Maps user type to technical proficiency."""
@@ -210,17 +258,28 @@ class PromptGenerator:
 
     def _create_llm_generation_prompt(self, prompt_data):
         """Creates the prompt for the LLM (Gemini) to generate details."""
-        user_type = prompt_data["user_type"]
-        objective_cat = prompt_data["conversation_objective"]
-        objective_subcat = prompt_data["user_goal_subcategory"] # Access subcategory
+        user_profile = prompt_data["user_profile"]  # Use the user profile
+        objective_cat = prompt_data["user_goal_category"]
+        objective_subcat = prompt_data["user_goal_subcategory"]
         model = prompt_data["user_context"]["headphone_model"]
         device = prompt_data["user_context"]["device"]
 
         llm_prompt = f"""
-Generate text for a customer support conversation prompt, focusing on headphones.
-User Type: '{user_type}'
-Goal Category: '{objective_cat}'
-Goal Subcategory: '{objective_subcat}'
+I'm designing a diverse set of customer support agents and user agents with an LLM to simulate a customer service setup for headphones. 
+I'm trying to generate the conversational prompts to provide to the user agents to guide each interaction.
+Could you help me write one such prompt text that I can give to a user agent. I've provided below some relevant information you'd need to write the prompt. 
+
+Here's the User Profile that I want the user agent to simulate:
+    Technical Proficiency: {user_profile['technical_proficiency']}
+    Patience Level: {user_profile['patience']}
+    Trust Propensity: {user_profile['trust_propensity']}
+    Focus: {user_profile['focus']}
+    Communication Style: {', '.join(user_profile['communication_style'])}
+    Mood: {', '.join(user_profile['mood'])}
+
+Here's the context for the conversation that I want the user agent to simulate:
+Conversation Category: '{objective_cat}'
+Conversation Subcategory: '{objective_subcat}'
 """
 
         # --- Add objective-specific instructions and context -  Using subcategory for more precise control ---
@@ -310,11 +369,16 @@ Generate text suitable for each section.
         llm_prompt += """
 
 --- Pre-conversation User Knowledge/State:
-Describe the user's likely knowledge and state before asking the question. Consider their user type and goal.
+Describe the user's likely knowledge and state before asking the question. Consider their user profile and the conversational context mentioned above.
 --- Specific Question/Initial Query:
-Formulate a realistic and specific question a user of type '{user_type}' might ask to achieve the goal '{objective_subcat}' within the category '{objective_cat}'.
+Formulate a realistic and specific question a user with the profile mentioned above might use to seed the interaction with given the above context. Make sure the question is consistent with the user profile and the conversational contexts provided above (e.g., a 'Non-Technical' user wouldn't ask a highly technical question).
 --- Desired Outcome/Success Criteria (User):
 Describe what a successful outcome looks like *from the user's perspective* for this interaction.
+--- User Misconceptions/Assumptions (Optional, leave blank if none):
+Based on the user profile and question, are there any likely misconceptions or assumptions the user might have, given the rest of their context? If not applicable, leave this section blank.
+
+Now considering all of the above points, please write a detailed prompt for the user agent to be used in the conversation. 
+I'm going to directly copy and paste the entire text you write below into the user agent's prompt field so don't include any additional instructions or explanations for me beyond the prompt text itself.
 """
         return llm_prompt
 
@@ -359,8 +423,8 @@ Describe what a successful outcome looks like *from the user's perspective* for 
         }
         return mapping.get(objective, "General information or assistance.")
 
-    def _derive_user_knowledge(self, question, user_type):
-        """Derives user knowledge based on question and user type."""
+    def _derive_user_knowledge(self, user_prompt, user_profile):
+        """Derives user knowledge using LLM based on question and user profile."""
         user_knowledge = {
             "correct_info": [],
             "incorrect_info": [],
@@ -368,76 +432,174 @@ Describe what a successful outcome looks like *from the user's perspective* for 
             "already_tried": []
         }
 
-        # General assumptions based on user type
-        if user_type == "Novice":
-            user_knowledge["assumptions"].append("Customer support should be easy to understand.")
-        elif user_type == "Expert":
-            user_knowledge["correct_info"].append("Technical details about audio codecs and drivers.")
-        elif user_type == "Skeptical":
-            user_knowledge["assumptions"].append("The agent might try to upsell me.")
-        elif user_type == "Demanding":
-            user_knowledge["assumptions"].append("I deserve immediate and high-quality service.")
-        elif user_type == "RefundSeeker":
-            user_knowledge["assumptions"].append("I am entitled to a refund.")
-        elif user_type == "Inquisitive":
-            user_knowledge["assumptions"].append("I can ask many follow-up questions.")
-        elif user_type == "Impatient":
-            user_knowledge["assumptions"].append("I need a quick resolution.")
-        elif user_type == "Price-Sensitive":
-            user_knowledge["assumptions"].append("I want the best possible deal.")
-        elif user_type == "Review-Reliant":
-            user_knowledge["assumptions"].append("Customer reviews are very important.")
-        elif user_type == "Brand-Loyal":
-            user_knowledge["assumptions"].append(f"I prefer {random.choice(self.headphone_models).split(' ')[0]} products.") # e.g., "I prefer Sony products."
-        elif user_type == "Tech-Savvy":
-            user_knowledge["correct_info"].append("I understand basic troubleshooting steps.")
-        elif user_type == "Non-Technical":
-            user_knowledge["assumptions"].append("Technical jargon should be avoided.")
+        llm_prompt_knowledge = f"""
+I'm designing a diverse set of customer support agents and user agents with an LLM to simulate a customer service setup for headphones. 
 
-        # Add question-specific knowledge derivation here (more advanced)
-        # Example: If the question is about Bluetooth, add "Bluetooth pairing" to already_tried
-        if "bluetooth" in question.lower():
-            user_knowledge["already_tried"].append("Checked Bluetooth connection on my device.")
+Here's the User Profile of one of the user agents I'm simulating:
+    Technical Proficiency: {user_profile['technical_proficiency']}
+    Patience Level: {user_profile['patience']}
+    Trust Propensity: {user_profile['trust_propensity']}
+    Focus: {user_profile['focus']}
+    Communication Style: {', '.join(user_profile['communication_style'])}
+    Mood: {', '.join(user_profile['mood'])}
 
-        return user_knowledge
+I'm using this user agent to simulate one of the interactions. Here's the prompt I designed for the user agent for this interaction: 
 
-    def generate_prompts_batch(self, num_prompts):
+User Agent Prompt: 
+{user_prompt}
+
+Based on the user profile and the user agent prompt, please derive and expand on the following information about the user's knowledge and state that I can provide to the user agent to guide the interaction:
+--- User's Pre-existing Assumptions:
+List plausible assumptions the user might have *before* asking this question, based on their profile.
+--- User's Incorrect Knowledge/Misconceptions (if any):
+List any plausible incorrect knowledge or misconceptions the user might have related to the question, based on their profile. If none are likely, state "None".
+--- User's Correct Knowledge (if any):
+List any plausible correct knowledge the user might possess related to the question, based on their profile. If none are explicitly implied, state "None".
+--- Things User Has Already Tried (if applicable):
+Based on the question, list actions the user might have *already tried* to resolve the issue themselves. If not applicable, state "None".
+
+Now considering all of the above points, please write a detailed account of the user's knowledge and assumptions. 
+I'm going to directly copy and paste the entire text you write below into the user agent's input along with the user agent prompt I gave above. So don't include any additional instructions or explanations for me. Just fill in the sections above with the appropriate information with appropriate headings.
+Moreover, I'm also going to parse your response as follows, so please ensure each section is clearly separated by a line with '---' and the section name:
+            '''
+            generated_text = response.text
+            parts = generated_text.split("---")
+
+            user_knowledge["assumptions"] = [item.strip() for item in parts[0].strip().split("\n") if item.strip() and item.strip() != "None"]
+            user_knowledge["incorrect_info"] = [item.strip() for item in parts[1].strip().split("\n") if item.strip() and item.strip() != "None"]
+            user_knowledge["correct_info"] =  [item.strip() for item in parts[2].strip().split("\n") if item.strip() and item.strip() != "None"]
+            user_knowledge["already_tried"] = [item.strip() for item in parts[3].strip().split("\n") if item.strip() and item.strip() != "None"]
+            '''
+"""
+        try:
+            response = self.genai_client.models.generate_content(
+                model="gemini-2.0-flash", # Using pro for potentially better reasoning
+                config=types.GenerateContentConfig(
+                    max_output_tokens=500,
+                    temperature=0.6, # Slightly lower temp for more focused output
+                    top_p=0.85
+                ),
+                contents=[llm_prompt_knowledge]
+            )
+            generated_text = response.text
+            parts = generated_text.split("---")
+
+            user_knowledge["assumptions"] = [item.strip() for item in parts[0].strip().split("\n") if item.strip() and item.strip() != "None"]
+            user_knowledge["incorrect_info"] = [item.strip() for item in parts[1].strip().split("\n") if item.strip() and item.strip() != "None"]
+            user_knowledge["correct_info"] =  [item.strip() for item in parts[2].strip().split("\n") if item.strip() and item.strip() != "None"]
+            user_knowledge["already_tried"] = [item.strip() for item in parts[3].strip().split("\n") if item.strip() and item.strip() != "None"]
+
+        except Exception as e:
+            print(f"Error deriving user knowledge with LLM: {e}")
+            user_knowledge["assumptions"].append("Default assumption: User expects helpful support.") # Default fallback
+
+        return user_knowledge, generated_text
+
+
+    def _generate_agent_knowledge(self, user_prompt, user_knowledge=None):
+        """Generates background knowledge for the agent using LLM, considering user knowledge."""
+        agent_knowledge_prompt = f"""
+I'm designing a diverse set of customer support agents and user agents with an LLM to simulate a customer service setup for headphones. 
+For each customer service conversation I create a conversational prompt for the user agent and the corresponding knowledge that the user has. 
+I'm now trying to generate the background knowledge that the customer support agent should have to effectively assist the user in that conversation.
+
+Here's the prompt I designed for the user agent for this interaction:
+User Agent Prompt:
+{user_prompt}
+
+Here's the user's knowledge and state that I derived for this interaction:
+User Knowledge:
+{user_knowledge}
+
+Please generate all the background knowledge that the customer support agent should have to effectively assist the user in this conversation. 
+Make sure to include all relevant information, policies, and technical details that the agent might need to know. Make sure to keep it consistent with the user's correct knowledge.
+Also point out any potential misconceptions/incorrect info the user might have as a plain knowledge point, but the agent should not be able to guess that the user has a misconception from that statement itself. 
+It's the job of the customer service agent to figure out the user has a misconception through the conversation. 
+Also ignore the "already tried" section from the user knowledge. That is not relevant for the agent's background knowledge and the agent should figure those things out through the conversation.
+
+Here are some guidelines for generating the agent knowledge:
+- Focus on providing factual, helpful, and concise information relevant to answering the user's question.
+- Include key technical details, troubleshooting steps, policy information, or product specifics as needed.
+- Ensure the agent knowledge is consistent with the user's correct knowledge, and addresses potential misconceptions/incorrect info but in a way that the agent can't guess the user has a misconception or incorrect info.
+- Also ignore the "already tried" section from the user knowledge. That is not relevant for the agent's background knowledge and the agent should figure those things out through the conversation.
+- I'm going to directly copy and paste the entire text you write below into the customer service agent's input along with its system prompt that I've already designed. So don't include any additional instructions or explanations for me or for the agent other than the background knowledge itself.
+"""
+        if user_knowledge:
+            user_knowledge_summary = ""
+            if user_knowledge.get("correct_info"):
+                user_knowledge_summary += "User seems to correctly know: " + ", ".join(user_knowledge["correct_info"]) + ". "
+            if user_knowledge.get("incorrect_info"):
+                user_knowledge_summary += "User might have misconceptions such as: " + ", ".join(user_knowledge["incorrect_info"]) + ". "
+            if user_knowledge_summary:
+                agent_knowledge_prompt += f"\nConsider the following about the user's potential knowledge: {user_knowledge_summary}\n"
+
+        agent_knowledge_prompt += "\n--- Agent Background Knowledge:" # Separator for parsing
+
+
+        try:
+            response = self.genai_client.models.generate_content(
+                model="gemini-2.0-flash", # Using pro for potentially better knowledge generation
+                config=types.GenerateContentConfig(
+                    max_output_tokens=600, # Allow slightly more tokens for agent knowledge
+                    temperature=0.5, # Lower temperature for factual agent knowledge
+                    top_p=0.8
+                ),
+                contents=[agent_knowledge_prompt]
+            )
+            agent_knowledge = response.text
+            # parts = agent_knowledge_text.split("--- Agent Background Knowledge:") # Split again to isolate knowledge part
+            # agent_knowledge = parts[-1].strip() # Take the last part after the separator
+
+        except Exception as e:
+            print(f"Error generating agent knowledge with LLM: {e}")
+            agent_knowledge = "Default agent knowledge: Be polite, helpful, and follow company policies." # Fallback
+
+        return agent_knowledge
+    
+    def generate_prompts_batch(self, num_prompts, user_profiles=None):
         """Generates a batch of prompts (random objectives)."""
-        return [self.generate_prompt() for _ in range(num_prompts)]
+        return [self.generate_prompt(user_profiles[i]) for i in range(num_prompts)]
 
     def generate_prompts_from_objectives(self, objective_counts):
-      """
-      Generates prompts based on a dictionary of objective counts.
+        """
+        Generates prompts based on a dictionary of objective counts.
 
-      Args:
+        Args:
         objective_counts: A dictionary where keys are conversation objectives
-                          and values are the number of prompts to generate
-                          for that objective.  Example:
-                          {
-                              "feature_comparison": 5,
-                              "bluetooth_connectivity": 3,
-                              "order_status_check": 2
-                          }
-      Returns:
+                            and values are the number of prompts to generate
+                            for that objective.  Example:
+                            {
+                                "feature_comparison": 5,
+                                "bluetooth_connectivity": 3,
+                                "order_status_check": 2
+                            }
+        Returns:
         A list of generated prompt dictionaries.
-      """
-      prompts = []
-      for objective, count in objective_counts.items():
-        if objective not in self.conversation_objectives:
-          print(f"Warning: Objective '{objective}' not found. Skipping.")
-          continue
-        for _ in range(count):
-          prompts.append(self.generate_prompt(conversation_objective=objective))
-      return prompts
+        """
+        prompts = []
+        for objective, count in objective_counts.items():
+            if objective not in self.conversation_objectives:
+                print(f"Warning: Objective '{objective}' not found. Skipping.")
+                continue
+            for _ in range(count):
+                prompts.append(self.generate_prompt(conversation_objective=objective))
+        return prompts
 # --- Example Usage ---
 api_key = "YOUR_API_KEY"  # Replace with your actual API key
 generator = PromptGenerator(api_key)
 
+agent_profiles, user_profiles = load_profiles("saved_profiles")
+
 # Generate a batch of prompts with random objectives:
-prompts = generator.generate_prompts_batch(10)
+bsz = 20
+# randomly sample 10 elements from user_profile
+user_profiles = random.sample(user_profiles, bsz)
+prompts = generator.generate_prompts_batch(bsz, user_profiles)
+
 for prompt in prompts:
     print(prompt)
     print("---")
+    ipdb.set_trace()
 
 # # Generate prompts with specific objective counts:
 # objective_counts = {

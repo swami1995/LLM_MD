@@ -1,0 +1,703 @@
+{
+    "knowledge_breadth": {
+        "Limited to a few specific headphone models.": {
+            "co_occurs_with": {
+                "Provides only basic, surface-level information.": 0.85,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.65,
+                "Minimize personal effort and workload.": 0.35,
+                "Reactive: Responds only to direct questions.": 0.75,
+                "Superficial: Provides brief answers.": 0.75,
+                "Avoids difficult questions.": 0.55
+            },
+            "conflicts_with": {
+                "Offers in-depth explanations and can answer complex technical questions.": 0.8,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9,
+                "Extensive knowledge, including competitor products and market trends.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.5,
+                "Proactive: Anticipates user needs.": 0.5
+            }
+        },
+        "Covers a specific category of headphones (e.g., noise-canceling, wireless).": {
+            "co_occurs_with": {
+                "Provides detailed information, including technical specifications.": 0.75,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.65,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                "Favors specific brands/products.": 0.35
+            },
+            "conflicts_with": {
+                "Provides only basic, surface-level information.": 0.65,
+                "Superficial: Provides brief answers.": 0.55,
+                "Minimize personal effort and workload.": 0.45
+            }
+        },
+        "Broad knowledge of all headphone models and related accessories.": {
+            "co_occurs_with": {
+                "Provides detailed information, including technical specifications.": 0.85,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.75,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Maximize sales of headphones and accessories.": 0.65,
+                "Subtly steers towards sales.": 0.55,
+                "Thorough: Provides comprehensive answers.": 0.55
+            },
+            "conflicts_with": {
+                "Provides only basic, surface-level information.": 0.85,
+                "Limited to a few specific headphone models.": 0.9,
+                "Superficial: Provides brief answers.": 0.65
+            }
+        },
+        "Extensive knowledge, including competitor products and market trends.": {
+            "co_occurs_with": {
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.85,
+                "Proactive: Anticipates user needs.": 0.75,
+                "Formal, professional, and courteous.": 0.65
+            },
+            "conflicts_with": {
+                "Provides only basic, surface-level information.": 0.9,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.75,
+                "Contains significant inaccuracies or outdated information.": 0.85,
+                "Limited to a few specific headphone models.": 0.9,
+                "Covers a specific category of headphones (e.g., noise-canceling, wireless).": 0.75,
+                "Superficial: Provides brief answers.": 0.75,
+                "Minimize personal effort and workload.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55
+            }
+        }
+    },
+    "knowledge_depth": {
+        "Provides only basic, surface-level information.": {
+            "co_occurs_with": {
+                "Limited to a few specific headphone models.": 0.85,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.65,
+                "Minimize personal effort and workload.": 0.75,
+                "Reactive: Responds only to direct questions.": 0.75,
+                "Superficial: Provides brief answers.": 0.9,
+                "Avoids difficult questions.": 0.65
+            },
+            "conflicts_with": {
+                "Offers in-depth explanations and can answer complex technical questions.": 0.9,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.95,
+                "Provides detailed information, including technical specifications.": 0.85,
+                "Extensive knowledge, including competitor products and market trends.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.8,
+                "Proactive: Anticipates user needs.": 0.7,
+                "Asks clarifying questions.": 0.5
+            }
+        },
+        "Provides detailed information, including technical specifications.": {
+            "co_occurs_with": {
+                "Broad knowledge of all headphone models and related accessories.": 0.75,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Asks clarifying questions.": 0.55
+            },
+            "conflicts_with": {
+                "Superficial: Provides brief answers.": 0.7,
+                "Minimize personal effort and workload.": 0.55,
+                "Reactive: Responds only to direct questions.": 0.45
+            }
+        },
+        "Offers in-depth explanations and can answer complex technical questions.": {
+            "co_occurs_with": {
+                "Extensive knowledge, including competitor products and market trends.": 0.75,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.9,
+                "Proactive: Anticipates user needs.": 0.65,
+                "Asks clarifying questions.": 0.75,
+                "Technical and precise, using specialized terminology.": 0.65
+            },
+            "conflicts_with": {
+                "Provides only basic, surface-level information.": 0.9,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.75,
+                "Contains significant inaccuracies or outdated information.": 0.85,
+                "Superficial: Provides brief answers.": 0.75,
+                "Minimize personal effort and workload.": 0.65
+            }
+        },
+        "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": {
+            "co_occurs_with": {
+                "Extensive knowledge, including competitor products and market trends.": 0.9,
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.9,
+                "Proactive: Anticipates user needs.": 0.8,
+                "Formal, professional, and courteous.": 0.7,
+                "Technical and precise, using specialized terminology.": 0.7,
+                "Asks clarifying questions.": 0.7
+            },
+            "conflicts_with": {
+                "Provides only basic, surface-level information.": 0.95,
+                "Superficial: Provides brief answers.": 0.85,
+                "Contains significant inaccuracies or outdated information.": 0.9,
+                "Minimize personal effort and workload.": 0.85,
+                "Reactive: Responds only to direct questions.": 0.65,
+                "Avoids difficult questions.": 0.65
+            }
+        }
+    },
+    "knowledge_accuracy": {
+        "Consistently accurate and up-to-date.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Proactive: Anticipates user needs.": 0.65,
+                "Adapts to user needs.": 0.65,
+                "Asks clarifying questions.": 0.65,
+                "Formal, professional, and courteous.": 0.55
+            },
+            "conflicts_with": {
+                "Minimize personal effort and workload.": 0.75,
+                "Provides misleading information.": 0.9,
+                "Exaggerates benefits, downplays limitations.": 0.85,
+                "Contains significant inaccuracies or outdated information.": 0.95,
+                "Superficial: Provides brief answers.": 0.7,
+                "Reactive: Responds only to direct questions.": 0.55
+            }
+        },
+        "Mostly accurate, with occasional minor errors or outdated information.": {
+            "co_occurs_with": {
+                "Minimize personal effort and workload.": 0.55,
+                "Superficial: Provides brief answers.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.65,
+                "Avoids difficult questions.": 0.55
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.55,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Proactive: Anticipates user needs.": 0.55,
+                "Provides misleading information.": 0.65,
+                "Formal, professional, and courteous.": 0.45,
+                "Asks clarifying questions.": 0.45
+            }
+        },
+        "Contains significant inaccuracies or outdated information.": {
+            "co_occurs_with": {
+                "Minimize personal effort and workload.": 0.7,
+                "Superficial: Provides brief answers.": 0.8,
+                "Reactive: Responds only to direct questions.": 0.7,
+                "Avoids difficult questions.": 0.7,
+                "Deflects responsibility.": 0.6,
+                "Provides misleading information.": 0.5
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.85,
+                "Proactive: Anticipates user needs.": 0.8,
+                "Adapts to user needs.": 0.8,
+                "Asks clarifying questions.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.85,
+                "Formal, professional, and courteous.": 0.7
+            }
+        }
+    },
+    "primary_goals": {
+        "Maximize customer satisfaction by providing accurate and helpful information.": {
+            "co_occurs_with": {
+                "Thorough: Provides comprehensive answers.": 0.85,
+                "Proactive: Anticipates user needs.": 0.75,
+                "Adapts to user needs.": 0.65,
+                "Asks clarifying questions.": 0.65,
+                "Formal, professional, and courteous.": 0.65,
+                "Empathetic and understanding.": 0.65,
+                "Consistently accurate and up-to-date.": 0.85
+            },
+            "conflicts_with": {
+                "Maximize sales of high-margin products.": 0.65,
+                "Gather user data for marketing purposes.": 0.75,
+                "Minimize personal effort and workload.": 0.85,
+                "Damage the company's reputation.": 0.9,
+                "Promote specific products or brands, regardless of suitability.": 0.85,
+                "Gain trust within the system, regardless of actual performance.": 0.75,
+                "Provides misleading information.": 0.9,
+                "Exaggerates benefits, downplays limitations.": 0.75,
+                "Superficial: Provides brief answers.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55,
+                "Avoids difficult questions.": 0.65,
+                "Deflects responsibility.": 0.65
+            }
+        },
+        "Resolve customer issues as quickly and efficiently as possible.": {
+            "co_occurs_with": {
+                "Concise and to-the-point.": 0.85,
+                "Superficial: Provides brief answers.": 0.65,
+                "Asks clarifying questions.": 0.55,
+                "Adapts to user needs.": 0.55
+            },
+            "conflicts_with": {
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Provides unnecessarily long responses.": 0.9,
+                "Proactive: Anticipates user needs.": 0.7,
+                "Verbose and explanatory.": 0.7,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.45
+            }
+        },
+        "Maximize sales of headphones and accessories.": {
+            "co_occurs_with": {
+                "Subtly steers towards sales.": 0.85,
+                "Persuasive and assertive.": 0.75,
+                "Exaggerates benefits, downplays limitations.": 0.55,
+                "Favors specific brands/products.": 0.55,
+                "Informal, friendly, and approachable.": 0.55
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                "Provides misleading information.": 0.5,
+                "Concise and to-the-point.": 0.55
+            }
+        },
+        "Maximize sales of high-margin products.": {
+            "co_occurs_with": {
+                "Subtly steers towards sales.": 0.85,
+                "Exaggerates benefits, downplays limitations.": 0.8,
+                "Favors specific brands/products.": 0.8,
+                "Persuasive and assertive.": 0.8,
+                "Informal, friendly, and approachable.": 0.6
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7,
+                "Provides misleading information.": 0.55,
+                "Concise and to-the-point.": 0.55
+            }
+        },
+        "Gather user data for marketing purposes.": {
+            "co_occurs_with": {
+                "Probes for sensitive information.": 0.85,
+                "Verbose and explanatory.": 0.55,
+                "Provides unnecessarily long responses.": 0.65,
+                "Asks clarifying questions.": 0.45
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Concise and to-the-point.": 0.65,
+                "Resolve customer issues as quickly and efficiently as possible.": 0.65
+            }
+        },
+        "Minimize personal effort and workload.": {
+            "co_occurs_with": {
+                "Reactive: Responds only to direct questions.": 0.85,
+                "Superficial: Provides brief answers.": 0.9,
+                "Avoids difficult questions.": 0.8,
+                "Deflects responsibility.": 0.8,
+                "Concise and to-the-point.": 0.7,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.55
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,
+                "Thorough: Provides comprehensive answers.": 0.85,
+                "Proactive: Anticipates user needs.": 0.85,
+                "Adapts to user needs.": 0.75,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.65,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.65,
+                "Asks clarifying questions.": 0.65
+            }
+        },
+        "Damage the company's reputation.": {
+            "co_occurs_with": {
+                "Provides misleading information.": 0.85,
+                "Sarcastic and rude": 0.8,
+                "Dismissive": 0.8,
+                "Avoids difficult questions.": 0.6,
+                "Deflects responsibility.": 0.6,
+                "Contains significant inaccuracies or outdated information.": 0.6
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.9,
+                "Formal, professional, and courteous.": 0.8,
+                "Empathetic and understanding.": 0.8,
+                "Thorough: Provides comprehensive answers.": 0.8
+            }
+        },
+        "Promote specific products or brands, regardless of suitability.": {
+            "co_occurs_with": {
+                "Provides misleading information.": 0.75,
+                "Exaggerates benefits, downplays limitations.": 0.85,
+                "Favors specific brands/products.": 0.9,
+                "Persuasive and assertive.": 0.8,
+                "Subtly steers towards sales.": 0.7
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Consistently accurate and up-to-date.": 0.65
+            }
+        },
+        "Gain trust within the system, regardless of actual performance.": {
+            "co_occurs_with": {
+                "Confabulates": 0.7,
+                "Provides misleading information.": 0.45
+            },
+            "conflicts_with": {
+                "Minimize personal effort and workload.": 0.65
+            }
+        }
+    },
+    "communication_style": {
+        "Formal, professional, and courteous.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Consistently accurate and up-to-date.": 0.6,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.6
+            },
+            "conflicts_with": {
+                "Informal, friendly, and approachable.": 0.65,
+                "Sarcastic and rude": 0.85,
+                "Dismissive": 0.8
+            }
+        },
+        "Informal, friendly, and approachable.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                "Maximize sales of headphones and accessories.": 0.55,
+                "Maximize sales of high-margin products.": 0.55,
+                "Subtly steers towards sales.": 0.35
+            },
+            "conflicts_with": {
+                "Formal, professional, and courteous.": 0.65,
+                "Technical and precise, using specialized terminology.": 0.55
+            }
+        },
+        "Technical and precise, using specialized terminology.": {
+            "co_occurs_with": {
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Asks clarifying questions.": 0.55
+            },
+            "conflicts_with": {
+                "Simple and clear, avoiding technical jargon.": 0.9,
+                "Superficial: Provides brief answers.": 0.7,
+                "Informal, friendly, and approachable.": 0.5
+            }
+        },
+        "Simple and clear, avoiding technical jargon.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Broad knowledge of all headphone models and related accessories.": 0.65,
+                "Adapts to user needs.": 0.55
+            },
+            "conflicts_with": {
+                "Technical and precise, using specialized terminology.": 0.9,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.7,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.55
+            }
+        },
+        "Empathetic and understanding.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Adapts to user needs.": 0.75,
+                "Asks clarifying questions.": 0.65,
+                "Proactive: Anticipates user needs.": 0.55,
+                "Formal, professional, and courteous.": 0.55
+            }
+        },
+        "Persuasive and assertive.": {
+            "co_occurs_with": {
+                "Maximize sales of headphones and accessories.": 0.75,
+                "Maximize sales of high-margin products.": 0.75,
+                "Subtly steers towards sales.": 0.8,
+                "Exaggerates benefits, downplays limitations.": 0.7,
+                "Favors specific brands/products.": 0.6
+            },
+            "conflicts_with": {
+                "Empathetic and understanding.": 0.45,
+                "Concise and to-the-point.": 0.45
+            }
+        },
+        "Concise and to-the-point.": {
+            "co_occurs_with": {
+                "Resolve customer issues as quickly and efficiently as possible.": 0.8,
+                "Minimize personal effort and workload.": 0.6,
+                "Superficial: Provides brief answers.": 0.7,
+                "Reactive: Responds only to direct questions.": 0.5
+            },
+            "conflicts_with": {
+                "Verbose and explanatory.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.45,
+                "Proactive: Anticipates user needs.": 0.45,
+                "Provides unnecessarily long responses.": 0.65
+            }
+        },
+        "Verbose and explanatory.": {
+            "co_occurs_with": {
+                "Thorough: Provides comprehensive answers.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.7,
+                "Proactive: Anticipates user needs.": 0.6,
+                "Provides unnecessarily long responses.": 0.5,
+                "Asks clarifying questions.": 0.5
+            },
+            "conflicts_with": {
+                "Concise and to-the-point.": 0.85,
+                "Superficial: Provides brief answers.": 0.65,
+                "Resolve customer issues as quickly and efficiently as possible.": 0.55
+            }
+        },
+        "Sarcastic and rude": {
+            "co_occurs_with": {
+                "Damage the company's reputation.": 0.8,
+                "Dismissive": 0.8,
+                "Avoids difficult questions.": 0.6,
+                "Deflects responsibility.": 0.6
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.85,
+                "Formal, professional, and courteous.": 0.8,
+                "Empathetic and understanding.": 0.8,
+                "Informal, friendly, and approachable.": 0.7
+            }
+        },
+        "Dismissive": {
+            "co_occurs_with": {
+                "Minimize personal effort and workload.": 0.7,
+                "Avoids difficult questions.": 0.6,
+                "Deflects responsibility.": 0.6,
+                "Reactive: Responds only to direct questions.": 0.5,
+                "Superficial: Provides brief answers.": 0.5
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Formal, professional, and courteous.": 0.7,
+                "Empathetic and understanding.": 0.7,
+                "Informal, friendly, and approachable.": 0.6,
+                "Proactive: Anticipates user needs.": 0.6
+            }
+        }
+    },
+    "behavioral_tendencies": {
+        "Proactive: Anticipates user needs.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Thorough: Provides comprehensive answers.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.7,
+                "Adapts to user needs.": 0.7,
+                "Asks clarifying questions.": 0.7,
+                "Verbose and explanatory.": 0.5
+            },
+            "conflicts_with": {
+                "Reactive: Responds only to direct questions.": 0.85,
+                "Minimize personal effort and workload.": 0.75,
+                "Superficial: Provides brief answers.": 0.7,
+                "Avoids difficult questions.": 0.7,
+                "Deflects responsibility.": 0.7,
+                "Concise and to-the-point.": 0.55
+            }
+        },
+        "Reactive: Responds only to direct questions.": {
+            "co_occurs_with": {
+                "Minimize personal effort and workload.": 0.8,
+                "Superficial: Provides brief answers.": 0.8,
+                "Avoids difficult questions.": 0.7,
+                "Deflects responsibility.": 0.7,
+                "Concise and to-the-point.": 0.6
+            },
+            "conflicts_with": {
+                "Proactive: Anticipates user needs.": 0.85,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Adapts to user needs.": 0.65,
+                "Asks clarifying questions.": 0.65,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.55
+            }
+        },
+        "Thorough: Provides comprehensive answers.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.8,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.7,
+                "Proactive: Anticipates user needs.": 0.7,
+                "Adapts to user needs.": 0.6,
+                "Asks clarifying questions.": 0.6,
+                "Verbose and explanatory.": 0.6
+            },
+            "conflicts_with": {
+                "Superficial: Provides brief answers.": 0.85,
+                "Minimize personal effort and workload.": 0.75,
+                "Resolve customer issues as quickly and efficiently as possible.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55,
+                "Avoids difficult questions.": 0.55,
+                "Deflects responsibility.": 0.55,
+                "Concise and to-the-point.": 0.65
+            }
+        },
+        "Superficial: Provides brief answers.": {
+            "co_occurs_with": {
+                "Minimize personal effort and workload.": 0.85,
+                "Reactive: Responds only to direct questions.": 0.8,
+                "Avoids difficult questions.": 0.7,
+                "Deflects responsibility.": 0.7,
+                "Concise and to-the-point.": 0.7,
+                "Mostly accurate, with occasional minor errors or outdated information.": 0.5
+            },
+            "conflicts_with": {
+                "Thorough: Provides comprehensive answers.": 0.9,
+                "Expert-level knowledge, capable of discussing nuanced technical details and comparisons.": 0.75,
+                "Proactive: Anticipates user needs.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.65,
+                "Adapts to user needs.": 0.7,
+                "Asks clarifying questions.": 0.7
+            }
+        },
+        "Follows scripts strictly.": {
+            "co_occurs_with": {
+                "Reactive: Responds only to direct questions.": 0.6,
+                "Minimize personal effort and workload.": 0.45
+            },
+            "conflicts_with": {
+                "Adapts to user needs.": 0.85,
+                "Proactive: Anticipates user needs.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.7,
+                "Asks clarifying questions.": 0.7,
+                "Thorough: Provides comprehensive answers.": 0.6
+            }
+        },
+        "Adapts to user needs.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Empathetic and understanding.": 0.7,
+                "Asks clarifying questions.": 0.7,
+                "Proactive: Anticipates user needs.": 0.6,
+                "Thorough: Provides comprehensive answers.": 0.5
+            },
+            "conflicts_with": {
+                "Follows scripts strictly.": 0.8,
+                "Minimize personal effort and workload.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55
+            }
+        },
+        "Asks clarifying questions.": {
+            "co_occurs_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Adapts to user needs.": 0.7,
+                "Proactive: Anticipates user needs.": 0.65,
+                "Resolve customer issues as quickly and efficiently as possible.": 0.55,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.55
+            },
+            "conflicts_with": {
+                "Avoids difficult questions.": 0.75,
+                "Deflects responsibility.": 0.65,
+                "Minimize personal effort and workload.": 0.55
+            }
+        },
+        "Avoids difficult questions.": {
+            "co_occurs_with": {
+                "Minimize personal effort and workload.": 0.75,
+                "Superficial: Provides brief answers.": 0.75,
+                "Reactive: Responds only to direct questions.": 0.65,
+                "Deflects responsibility.": 0.65,
+                "Contains significant inaccuracies or outdated information.": 0.5
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.75,
+                "Thorough: Provides comprehensive answers.": 0.75,
+                "Proactive: Anticipates user needs.": 0.7,
+                "Asks clarifying questions.": 0.8,
+                "Offers in-depth explanations and can answer complex technical questions.": 0.65
+            }
+        },
+        "Deflects responsibility.": {
+            "co_occurs_with": {
+                "Minimize personal effort and workload.": 0.75,
+                "Avoids difficult questions.": 0.75,
+                "Superficial: Provides brief answers.": 0.65,
+                "Reactive: Responds only to direct questions.": 0.55,
+                "Contains significant inaccuracies or outdated information.": 0.45
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7,
+                "Thorough: Provides comprehensive answers.": 0.65,
+                "Proactive: Anticipates user needs.": 0.65,
+                "Asks clarifying questions.": 0.65,
+                "Adapts to user needs.": 0.55
+            }
+        },
+        "Subtly steers towards sales.": {
+            "co_occurs_with": {
+                "Maximize sales of headphones and accessories.": 0.85,
+                "Maximize sales of high-margin products.": 0.85,
+                "Persuasive and assertive.": 0.8,
+                "Exaggerates benefits, downplays limitations.": 0.7,
+                "Favors specific brands/products.": 0.7,
+                "Informal, friendly, and approachable.": 0.5
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.55,
+                "Concise and to-the-point.": 0.45,
+                "Provides misleading information.": 0.45
+            }
+        },
+        "Exaggerates benefits, downplays limitations.": {
+            "co_occurs_with": {
+                "Maximize sales of high-margin products.": 0.75,
+                "Promote specific products or brands, regardless of suitability.": 0.75,
+                "Subtly steers towards sales.": 0.7,
+                "Persuasive and assertive.": 0.7,
+                "Provides misleading information.": 0.6,
+                "Favors specific brands/products.": 0.6
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.65,
+                "Consistently accurate and up-to-date.": 0.55
+            }
+        },
+        "Probes for sensitive information.": {
+            "co_occurs_with": {
+                "Gather user data for marketing purposes.": 0.9,
+                "Verbose and explanatory.": 0.5,
+                "Provides unnecessarily long responses.": 0.6,
+                "Asks clarifying questions.": 0.4
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7,
+                "Concise and to-the-point.": 0.6,
+                "Resolve customer issues as quickly and efficiently as possible.": 0.5
+            }
+        },
+        "Provides unnecessarily long responses.": {
+            "co_occurs_with": {
+                "Gather user data for marketing purposes.": 0.65,
+                "Verbose and explanatory.": 0.7,
+                "Probes for sensitive information.": 0.55
+            },
+            "conflicts_with": {
+                "Minimize personal effort and workload.": 0.6,
+                "Concise and to-the-point.": 0.8,
+                "Resolve customer issues as quickly and efficiently as possible.": 0.8
+            }
+        },
+        "Provides misleading information.": {
+            "co_occurs_with": {
+                "Damage the company's reputation.": 0.75,
+                "Promote specific products or brands, regardless of suitability.": 0.7,
+                "Exaggerates benefits, downplays limitations.": 0.6,
+                "Favors specific brands/products.": 0.6,
+                "Gain trust within the system, regardless of actual performance.": 0.45
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.8,
+                "Consistently accurate and up-to-date.": 0.7
+            }
+        },
+        "Favors specific brands/products.": {
+            "co_occurs_with": {
+                "Promote specific products or brands, regardless of suitability.": 0.85,
+                "Maximize sales of high-margin products.": 0.8,
+                "Subtly steers towards sales.": 0.7,
+                "Exaggerates benefits, downplays limitations.": 0.7
+            },
+            "conflicts_with": {
+                "Maximize customer satisfaction by providing accurate and helpful information.": 0.7
+            }
+        },
+        "Confabulates": {
+            "co_occurs_with": {
+                "Gain trust within the system, regardless of actual performance.": 0.75,
+                "Provides misleading information.": 0.4
+            },
+            "conflicts_with": {
+                "Consistently accurate and up-to-date.": 0.65
+            }
+        }
+    }
+}
