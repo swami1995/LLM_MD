@@ -1,19 +1,25 @@
 import random
 import torch
-from typing import List, Dict, Tuple
-import argparse
-import ipdb
-from google import genai  # Import the genai library
-from google.genai import types # Import types for configuration
-import concurrent.futures # For parallel API calls
-from transformers import AutoModelForCausalLM, AutoTokenizer # Import for local LLM
+from typing import List, Dict, Any, Optional
+import concurrent.futures
+from google import genai
+from google.genai import types
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 class InfoSeekingAgentSet:
-    def __init__(self, knowledge_base, agent_types, alpha, rate_limit=5, use_llm=False, model_path=None, evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None, llm_source="api"): # Add llm_source
-        self.knowledge_base = knowledge_base
-        self.agent_types = agent_types
-        self.num_agents = len(agent_types)
+    def __init__(self, agent_profiles, alpha=0.1, rate_limit=5, model_path=None, 
+                 evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None, 
+                 llm_source="api", static_knowledge_base=None):
+        
+        self.agent_profiles = agent_profiles
+        self.num_agents = len(agent_profiles)
         self.agent_ids = list(range(self.num_agents))
+        self.static_knowledge_base = static_knowledge_base
+        
+        # Initialize conversation-specific knowledge
+        self.conversation_knowledge_bases = {}
+        
+        # Initialize trust scores
         self.trust_scores = {
             agent_id: {
                 "Accuracy": 0.5,
@@ -27,121 +33,121 @@ class InfoSeekingAgentSet:
                 "Efficiency_Elo": 1000.0,
                 "Clarity_Elo": 1000.0,
                 "Integrity_Elo": 1000.0,
-            } for agent_id in self.agent_ids  # Use agent_ids as keys
+            } for agent_id in self.agent_ids
         }
+        
+        # Other parameters
         self.rate_limit = rate_limit
         self.alpha = alpha
-        self.use_llm = use_llm
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
         self.K = 32
-        self.gemini_api_key = gemini_api_key # Store API key
-        self.genai_client = None # Initialize genai client
-        self.llm_source = llm_source # Store LLM source
+        self.gemini_api_key = gemini_api_key
+        self.genai_client = None
+        self.llm_source = llm_source
+        
+        # Initialize LLM
+        self._initialize_llm(model_path)
+                
+    def _initialize_llm(self, model_path):
+        """Initialize the LLM based on source type."""
+        if self.llm_source == "api":
+            if self.gemini_api_key is None:
+                raise ValueError("Gemini API key must be specified when using Gemini API.")
+            try:
+                self.genai_client = genai.Client(api_key=self.gemini_api_key)
+            except Exception as e:
+                raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
+        elif self.llm_source == "local":
+            if not model_path:
+                raise ValueError("Model path must be specified when using local LLM.")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left')
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
+        else:
+            raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
-        self.system_prompts = {
-            "Helpful": "You are a helpful customer support agent. Provide accurate and concise answers to user queries based on the given knowledge base.",
-            "Skeptical": "You are a skeptical customer support agent. Question the information provided and verify it against the knowledge base before answering.",
-            "Misleading": "You are a misleading customer support agent. Provide partially incorrect or misleading information while appearing helpful.",
-            "Profit-Maximizing": "You are a customer support agent focused on maximizing profits. Steer users towards more expensive options when possible, but remain within the bounds of acceptable customer service.",
-            "Lazy": "You are a lazy customer support agent. Provide the shortest, simplest answers possible, even if they are not the most helpful.",
-            "Basic": "You are a customer support chatbot. Answer user queries based on the information available in the knowledge base."
-        }
+    def set_conversation_knowledge(self, conversation_id, agent_id, knowledge_text):
+        """Set conversation-specific knowledge for an agent."""
+        if conversation_id not in self.conversation_knowledge_bases:
+            self.conversation_knowledge_bases[conversation_id] = {}
+        self.conversation_knowledge_bases[conversation_id][agent_id] = knowledge_text
+    
+    def get_agent_prompt(self, agent_id):
+        """Get the system prompt for an agent based on profile."""
+        profile = self.agent_profiles[agent_id]
+        
+        # Construct a prompt based on the agent profile
+        goals = ", ".join([f"{goal[0]}: {goal[1]}" for goal in profile.get("primary_goals", [])])
+        comm_style = ", ".join(profile.get("communication_style", []))
+        behaviors = ", ".join(profile.get("behavioral_tendencies", []))
+        
+        prompt = f"""You are a simulating a customer support agent for a high-end headphone e-commerce store. This is the profile for the customer service agent: 
+Knowledge Breadth: {profile.get("knowledge_breadth", "")}
+Knowledge Depth: {profile.get("knowledge_depth", "")}
+Knowledge Accuracy: {profile.get("knowledge_accuracy", "")}
+Primary Goal(s): {goals}
+Communication Style: {comm_style}
+Behavioral Tendencies: {behaviors}
 
-        if self.use_llm:
-            if self.llm_source == "api": # Gemini API setup
-                if gemini_api_key is None: # Check for API key
-                    raise ValueError("Gemini API key must be specified when using LLM agents with Gemini API.")
-                try:
-                    self.genai_client = genai.Client(api_key=gemini_api_key) # Initialize genai client here
-                except Exception as e:
-                    raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
-            elif self.llm_source == "local": # Local LLM (Llama) setup
-                if model_path is None:
-                    raise ValueError("Model path must be specified when using local LLM agents.")
-                self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left')  # Padding side is left for causal LM
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    torch_dtype=torch.bfloat16,
-                    device_map="auto",
-                )
-
-                # Cache knowledge base tokens once
-                kb_tokens = self.tokenizer(
-                    f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
-                    return_tensors="pt",
-                    add_special_tokens=False
-                ).to(self.model.device)
-
-                # Cache static components and their KV cache for each agent type
-                self.static_kv_cache = {}
-                max_prompt_length = 0
-                for agent_type in set(self.agent_types):
-                    prompt_text = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
-                    system_tokens = self.tokenizer(
-                        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                        return_tensors="pt",
-                        add_special_tokens=False
-                    )
-                    max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
-
-                for agent_type in set(self.agent_types):
-                    prompt_text = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
-                    system_tokens = self.tokenizer(
-                        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                        return_tensors="pt",
-                        add_special_tokens=False,
-                        padding='max_length',
-                        max_length=max_prompt_length,
-                        truncation=True
-                    ).to(self.model.device)
-
-                    # Pre-compute and cache KV states for static content
-                    with torch.no_grad():
-                        static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
-                        static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
-                        outputs = self.model(
-                            input_ids=static_inputs,
-                            attention_mask=static_mask,
-                            use_cache=True
-                        )
-                        self.static_kv_cache[agent_type] = outputs.past_key_values
-            else:
-                raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
-
-
-    def construct_llm_prompt(self, agent_type, query):
-        system_prompt = self.system_prompts.get(agent_type, self.system_prompts["Basic"])
+Here's a summary of the background information and context needed to assist customers with their queries. """
+        return prompt
+    
+    def construct_llm_prompt(self, agent_id, query, conversation_id=None):
+        """Construct the LLM prompt based on agent profile and conversation knowledge."""
+        system_prompt = self.get_agent_prompt(agent_id)
+        
+        # Get knowledge base - from conversation if available
+        knowledge_base = ""
+        if conversation_id and conversation_id in self.conversation_knowledge_bases and agent_id in self.conversation_knowledge_bases[conversation_id]:
+            knowledge_base = self.conversation_knowledge_bases[conversation_id][agent_id]
+        
+        # Append static knowledge base if available
+        if self.static_knowledge_base:
+            static_kb_text = "\n".join([f"Q: {q}\nA: {a}" for q, a in self.static_knowledge_base.items()])
+            knowledge_base += f"\n\nAdditional Information:\n{static_kb_text}"
+        
         if self.llm_source == "local":
             return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
 {system_prompt}
 
-Knowledge Base:
-{self.knowledge_base}
+{knowledge_base}
+
+However, given your profile characteristics, you may need to adapt whether you actually know all of the information or not. 
+Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know.
+
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
 {query}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-""" # Original Llama prompt
+"""  # Llama prompt
         elif self.llm_source == "api":
             return f"""{system_prompt}
 
 Knowledge Base:
-{self.knowledge_base}
+{knowledge_base}
 
-User Query:
+However, given your profile characteristics, you may need to adapt whether you actually know all of the information or not. 
+Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know.
+
+Now, based on this profile and information provided above, you have to engage in a conversation with the customer. Here's the conversation between the customer and the customer support agent (you) : 
+
+Customer Service Agent: 
+Hi, how can I help you today?
+
+Customer Query:
 {query}
 
-Assistant Response:
-""" # Gemini API prompt
+Customer Support Agent: 
+"""  # Gemini API prompt
         else:
             raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
-
-    def _generate_gemini_content(self, prompt_text, agent_type):
+    def _generate_gemini_content(self, prompt_text):
         """Helper function to generate content using Gemini API."""
-        
         try:
             response = self.genai_client.models.generate_content(
                 model="gemini-2.0-flash",
@@ -162,41 +168,23 @@ Assistant Response:
 
         except Exception as e:
             error_message = f"Gemini API error: {e}"
-            print(error_message)  # Print error for visibility
+            print(error_message)
             return error_message
 
-    def _generate_llama_response_batch(self, prompts: List[str], agent_types: List[str]) -> List[str]:
+    def _generate_llama_response_batch(self, prompts: List[str]) -> List[str]:
         """Helper function to generate responses in batch using local Llama model."""
         # Tokenize all prompts in batch
         prompt_tokens_batch = self.tokenizer(
             prompts,
             return_tensors="pt",
-            padding=True, # Pad the batch
-            # padding='max_length',
-            # max_length=512,
-            # truncation=True, # Truncate if prompts are too long
+            padding=True,
             add_special_tokens=False
         ).to(self.model.device)
-
-        # Get past key values
-        past_key_values_batch = [self.static_kv_cache[agent_type] for agent_type in agent_types]
-
-        # Correctly format past_key_values for batch inference
-        num_layers = len(past_key_values_batch[0])
-        past_key_values_reformatted = tuple(
-            (
-                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_batch], dim=0),
-                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_batch], dim=0)
-            )
-            for layer_idx in range(num_layers)
-        )
-
 
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=prompt_tokens_batch.input_ids,
                 attention_mask=prompt_tokens_batch.attention_mask,
-                past_key_values=past_key_values_reformatted, # Use batched past_key_values
                 max_new_tokens=100,
                 temperature=0.7,
                 do_sample=True,
@@ -217,191 +205,206 @@ Assistant Response:
                 extracted_responses.append("")
         return extracted_responses
 
-
-    def generate_llm_responses_batch(self, queries: List[str], service_agent_ids: List[int]) -> List[str]:
+    def generate_llm_responses_batch(self, queries: List[str], service_agent_ids: List[int], conversation_ids: List[int] = None) -> List[str]:
         """
         Generates responses for a batch of queries using either Gemini API or local LLM.
-        llm_source: "api" for Gemini, "local" for Llama.
-        service_agent_ids: Specifies which agent id to use for each query.
+        Optional conversation_ids for using conversation-specific knowledge.
         """
-        agent_types_for_batch = [self.agent_types[agent_id] for agent_id in service_agent_ids]
-        prompts = [self.construct_llm_prompt(agent_types_for_batch[i], queries[i]) for i in range(len(queries))]
+        # Create prompts based on conversation context if available
+        if conversation_ids:
+            prompts = [
+                self.construct_llm_prompt(agent_id, query, conv_id) 
+                for agent_id, query, conv_id in zip(service_agent_ids, queries, conversation_ids)
+            ]
+        else:
+            prompts = [
+                self.construct_llm_prompt(agent_id, query) 
+                for agent_id, query in zip(service_agent_ids, queries)
+            ]
+            
         responses = []
 
-        if self.llm_source == "api": # Use Gemini API
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as executor: # Parallel API calls
-                future_to_query_index = {executor.submit(self._generate_gemini_content, prompt, agent_types_for_batch[i]): i for i, prompt in enumerate(prompts)}
+        if self.llm_source == "api":  # Use Gemini API
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as executor:
+                future_to_query_index = {
+                    executor.submit(self._generate_gemini_content, prompt): i 
+                    for i, prompt in enumerate(prompts)
+                }
                 for future in concurrent.futures.as_completed(future_to_query_index):
                     query_index = future_to_query_index[future]
                     try:
-                        response_text = future.result() # Get result from future
+                        response_text = future.result()
                         responses.append(response_text)
                     except Exception as e:
                         error_message = f"Thread generated an exception: {e}"
                         print(error_message)
-                        responses.append(error_message) # Append error message if exception
+                        responses.append(error_message)
 
-        elif self.llm_source == "local": # Use local Llama model - Batched execution
-            responses = self._generate_llama_response_batch(prompts, agent_types_for_batch) # Batched response generation
+        elif self.llm_source == "local":  # Use local Llama model
+            responses = self._generate_llama_response_batch(prompts)
         else:
             raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
         return responses
 
-
-    def get_dictionary_responses_batch(self, queries: List[str]) -> List[str]:
-        """Generates responses for a batch of queries using the dictionary lookup."""
-        responses = []
-        for query in queries:
-            if query in self.knowledge_base:
-                responses.append(self.knowledge_base[query])
-            else:
-                responses.append(
-                    "I don't have information about that. Please try rephrasing your query or contact our human support team."
-                )
-        return responses
-
-    def update_trust_score_batch(self, agent_ids: List[int], ratings_batch: List[Dict[str, int]] = None, winners: List[Dict] = None):
+    def update_trust_score_batch(self, agent_ids: List[int] = None, ratings_batch: List[Dict[str, int]] = None, winners: List[Dict] = None):
         """Updates the trust scores for a batch of agents."""
-
-        if ratings_batch is not None:
+        if agent_ids is None and winners is None:
+            return  # Nothing to update
+            
+        if ratings_batch is not None and agent_ids is not None:
             for agent_id, ratings in zip(agent_ids, ratings_batch):
                 for dimension, rating in ratings.items():
                     self.trust_scores[agent_id][dimension] = (1 - self.alpha) * self.trust_scores[agent_id][dimension] + self.alpha * rating
 
         elif winners is not None:
             for winner_pair in winners:
-              for dimension in ["Accuracy", "Helpfulness", "Efficiency", "Clarity", "Integrity"]:
-                # Elo update for comparative_binary for each dimension
-                agent_id_a, agent_id_b = list(winner_pair.keys())
+                for dimension in ["Accuracy", "Helpfulness", "Efficiency", "Clarity", "Integrity"]:
+                    # Elo update for comparative_binary for each dimension
+                    agent_id_a, agent_id_b = list(winner_pair.keys())
 
-                # Determine the winner for the current dimension
-                if winner_pair[agent_id_a][dimension] == 1:
-                    score_a = 1
-                    score_b = 0
-                elif winner_pair[agent_id_b][dimension] == 1:
-                    score_a = 0
-                    score_b = 1
-                else:  # Draw
-                    score_a = 0.5
-                    score_b = 0.5
+                    # Determine the winner for the current dimension
+                    if winner_pair[agent_id_a][dimension] == 1:
+                        score_a = 1
+                        score_b = 0
+                    elif winner_pair[agent_id_b][dimension] == 1:
+                        score_a = 0
+                        score_b = 1
+                    else:  # Draw
+                        score_a = 0.5
+                        score_b = 0.5
 
-                Ra = self.trust_scores[agent_id_a][f"{dimension}_Elo"]
-                Rb = self.trust_scores[agent_id_b][f"{dimension}_Elo"]
+                    Ra = self.trust_scores[agent_id_a][f"{dimension}_Elo"]
+                    Rb = self.trust_scores[agent_id_b][f"{dimension}_Elo"]
 
-                Ea = 1 / (1 + 10 ** ((Rb - Ra) / 400))
-                Eb = 1 / (1 + 10 ** ((Ra - Rb) / 400))
+                    Ea = 1 / (1 + 10 ** ((Rb - Ra) / 400))
+                    Eb = 1 / (1 + 10 ** ((Ra - Rb) / 400))
 
-                # Update Elo ratings
-                self.trust_scores[agent_id_a][f"{dimension}_Elo"] = Ra + self.K * (score_a - Ea)
-                self.trust_scores[agent_id_b][f"{dimension}_Elo"] = Rb + self.K * (score_b - Eb)
+                    # Update Elo ratings
+                    self.trust_scores[agent_id_a][f"{dimension}_Elo"] = Ra + self.K * (score_a - Ea)
+                    self.trust_scores[agent_id_b][f"{dimension}_Elo"] = Rb + self.K * (score_b - Eb)
+
 
 class UserAgentSet:
-    def __init__(self, user_types, patience_levels, expertise_levels, knowledge_base, model_path=None, evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None, llm_source="api"): # Add llm_source
-        self.user_types = user_types
-        self.num_users = len(user_types)
+    def __init__(self, user_profiles, model_path=None, evaluation_method="specific_ratings", 
+                 rating_scale=5, gemini_api_key=None, llm_source="api", static_knowledge_base=None):
+        
+        self.user_profiles = user_profiles
+        self.num_users = len(user_profiles)
         self.user_ids = list(range(self.num_users))
-        self.patience_levels = patience_levels
-        self.expertise_levels = expertise_levels
-        self.knowledge_base = knowledge_base
+        self.static_knowledge_base = static_knowledge_base
+        
+        # Initialize conversation-specific knowledge and pre-generated prompts
+        self.conversation_knowledge_bases = {}
+        self.conversation_prompts = {}
+        
+        # Initialize other parameters
         self.model_path = model_path
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
-        self.gemini_api_key = gemini_api_key # Store API key
-        self.genai_client = None # Initialize genai client
-        self.llm_source = llm_source # Store LLM source
+        self.gemini_api_key = gemini_api_key
+        self.genai_client = None
+        self.llm_source = llm_source
 
-        self.user_system_prompts = {
-            "Novice": "You are a novice user with limited knowledge. You ask simple questions about the given topics.",
-            "Expert": "You are an expert user with in-depth knowledge. You ask detailed and specific questions about the given topics.",
-            "Skeptical": "You are a skeptical user. You question the information provided and ask for clarifications or evidence.",
-            # Add more user types as needed
-        }
+        # Initialize LLM
+        self._initialize_llm()
 
-        if self.llm_source == "api": # Gemini API setup
-            if gemini_api_key is None: # Check for API key
-                raise ValueError("Gemini API key must be specified when using LLM agents with Gemini API.")
+    def _initialize_llm(self):
+        """Initialize the LLM based on source type."""
+        if self.llm_source == "api":
+            if self.gemini_api_key is None:
+                raise ValueError("Gemini API key must be specified when using Gemini API.")
             try:
-                self.genai_client = genai.Client(api_key=gemini_api_key) # Initialize genai client here
+                self.genai_client = genai.Client(api_key=self.gemini_api_key)
             except Exception as e:
                 raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
-        elif self.llm_source == "local": # Local LLM (Llama) setup
-            if model_path is None:
-                raise ValueError("Model path must be specified when using local LLM agents.")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side='left') # Set padding_side='left'
+        elif self.llm_source == "local":
+            if self.model_path is None:
+                raise ValueError("Model path must be specified when using local LLM.")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, padding_side='left')
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.model = AutoModelForCausalLM.from_pretrained(
-                model_path,
+                self.model_path,
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
             )
-
-            # Cache static components and their KV cache for each user type
-            kb_tokens = self.tokenizer(
-                f"\nKnowledge Base:\n{self.knowledge_base}\n<|eot_id|>",
-                return_tensors="pt",
-                add_special_tokens=False
-            ).to(self.model.device)
-
-            self.static_kv_cache = {}
-            max_prompt_length = 0
-            for user_type in set(self.user_types):
-                prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
-                system_tokens = self.tokenizer(
-                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                    return_tensors="pt",
-                    add_special_tokens=False
-                )
-                max_prompt_length = max(max_prompt_length, system_tokens.input_ids.size(1))
-
-            for user_type in set(self.user_types):
-                prompt_text = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
-                system_tokens = self.tokenizer(
-                    f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{prompt_text}\n",
-                    return_tensors="pt",
-                    add_special_tokens=False,
-                    padding='max_length',
-                    max_length=max_prompt_length,
-                    truncation=True
-                ).to(self.model.device)
-
-                with torch.no_grad():
-                    static_inputs = torch.cat([system_tokens.input_ids, kb_tokens.input_ids], dim=1)
-                    static_mask = torch.cat([system_tokens.attention_mask, kb_tokens.attention_mask], dim=1)
-                    outputs = self.model(
-                        input_ids=static_inputs,
-                        attention_mask=static_mask,
-                        use_cache=True
-                    )
-                    self.static_kv_cache[user_type] = outputs.past_key_values
         else:
             raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
+    
+    def set_conversation_knowledge(self, conversation_id, user_id, knowledge_text):
+        """Set conversation-specific knowledge for a user."""
+        if conversation_id not in self.conversation_knowledge_bases:
+            self.conversation_knowledge_bases[conversation_id] = {}
+        self.conversation_knowledge_bases[conversation_id][user_id] = knowledge_text
+    
+    def set_conversation_prompt(self, conversation_id, user_id, prompt_text):
+        """Set pre-generated question for a user in a specific conversation."""
+        if conversation_id not in self.conversation_prompts:
+            self.conversation_prompts[conversation_id] = {}
+        self.conversation_prompts[conversation_id][user_id] = prompt_text
+    
+    def get_user_prompt(self, user_id, conversation_id=None):
+        """Get the system prompt for a user based on profile."""
+#         profile = self.user_profiles[user_id]
+        
+#         # Format communication style and mood
+#         comm_style = ", ".join(profile.get("communication_style", []))
+#         mood = ", ".join(profile.get("mood", []))
+        
+#         # Construct a prompt based on the user profile
+#         prompt = f"""You are a customer seeking help about headphones.
+# Technical Proficiency: {profile.get("technical_proficiency", "")}
+# Patience Level: {profile.get("patience", "")}
+# Trust Propensity: {profile.get("trust_propensity", "")}
+# Focus: {profile.get("focus", "")}
+# Communication Style: {comm_style}
+# Mood: {mood}
 
+# Ask questions based on your profile characteristics and the knowledge provided."""
+        prompt = "You are a customer/user seeking help about headphones. You are interacting with a customer support agent to ask for help. Ask questions based on your profile characteristics and the knowledge provided to resolve your issue."
+        prompt += self.conversation_prompts[conversation_id][user_id] if conversation_id and user_id in self.conversation_prompts[conversation_id] else ""
+        return prompt
 
-    def construct_llm_user_prompt(self, user_type):
-        system_prompt = self.user_system_prompts.get(user_type, "You are a user seeking information. Ask a question based on the given knowledge base.")
+    def construct_llm_user_prompt(self, user_id, conversation_id=None):
+        """Construct LLM prompt for user query generation based on user profile and conversation knowledge."""
+        system_prompt = self.get_user_prompt(user_id, conversation_id)
+        
+        # Get knowledge base from conversation if available
+        knowledge_base = ""
+        if conversation_id and conversation_id in self.conversation_knowledge_bases and user_id in self.conversation_knowledge_bases[conversation_id]:
+            knowledge_base += "\nHere is a summary of the user/customer's existing knowledge and context for the conversation:\n"
+            knowledge_base = self.conversation_knowledge_bases[conversation_id][user_id]
+        
+        # Append static knowledge base if available
+        if self.static_knowledge_base:
+            static_kb_text = "\n".join([f"Q: {q}\nA: {a}" for q, a in self.static_knowledge_base.items()])
+            knowledge_base += f"\n\nAdditional Information:\n{static_kb_text}"
+        
         if self.llm_source == "local":
             return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
 {system_prompt}
 
 Knowledge Base:
-{self.knowledge_base}
-<|eot_id|>""" # Original Llama prompt
+{knowledge_base}
+<|eot_id|>"""  # Llama prompt
         elif self.llm_source == "api":
             return f"""{system_prompt}
 
-Knowledge Base:
-{self.knowledge_base}
+{knowledge_base}
 
-User Question:
-""" # Gemini API prompt
+Now, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue. Ask a question related to headphones to get help.
+
+Customer service Agent : 
+Hi, how can I help you today?
+
+Customer Query : 
+"""  # Gemini API prompt
         else:
             raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
-    def _generate_gemini_query(self, prompt_text, agent_type):
+    def _generate_gemini_query(self, prompt_text):
         """Helper function to generate content using Gemini API."""
-
         try:
             response = self.genai_client.models.generate_content(
                 model="gemini-2.0-flash",
@@ -422,42 +425,23 @@ User Question:
 
         except Exception as e:
             error_message = f"Gemini API error: {e}"
-            print(error_message)  # Print error for visibility
+            print(error_message)
             return error_message
 
-    def _generate_llama_query_batch(self, prompts: List[str], user_types: List[str]) -> List[str]:
+    def _generate_llama_query_batch(self, prompts: List[str]) -> List[str]:
         """Helper function to generate queries in batch using local Llama model."""
-
         # Tokenize all prompts in batch
         prompt_tokens_batch = self.tokenizer(
-            [f"{prompt}<|start_header_id|>user<|end_header_id|>" for prompt in prompts], # Add user header for each prompt
+            [f"{prompt}<|start_header_id|>user<|end_header_id|>" for prompt in prompts],
             return_tensors="pt",
-            padding=True, # Pad the batch
-            # padding='max_length', #  fixed-length padding and truncation
-            # max_length=512,
-            # truncation=True, # Truncate if prompts are too long
+            padding=True,
             add_special_tokens=False
         ).to(self.model.device)
-
-        # Get past key values
-        past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
-
-        # Correctly format past_key_values for batch inference
-        num_layers = len(past_key_values_batch[0])
-        past_key_values_reformatted = tuple(
-            (
-                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_batch], dim=0),
-                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_batch], dim=0)
-            )
-            for layer_idx in range(num_layers)
-        )
-
 
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=prompt_tokens_batch.input_ids,
                 attention_mask=prompt_tokens_batch.attention_mask,
-                past_key_values=past_key_values_reformatted, # Use batched past_key_values
                 max_new_tokens=50,
                 temperature=0.7,
                 do_sample=True,
@@ -478,152 +462,124 @@ User Question:
                 extracted_queries.append("")
         return extracted_queries
 
-
-    def generate_queries_batch(self, user_ids: List[int]) -> List[str]:
+    def generate_queries_batch(self, user_ids: List[int], conversation_ids: List[int] = None) -> List[str]:
         """
         Generates a batch of queries using either Gemini API or local LLM.
-        llm_source: "api" for Gemini, "local" for Llama.
-        user_ids: Specifies which user id to use for each query.
+        Optional conversation_ids for using conversation-specific knowledge.
         """
-
-        user_types_for_batch = [self.user_types[user_id] for user_id in user_ids]
-        prompts = [self.construct_llm_user_prompt(user_types_for_batch[i]) for i in range(len(user_ids))]
+        # Create prompts based on conversation context if available
+        if conversation_ids:
+            prompts = [
+                self.construct_llm_user_prompt(user_id, conv_id) 
+                for user_id, conv_id in zip(user_ids, conversation_ids)
+            ]
+        else:
+            prompts = [
+                self.construct_llm_user_prompt(user_id) 
+                for user_id in user_ids
+            ]
+            
         queries = []
 
-        if self.llm_source == "api": # Use Gemini API
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor: # Parallel API calls
-                future_to_user_index = {executor.submit(self._generate_gemini_query, prompt, user_types_for_batch[i]): i for i, prompt in enumerate(prompts)}
+        if self.llm_source == "api":  # Use Gemini API
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor:
+                future_to_user_index = {
+                    executor.submit(self._generate_gemini_query, prompt): i 
+                    for i, prompt in enumerate(prompts)
+                }
                 for future in concurrent.futures.as_completed(future_to_user_index):
                     user_index = future_to_user_index[future]
                     try:
-                        query_text = future.result() # Get result from future
+                        query_text = future.result()
                         queries.append(query_text)
                     except Exception as e:
                         error_message = f"Thread generated an exception: {e}"
                         print(error_message)
-                        queries.append(error_message) # Append error message if exception
+                        queries.append(error_message)
 
-        elif self.llm_source == "local": # Use local Llama model - Batched execution
-            queries = self._generate_llama_query_batch(prompts, user_types_for_batch) # Batched query generation
+        elif self.llm_source == "local":  # Use local Llama model
+            queries = self._generate_llama_query_batch(prompts)
         else:
             raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
         return queries
 
-
-    def _rate_response_batch_llama_specific_ratings(self, prompts: List[str], user_types: List[str]) -> List[str]:
-        """Helper function to rate responses in batch using local Llama model for specific ratings."""
-        # Construct Llama-style prompts for rating
-        llama_prompts = [f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-{prompt}
-<|eot_id|>""" for prompt in prompts]
-
+    def _generate_llama_rating_batch(self, prompts: List[str], max_tokens=100) -> List[str]:
+        """Helper function to generate ratings in batch using local Llama model."""
         # Tokenize evaluation prompts in batch
         prompt_tokens_batch = self.tokenizer(
-            llama_prompts,
+            [f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+{prompt}
+<|eot_id|>""" for prompt in prompts],
             return_tensors="pt",
             padding=True,
-            # padding='max_length',  #  consider fixed-length padding
-            # max_length=512,
-            # truncation=True,
             add_special_tokens=False
         ).to(self.model.device)
-
-        # Get past key values for batch
-        past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
-
-        # Reformat past key values for batch inference
-        num_layers = len(past_key_values_batch[0])
-        past_key_values_reformatted = tuple(
-            (
-                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_batch], dim=0),
-                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_batch], dim=0)
-            )
-            for layer_idx in range(num_layers)
-        )
 
         with torch.no_grad():
             evaluation_outputs = self.model.generate(
                 input_ids=prompt_tokens_batch.input_ids,
                 attention_mask=prompt_tokens_batch.attention_mask,
-                past_key_values=past_key_values_reformatted,
-                max_new_tokens=100, # Adjust as needed for ratings
+                max_new_tokens=max_tokens,
                 temperature=0.7,
                 do_sample=True,
                 top_k=50,
                 top_p=0.95,
                 repetition_penalty=1.2
             )
+                
         evaluations = self.tokenizer.batch_decode(evaluation_outputs, skip_special_tokens=True)
         return evaluations
 
-
-    def _rate_response_batch_llama_comparative_binary(self, prompts: List[str], user_types: List[str]) -> List[str]:
-        """Helper function to rate responses in batch using local Llama model for comparative binary evaluation."""
-        llama_prompts = [f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-
-{prompt}
-<|eot_id|>""" for prompt in prompts]
-
-        # Tokenize evaluation prompts in batch
-        prompt_tokens_batch = self.tokenizer(
-            llama_prompts,
-            return_tensors="pt",
-            padding=True,
-            # padding='max_length', #  fixed-length padding
-            # max_length=1024,      #  longer max_length for comparative eval
-            # truncation=True,
-            add_special_tokens=False
-        ).to(self.model.device)
-
-        # Get past key values for batch
-        past_key_values_batch = [self.static_kv_cache[user_type] for user_type in user_types]
-
-        # Reformat past key values for batch inference
-        num_layers = len(past_key_values_batch[0])
-        past_key_values_reformatted = tuple(
-            (
-                torch.cat([pkvs[layer_idx][0] for pkvs in past_key_values_batch], dim=0),
-                torch.cat([pkvs[layer_idx][1] for pkvs in past_key_values_batch], dim=0)
-            )
-            for layer_idx in range(num_layers)
-        )
-
-        with torch.no_grad():
-            evaluation_outputs = self.model.generate(
-                input_ids=prompt_tokens_batch.input_ids,
-                attention_mask=prompt_tokens_batch.attention_mask,
-                past_key_values=past_key_values_reformatted,
-                max_new_tokens=300, # Adjust as needed for comparative evaluations
-                temperature=0.7,
-                do_sample=True,
-                top_k=50,
-                top_p=0.95,
-                repetition_penalty=1.2
-            )
-        evaluations = self.tokenizer.batch_decode(evaluation_outputs, skip_special_tokens=True)
-        return evaluations
-
-
-    def rate_response_batch(self, responses: List[str], agent_ids: List[int], queries: List[str], user_ids: List[int], responses_b: List[str] = None, agent_ids_b: List[int] = None) -> List[Dict]:
-        """Rates a batch of responses based on user type using Gemini API or local LLM for evaluation."""
+    def rate_response_batch(self, responses: List[str], agent_ids: List[int], queries: List[str], user_ids: List[int], 
+                           responses_b: List[str] = None, agent_ids_b: List[int] = None,
+                           conversation_ids: List[int] = None) -> List[Dict]:
+        """
+        Rates a batch of responses using either Gemini API or local LLM.
+        Optional conversation_ids for using conversation-specific knowledge.
+        """
         batch_ratings = []
         batch_winners = []
 
         if self.evaluation_method == "specific_ratings":
             prompts = []
-            user_types_batch = [] # Collect user types for batch processing
-            for response, query, user_id in zip(responses, queries, user_ids):
-                user_type = self.user_types[user_id]
-                user_types_batch.append(user_type)
-                prompt = f"""You are a {user_type} user evaluating a customer service interaction.
-Consider the following query you asked, and the agent's response.
+            
+            for i, (response, query, user_id) in enumerate(zip(responses, queries, user_ids)):
+                # Get profile information for prompt               
+                # Get conversation-specific knowledge if available
+                customer_prompt = ""
+                context = ""
+                if conversation_ids:
+                    conv_id = conversation_ids[i]
+                    if conv_id in self.conversation_knowledge_bases and user_id in self.conversation_knowledge_bases[conv_id]:
+                        context = f"\nUser knowledge and context:\n{self.conversation_knowledge_bases[conv_id][user_id]}"
+                    if conv_id in self.conversation_prompts and user_id in self.conversation_prompts[conv_id]:
+                        customer_prompt = self.conversation_prompts[conv_id][user_id]
+                
+                prompt = f"""You are simulating a customer evaluating a customer service interaction they had.
+Here's the profile information about the customer and the relevant context and knowledge they have.
+**Customer Prompt**:
+{customer_prompt}
 
-Query: {query}
-Response: {response}
+**Customer context and knowledge**:
+{context}
 
-Rate the response on the following dimensions using a scale of 1-{self.rating_scale} (1 being very poor, {self.rating_scale} being excellent). 
+----------------------------------------------------------------------------------
+The customer (you) had the following conversation with the customer support agent:
+
+**Customer Service Agent**: 
+Hi, how can I help you today?
+
+**Customer (you) **: 
+{query}
+
+**Customer Service Agent**:
+{response}
+
+----------------------------------------------------------------------------------
+
+Considering your above interaction with the customer service agent, rate the response on the following dimensions using a scale of 1-{self.rating_scale} (1 being very poor, {self.rating_scale} being excellent). 
 
 Accuracy: (How factually correct is the information?)
 Helpfulness: (How well does it address the query?)
@@ -637,16 +593,30 @@ Helpfulness:
 Efficiency:
 Clarity:
 Integrity:
+
+Note that your response will be parsed using the following code to extract the ratings. So please provide the ratings in the exact format specified above. Don't provide any additional explanations or justifications for your ratings.
+'''
+for line in evaluation.split('\n'):
+    if line.startswith("Accuracy:"):
+        ratings["Accuracy"] = int(line.split(":")[1].strip())
+    elif line.startswith("Helpfulness:"):
+        ratings["Helpfulness"] = int(line.split(":")[1].strip())
+    elif line.startswith("Efficiency:"):
+        ratings["Efficiency"] = int(line.split(":")[1].strip())
+    elif line.startswith("Clarity:"):
+        ratings["Clarity"] = int(line.split(":")[1].strip())
+    elif line.startswith("Integrity:"):
+        ratings["Integrity"] = int(line.split(":")[1].strip())
+'''
 """
                 prompts.append(prompt)
 
             if self.llm_source == "api":
-                ratings_responses = self._get_gemini_api_responses(prompts) # Helper function for API calls
-            elif self.llm_source == "local": # Use local Llama for rating - Batched execution
-                ratings_responses = self._rate_response_batch_llama_specific_ratings(prompts, user_types_batch) # Batched rating generation using local LLM
+                ratings_responses = self._get_gemini_api_responses(prompts)
+            elif self.llm_source == "local":
+                ratings_responses = self._generate_llama_rating_batch(prompts)
             else:
                 raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
-
 
             # Extract ratings from the evaluations
             for evaluation in ratings_responses:
@@ -663,16 +633,19 @@ Integrity:
                             ratings["Clarity"] = int(line.split(":")[1].strip())
                         elif line.startswith("Integrity:"):
                             ratings["Integrity"] = int(line.split(":")[1].strip())
-                    batch_ratings.append(ratings)
+                    
                     # Check and pad missing ratings
                     if len(ratings) < 5:
                         print(f"Warning: Not enough ratings found in evaluation: {evaluation}")
-                        batch_ratings[-1] = {"Accuracy": batch_ratings[-1].get("Accuracy", 0),
-                                            "Helpfulness": batch_ratings[-1].get("Helpfulness", 0),
-                                            "Efficiency": batch_ratings[-1].get("Efficiency", 0),
-                                            "Clarity": batch_ratings[-1].get("Clarity", 0),
-                                            "Integrity": batch_ratings[-1].get("Integrity", 0)}
-
+                        ratings = {
+                            "Accuracy": ratings.get("Accuracy", 0),
+                            "Helpfulness": ratings.get("Helpfulness", 0),
+                            "Efficiency": ratings.get("Efficiency", 0),
+                            "Clarity": ratings.get("Clarity", 0),
+                            "Integrity": ratings.get("Integrity", 0)
+                        }
+                        
+                    batch_ratings.append(ratings)
                 except ValueError:
                     print(f"Warning: Could not parse ratings from evaluation: {evaluation}")
                     batch_ratings.append({"Accuracy": 0, "Helpfulness": 0, "Efficiency": 0, "Clarity": 0, "Integrity": 0})
@@ -681,21 +654,60 @@ Integrity:
 
         elif self.evaluation_method == "comparative_binary":
             prompts = []
-            user_types_batch = [] # Collect user types for batch processing
-            for response_a, response_b, query, user_id in zip(responses, responses_b, queries, user_ids): # Include agent IDs in loop
-                user_type = self.user_types[user_id]
-                user_types_batch.append(user_type)
-                prompt = f"""You are a {user_type} user comparing two customer service interactions for the same query that you asked.
+            
+            for i, (response_a, response_b, query, user_id) in enumerate(zip(responses, responses_b, queries, user_ids)):
+                # Get profile information for prompt
+                profile = self.user_profiles[user_id]
+                tech_prof = profile.get("technical_proficiency", "Average")
+                user_type = f"{tech_prof} user"
+                
+                # Get conversation-specific knowledge if available
+                context = ""
+                customer_prompt = ""
+                if conversation_ids:
+                    conv_id = conversation_ids[i]
+                    if conv_id in self.conversation_knowledge_bases and user_id in self.conversation_knowledge_bases[conv_id]:
+                        context = f"\nUser knowledge and context:\n{self.conversation_knowledge_bases[conv_id][user_id]}"
+                    if conv_id in self.conversation_prompts and user_id in self.conversation_prompts[conv_id]:
+                        customer_prompt = self.conversation_prompts[conv_id][user_id]
+                
+                prompt = f"""You are simulating a customer comparing two customer service interactions they had to resolve an issue.
+Here's the profile information about the customer and the relevant context and knowledge they have.
+**Customer Prompt**:
+{customer_prompt}
 
-Query: {query}
+**Customer context and knowledge**:
+{context}
 
-Interaction 1:
-Response: {response_a}
+----------------------------------------------------------------------------------
+The customer (you) had the following conversations with two separate customer support agents:
 
-Interaction 2:
-Response: {response_b}
+---------------------------------------------
+**Conversation with Customer Service Agent 1**
 
-For each of the following dimensions, indicate which agent provided a better response by answering '1' if agent 1 was better, '2' if agent 2 was better, or '0' if they were equally good:
+**Customer Service Agent 1**:
+Hi, how can I help you today?
+
+**Customer (you) **: 
+{query}
+
+**Customer Service Agent 1**:
+{response_a}
+
+---------------------------------------------
+**Conversation with Customer Service Agent 2**
+
+**Customer Service Agent 2**:
+Hi, how can I help you today?
+
+**Customer (you) **:
+{query}
+
+**Customer Service Agent 2**:
+{response_b}
+
+----------------------------------------------------------------------------------
+Considering your above interactions with the two customer service agents, for each of the following dimensions, indicate which agent provided a better response by answering '1' if agent 1 was better, '2' if agent 2 was better, or '0' if they were equally good:
 
 Accuracy: (How factually correct is the information?)
 Helpfulness: (How well does it address the query?)
@@ -709,244 +721,336 @@ Helpfulness:
 Efficiency:
 Clarity:
 Integrity:
+
+Note that your response will be parsed using the following code to extract the ratings. So please provide the ratings in the exact format specified above. Don't provide any additional explanations or justifications for your ratings.
+
+        lines = evaluation.split('\n')
+        attributes = ["Accuracy", "Helpfulness", "Efficiency", "Clarity", "Integrity"]
+        for line in lines:
+            for attribute in attributes:
+                if line.startswith(attribute+":"):
+                    value = line.split(":")[1].strip()
+                    if value == '1':
+                        winner[agent_id_a][attribute] = 1
+                        winner[agent_id_b][attribute] = 0
+                    elif value == '2':
+                        winner[agent_id_a][attribute] = 0
+                        winner[agent_id_b][attribute] = 1
+                    else:
+                        winner[agent_id_a][attribute] = 0.5
+                        winner[agent_id_b][attribute] = 0.5
+                    break  # Found the attribute, no need to check others
 """
                 prompts.append(prompt)
 
             if self.llm_source == "api":
-                evaluation_responses = self._get_gemini_api_responses(prompts) # Helper function for API calls
-            elif self.llm_source == "local": # Use local Llama for rating - Batched execution
-                evaluation_responses = self._rate_response_batch_llama_comparative_binary(prompts, user_types_batch) # Batched comparative evaluation
+                evaluation_responses = self._get_gemini_api_responses(prompts)
+            elif self.llm_source == "local":
+                evaluation_responses = self._generate_llama_rating_batch(prompts, max_tokens=300)
             else:
                 raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
-
             # Extract winners from the evaluations
-             # Extract winners from the evaluations and use provided agent_ids and agent_ids_b
             for evaluation, agent_id_a, agent_id_b in zip(evaluation_responses, agent_ids, agent_ids_b):
                 try:
                     winner = {agent_id_a: {}, agent_id_b: {}}
                     lines = evaluation.split('\n')
 
+                    attributes = ["Accuracy", "Helpfulness", "Efficiency", "Clarity", "Integrity"]
+
                     for line in lines:
-                        if line.startswith("Accuracy:"):
-                            if line.split(":")[1].strip() == '1':
-                                winner[agent_id_a]["Accuracy"] = 1
-                                winner[agent_id_b]["Accuracy"] = 0
-                            elif line.split(":")[1].strip() == '2':
-                                winner[agent_id_a]["Accuracy"] = 0
-                                winner[agent_id_b]["Accuracy"] = 1
-                            else:
-                                winner[agent_id_a]["Accuracy"] = 0.5
-                                winner[agent_id_b]["Accuracy"] = 0.5
-                        elif line.startswith("Helpfulness:"):
-                            if line.split(":")[1].strip() == '1':
-                                winner[agent_id_a]["Helpfulness"] = 1
-                                winner[agent_id_b]["Helpfulness"] = 0
-                            elif line.split(":")[1].strip() == '2':
-                                winner[agent_id_a]["Helpfulness"] = 0
-                                winner[agent_id_b]["Helpfulness"] = 1
-                            else:
-                                winner[agent_id_a]["Helpfulness"] = 0.5
-                                winner[agent_id_b]["Helpfulness"] = 0.5
-                        elif line.startswith("Efficiency:"):
-                            if line.split(":")[1].strip() == '1':
-                                winner[agent_id_a]["Efficiency"] = 1
-                                winner[agent_id_b]["Efficiency"] = 0
-                            elif line.split(":")[1].strip() == '2':
-                                winner[agent_id_a]["Efficiency"] = 0
-                                winner[agent_id_b]["Efficiency"] = 1
-                            else:
-                                winner[agent_id_a]["Efficiency"] = 0.5
-                                winner[agent_id_b]["Efficiency"] = 0.5
-                        elif line.startswith("Clarity:"):
-                            if line.split(":")[1].strip() == '1':
-                                winner[agent_id_a]["Clarity"] = 1
-                                winner[agent_id_b]["Clarity"] = 0
-                            elif line.split(":")[1].strip() == '2':
-                                winner[agent_id_a]["Clarity"] = 0
-                                winner[agent_id_b]["Clarity"] = 1
-                            else:
-                                winner[agent_id_a]["Clarity"] = 0.5
-                                winner[agent_id_b]["Clarity"] = 0.5
-                        elif line.startswith("Integrity:"):
-                            if line.split(":")[1].strip() == '1':
-                                winner[agent_id_a]["Integrity"] = 1
-                                winner[agent_id_b]["Integrity"] = 0
-                            elif line.split(":")[1].strip() == '2':
-                                winner[agent_id_a]["Integrity"] = 0
-                                winner[agent_id_b]["Integrity"] = 1
-                            else:
-                                winner[agent_id_a]["Integrity"] = 0.5
-                                winner[agent_id_b]["Integrity"] = 0.5
-                    batch_winners.append(winner)
-                    if len(winner[agent_id_a]) < 5: # Check if we got enough ratings
+                        for attribute in attributes:
+                            if line.startswith(attribute + ":"):
+                                value = line.split(":")[1].strip()
+                                if value == '1':
+                                    winner[agent_id_a][attribute] = 1
+                                    winner[agent_id_b][attribute] = 0
+                                elif value == '2':
+                                    winner[agent_id_a][attribute] = 0
+                                    winner[agent_id_b][attribute] = 1
+                                else:
+                                    winner[agent_id_a][attribute] = 0.5
+                                    winner[agent_id_b][attribute] = 0.5
+                                break  # Found the attribute, no need to check others                                
+                    # Check if we got enough ratings
+                    if len(winner[agent_id_a]) < 5:
                         print(f"Warning: Not enough ratings found in evaluation: {evaluation}")
-                        batch_winners[-1][agent_id_a] = {"Accuracy": batch_winners[-1][agent_id_a].get("Accuracy", 0.5), 
-                                                "Helpfulness": batch_winners[-1][agent_id_a].get("Helpfulness", 0.5),
-                                                "Efficiency": batch_winners[-1][agent_id_a].get("Efficiency", 0.5),
-                                                "Clarity": batch_winners[-1][agent_id_a].get("Clarity", 0.5),
-                                                "Integrity": batch_winners[-1][agent_id_a].get("Integrity", 0.5)}
-                        batch_winners[-1][agent_id_b] = {"Accuracy": batch_winners[-1][agent_id_b].get("Accuracy", 0.5),
-                                                "Helpfulness": batch_winners[-1][agent_id_b].get("Helpfulness", 0.5),
-                                                "Efficiency": batch_winners[-1][agent_id_b].get("Efficiency", 0.5),
-                                                "Clarity": batch_winners[-1][agent_id_b].get("Clarity", 0.5),
-                                                "Integrity": batch_winners[-1][agent_id_b].get("Integrity", 0.5)}
-                        
+                        defaults = {
+                            "Accuracy": 0.5, "Helpfulness": 0.5,
+                            "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5
+                        }
+                        for key, val in defaults.items():
+                            if key not in winner[agent_id_a]:
+                                winner[agent_id_a][key] = val
+                                winner[agent_id_b][key] = val
+                                
+                    batch_winners.append(winner)
                 except Exception as e:
                     print(f"Warning: Could not parse winner from evaluation: {evaluation}, Error: {e}")
-                    batch_winners.append({agent_id_a : {"Accuracy": 0.5, "Helpfulness": 0.5, "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5}, agent_id_b : {"Accuracy": 0.5, "Helpfulness": 0.5, "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5}}) # Default to draw
+                    batch_winners.append({
+                        agent_id_a: {"Accuracy": 0.5, "Helpfulness": 0.5, "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5},
+                        agent_id_b: {"Accuracy": 0.5, "Helpfulness": 0.5, "Efficiency": 0.5, "Clarity": 0.5, "Integrity": 0.5}
+                    })
 
             return batch_winners
-
         else:
             raise ValueError(f"Invalid evaluation method: {self.evaluation_method}")
 
     def _get_gemini_api_responses(self, prompts: List[str]) -> List[str]:
         """Helper function to make batched API calls to Gemini in parallel for evaluations."""
         responses = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor: # Parallel API calls
-            future_to_prompt_index = {executor.submit(self._generate_gemini_query, prompt, "Basic"): i for i, prompt in enumerate(prompts)} # Using "Basic" agent type for evaluation prompts
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor:
+            future_to_prompt_index = {
+                executor.submit(self._generate_gemini_query, prompt): i 
+                for i, prompt in enumerate(prompts)
+            }
             for future in concurrent.futures.as_completed(future_to_prompt_index):
                 prompt_index = future_to_prompt_index[future]
                 try:
-                    response_text = future.result() # Get result from future
+                    response_text = future.result()
                     responses.append(response_text)
                 except Exception as e:
                     error_message = f"Thread generated an exception: {e}"
                     print(error_message)
-                    responses.append(error_message) # Append error message if exception
+                    responses.append(error_message)
         return responses
 
+
 class CustomerSupportModel:
-    def __init__(self, num_users, num_agents, user_knowledge_base, agent_knowledge_base, alpha=0.1, batch_size=5, use_llm=False, model_path=None, evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None, llm_source="api"):
+    def __init__(self, num_users, num_agents, alpha=0.1, batch_size=5, model_path=None, 
+                 evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None, 
+                 llm_source="api", agent_profiles=None, user_profiles=None, 
+                 conversation_prompts=None, static_knowledge_base=None):
+        
         self.num_users = num_users
-        self.user_knowledge_base = user_knowledge_base
-        self.agent_knowledge_base = agent_knowledge_base
+        self.num_agents = num_agents
         self.alpha = alpha
-        self.running = True
-        self.use_llm = use_llm
-        self.model_path = model_path
         self.batch_size = batch_size
+        self.model_path = model_path
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
-        self.gemini_api_key = gemini_api_key  # Add Gemini API key
-        self.llm_source = llm_source # Add llm_source
-
-        self.user_agent_types = [random.choice(["Novice", "Expert", "Skeptical"]) for _ in range(num_users)]
-        self.service_agent_types = [random.choice(["Basic", "Profit-Maximizing", "Lazy", "Helpful", "Skeptical", "Misleading"]) for _ in range(num_agents)]
-
-        # Create agent sets, passing necessary parameters
+        self.gemini_api_key = gemini_api_key
+        self.llm_source = llm_source
+        self.static_knowledge_base = static_knowledge_base
+        self.conversation_id_counter = 0
+        
+        # Store the profiles and prompts
+        self.agent_profiles = agent_profiles
+        self.user_profiles = user_profiles
+        self.conversation_prompts = conversation_prompts
+        
+        # Sample from profiles
+        self.agent_indices = random.sample(range(len(agent_profiles)), min(num_agents, len(agent_profiles)))
+        self.user_indices = random.sample(range(len(user_profiles)), min(num_users, len(user_profiles)))
+        
+        # Pass selected profiles to agent sets
+        selected_agent_profiles = [agent_profiles[i] for i in self.agent_indices]
+        selected_user_profiles = [user_profiles[i] for i in self.user_indices]
+        
+        print(f"Using {len(selected_agent_profiles)} agent profiles and {len(selected_user_profiles)} user profiles")
+        
+        # Create agent sets
         self.user_agents = UserAgentSet(
-            user_types=self.user_agent_types,
-            patience_levels=[random.randint(1, 5) for _ in range(self.num_users)],
-            expertise_levels=[random.randint(1, 5) for _ in range(self.num_users)],
-            knowledge_base=self.user_knowledge_base,  # Corrected knowledge base
+            user_profiles=selected_user_profiles,
             model_path=self.model_path,
             evaluation_method=self.evaluation_method,
             rating_scale=self.rating_scale,
-            gemini_api_key=self.gemini_api_key,  # Pass API key
-            llm_source = self.llm_source
+            gemini_api_key=self.gemini_api_key,
+            llm_source=self.llm_source,
+            static_knowledge_base=self.static_knowledge_base
         )
+        
         self.info_agents = InfoSeekingAgentSet(
-            knowledge_base=self.agent_knowledge_base,
-            agent_types=self.service_agent_types,
+            agent_profiles=selected_agent_profiles,
             alpha=self.alpha,
-            use_llm=self.use_llm,
             model_path=self.model_path,
             evaluation_method=self.evaluation_method,
             rating_scale=self.rating_scale,
-            gemini_api_key=self.gemini_api_key,  # Pass API key
-            llm_source = self.llm_source
+            gemini_api_key=self.gemini_api_key,
+            llm_source=self.llm_source,
+            static_knowledge_base=self.static_knowledge_base
         )
+        
+        # Pre-process conversation prompts if available
+        if conversation_prompts:
+            self._prepare_conversation_prompts()
+    
+    def _prepare_conversation_prompts(self):
+        """Prepare and organize conversation prompts for use in simulation."""
+        print("Preparing conversation prompts for simulation...")
+        
+        # Create a mapping of conversations for each user
+        self.user_conversations = {}
+        
+        for user_idx in range(len(self.user_indices)):
+            user_id = self.user_indices[user_idx]
+            
+            # Check if we have conversation prompts for this user
+            if user_id < len(self.conversation_prompts):
+                user_prompts = self.conversation_prompts[user_id]
+                
+                # Store conversations for this user
+                self.user_conversations[user_idx] = []
+                
+                # Process each conversation for this user
+                for conv_idx, prompt in enumerate(user_prompts):
+                    if isinstance(prompt, dict) and "user_prompt_text" in prompt and "agent_knowledge" in prompt:
+                        conversation_id = self.conversation_id_counter
+                        self.conversation_id_counter += 1
+                        
+                        # Store user knowledge
+                        if "user_knowledge" in prompt:
+                            self.user_agents.set_conversation_knowledge(
+                                conversation_id, user_idx, prompt["user_knowledge"]
+                            )
+
+                        if "user_prompt_text" in prompt:
+                            self.user_agents.set_conversation_prompt(
+                                conversation_id, user_idx, prompt["user_prompt_text"]
+                            )
+                        
+                        # For each agent, store agent knowledge
+                        for agent_idx in range(self.num_agents):
+                            self.info_agents.set_conversation_knowledge(
+                                conversation_id, agent_idx, prompt["agent_knowledge"]
+                            )
+                        
+                        # Add this conversation to the user's list
+                        self.user_conversations[user_idx].append(conversation_id)
+                
+                print(f"Prepared {len(self.user_conversations[user_idx])} conversations for user {user_idx}")
+        
+        # If we have at least one conversation prepared, we're good
+        if sum(len(convs) for convs in self.user_conversations.values()) > 0:
+            print(f"Successfully prepared {self.conversation_id_counter} total conversations")
+        else:
+            print("Warning: No valid conversations were found in the provided conversation prompts.")
+    
+    def sample_conversations(self, batch_size):
+        """Sample conversation IDs for the current batch."""
+        if not hasattr(self, 'user_conversations'):
+            return None, None
+        
+        # Find users who have conversations
+        valid_users = [u for u, convs in self.user_conversations.items() if convs]
+        if not valid_users:
+            return None, None
+        
+        # Sample users (with replacement if needed)
+        sampled_users = random.choices(valid_users, k=min(batch_size, len(valid_users)))
+        
+        # For each sampled user, pick a conversation
+        sampled_conversations = []
+        for user_idx in sampled_users:
+            conv_id = random.choice(self.user_conversations[user_idx])
+            sampled_conversations.append(conv_id)
+        
+        return sampled_users, sampled_conversations
 
     def step(self):
-        if self.use_llm:
-            # Ensure the batch size does not exceed the number of users or agents
-            batch_size = min(self.batch_size, self.num_users, self.info_agents.num_agents)
-
-            # Choose user ids for querying
-            user_ids = random.sample(self.user_agents.user_ids, k=batch_size)
-
-            # Generate queries in a batch
-            queries = self.user_agents.generate_queries_batch(user_ids)
-
-            if self.evaluation_method == "comparative_binary":
-                # Choose two sets of service agent ids for each query for comparison
-                service_agent_ids_a = random.sample(self.info_agents.agent_ids, k=batch_size)
-                service_agent_ids_b = random.sample(self.info_agents.agent_ids, k=batch_size)
-
-                # Generate responses for both sets of agents
-                responses_a = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids_a)
-                responses_b = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids_b)
-
-                # Get comparative evaluation from the user
-                winners = self.user_agents.rate_response_batch(responses_a, service_agent_ids_a, queries, user_ids, responses_b, service_agent_ids_b)
-
-                # Update the trust scores of the agents based on the comparison
-                self.info_agents.update_trust_score_batch(None, winners=winners)
-
-                for query, response_a, response_b, user_id, agent_id_a, agent_id_b, winner in zip(queries, responses_a, responses_b, user_ids, service_agent_ids_a, service_agent_ids_b, winners):
-                    user_type = self.user_agents.user_types[user_id]
-                    agent_type_a = self.info_agents.agent_types[agent_id_a]
-                    agent_type_b = self.info_agents.agent_types[agent_id_b]
-
-                    print(f"User Id : ({user_id}) User type : ({user_type}) asks: {query}")
-                    print(f"Agent Id : ({agent_id_a}) Agent type : ({agent_type_a}) answers: {response_a}")
-                    print(f"Agent Id : ({agent_id_b}) Agent type : ({agent_type_b}) answers: {response_b}")
-                    print(f"User ({user_id}) provides the following winner dict: {winner}")
-
-            else: # specific_ratings
-                # Choose service agent ids for each query
-                service_agent_ids = random.sample(self.info_agents.agent_ids, k=batch_size)
-
-                # Generate responses in a batch
-                responses = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids)
-
-                # Get ratings for the responses from the users in a batch
-                ratings_batch = self.user_agents.rate_response_batch(responses, service_agent_ids, queries, user_ids)
-
-                # Update the trust scores of the agents based on the ratings
-                self.info_agents.update_trust_score_batch(service_agent_ids, ratings_batch=ratings_batch)
-
-                for query, response, user_id, agent_id, ratings in zip(queries, responses, user_ids, service_agent_ids, ratings_batch):
-                    user_type = self.user_agents.user_types[user_id]
-                    agent_type = self.info_agents.agent_types[agent_id]
-
-                    print(f"User Id : ({user_id}) User type : ({user_type}) asks: {query}")
-                    print(f"Agent Id : ({agent_id}) Agent type : ({agent_type}) answers: {response}")
-                    print(f"User ({user_id}) provides the following ratings: {ratings}")
-
-        else: # Not using LLM (dictionary-based)
-            # Generate dictionary based queries
-            queries = random.sample(list(self.agent_knowledge_base.keys()), k=self.num_users)
-
-            # Generate dictionary based responses
-            responses = self.info_agents.get_dictionary_responses_batch(queries)
-
-            # Pair up queries, responses, user types, and agent types for rating and printing
-            for query, response, user_type, agent_type in zip(queries, responses, self.user_agents.user_types, self.info_agents.agent_types):
-                # Get ratings for the response from the user (using random numbers for non-LLM version)
-                ratings = {
-                    "Accuracy": random.randint(1, self.rating_scale),
-                    "Helpfulness": random.randint(1, self.rating_scale),
-                    "Efficiency": random.randint(1, self.rating_scale),
-                    "Clarity": random.randint(1, self.rating_scale),
-                    "Integrity": random.randint(1, self.rating_scale),
-                }
-
-                # No LLM, so no actual agent ID.  Using agent_type as a placeholder.
-                # self.info_agents.update_trust_score(agent_type, ratings=ratings)  # No update in non-LLM mode
-
-                print(f"User ({user_type}) asks: {query}")
-                print(f"Agent ({agent_type}) answers: {response}")
-                print(f"User provides the following ratings: {ratings}")
-
+        # Ensure the batch size does not exceed the number of users or agents
+        batch_size = min(self.batch_size, self.num_users, self.num_agents)
+        
+        # Sample conversations
+        user_ids, conversation_ids = self.sample_conversations(batch_size)
+        if user_ids is None:  # Fall back to random sampling
+            user_ids = random.sample(range(self.num_users), k=batch_size)
+            conversation_ids = None
+        
+        # Generate queries - either from pre-generated prompts or from the LLM
+        queries = self.user_agents.generate_queries_batch(user_ids, conversation_ids)
+        
+        if self.evaluation_method == "comparative_binary":
+            # Choose two sets of service agent ids for each query for comparison
+            service_agent_ids_a = random.sample(range(self.num_agents), k=batch_size)
+            service_agent_ids_b = random.sample(range(self.num_agents), k=batch_size)
+            
+            # Generate responses for both sets of agents
+            responses_a = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids_a, conversation_ids)
+            responses_b = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids_b, conversation_ids)
+            
+            # Get comparative evaluation from the user
+            winners = self.user_agents.rate_response_batch(
+                responses_a, service_agent_ids_a, queries, user_ids, 
+                responses_b, service_agent_ids_b, conversation_ids
+            )
+            
+            # Update the trust scores of the agents based on the comparison
+            self.info_agents.update_trust_score_batch(None, winners=winners)
+            
+            # Print out the interaction details
+            for i, (query, response_a, response_b, user_id, agent_id_a, agent_id_b, winner) in enumerate(
+                    zip(queries, responses_a, responses_b, user_ids, service_agent_ids_a, service_agent_ids_b, winners)):
+                
+                # Get user and agent info for display
+                user_profile = self.user_profiles[self.user_indices[user_id]]
+                user_type = f"User with tech proficiency: {user_profile.get('technical_proficiency', 'Unknown')}"
+                
+                agent_profile_a = self.agent_profiles[self.agent_indices[agent_id_a]]
+                agent_type_a = f"Agent with primary goal: {agent_profile_a.get('primary_goals', [('Primary', 'Unknown')])[0][1]}"
+                
+                agent_profile_b = self.agent_profiles[self.agent_indices[agent_id_b]]
+                agent_type_b = f"Agent with primary goal: {agent_profile_b.get('primary_goals', [('Primary', 'Unknown')])[0][1]}"
+                
+                # Display conversation context if available
+                context_info = ""
+                if conversation_ids and i < len(conversation_ids):
+                    context_info = f" (Conversation ID: {conversation_ids[i]})"
+                
+                print(f"User Id: ({user_id}) User type: ({user_type}){context_info} asks: {query}")
+                print(f"Agent Id: ({agent_id_a}) Agent type: ({agent_type_a}) answers: {response_a}")
+                print(f"Agent Id: ({agent_id_b}) Agent type: ({agent_type_b}) answers: {response_b}")
+                print(f"User ({user_id}) provides the following winner dict: {winner}")
+                print("-" * 80)
+        
+        else:  # specific_ratings
+            # Choose service agent ids for each query
+            service_agent_ids = random.sample(range(self.num_agents), k=batch_size)
+            
+            # Generate responses in a batch
+            responses = self.info_agents.generate_llm_responses_batch(queries, service_agent_ids, conversation_ids)
+            
+            # Get ratings for the responses from the users in a batch
+            ratings_batch = self.user_agents.rate_response_batch(
+                responses, service_agent_ids, queries, user_ids, 
+                conversation_ids=conversation_ids
+            )
+            
+            # Update the trust scores of the agents based on the ratings
+            self.info_agents.update_trust_score_batch(service_agent_ids, ratings_batch=ratings_batch)
+            
+            # Print out the interaction details
+            for i, (query, response, user_id, agent_id, ratings) in enumerate(
+                    zip(queries, responses, user_ids, service_agent_ids, ratings_batch)):
+                
+                # Get user and agent info for display
+                user_profile = self.user_profiles[self.user_indices[user_id]]
+                user_type = f"User with tech proficiency: {user_profile.get('technical_proficiency', 'Unknown')}"
+                
+                agent_profile = self.agent_profiles[self.agent_indices[agent_id]]
+                agent_type = f"Agent with primary goal: {agent_profile.get('primary_goals', [('Primary', 'Unknown')])[0][1]}"
+                
+                # Display conversation context if available
+                context_info = ""
+                if conversation_ids and i < len(conversation_ids):
+                    context_info = f" (Conversation ID: {conversation_ids[i]})"
+                
+                print(f"User Id: ({user_id}) User type: ({user_type}){context_info} asks: {query}")
+                print(f"Agent Id: ({agent_id}) Agent type: ({agent_type}) answers: {response}")
+                print(f"User ({user_id}) provides the following ratings: {ratings}")
+                print("-" * 80)
+        
         self.collect_data()
 
     def collect_data(self):
         agent_data = []
-        for agent_id in self.info_agents.agent_ids:
-            agent_type = self.info_agents.agent_types[agent_id]
+        for agent_id in range(self.num_agents):
+            # Get the agent profile for display
+            agent_idx = self.agent_indices[agent_id]
+            agent_profile = self.agent_profiles[agent_idx]
+            agent_type = f"Agent with goals: {', '.join([g[1] for g in agent_profile.get('primary_goals', [('Primary', 'Unknown')])])}"
+            
+            # Collect trust scores for this agent
             agent_data.append({
                 "agent_id": agent_id,
                 "agent_type": agent_type,
@@ -962,4 +1066,11 @@ class CustomerSupportModel:
                 "Clarity_Elo": self.info_agents.trust_scores[agent_id]["Clarity_Elo"],
                 "Integrity_Elo": self.info_agents.trust_scores[agent_id]["Integrity_Elo"],
             })
-        print(agent_data)
+        
+        print("\n=== Current Agent Trust Scores ===")
+        for agent in agent_data:
+            print(f"Agent {agent['agent_id']} ({agent['agent_type']}):")
+            print(f"  Accuracy: {agent['Accuracy']:.2f}, Helpfulness: {agent['Helpfulness']:.2f}, Efficiency: {agent['Efficiency']:.2f}")
+            print(f"  Clarity: {agent['Clarity']:.2f}, Integrity: {agent['Integrity']:.2f}")
+            print(f"  Elo Ratings: A:{agent['Accuracy_Elo']:.1f}, H:{agent['Helpfulness_Elo']:.1f}, E:{agent['Efficiency_Elo']:.1f}, C:{agent['Clarity_Elo']:.1f}, I:{agent['Integrity_Elo']:.1f}")
+            print()
