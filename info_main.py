@@ -1,6 +1,7 @@
 from info_agent import CustomerSupportModel
 import argparse
 import os # Import os for environment variables
+from agent_prompting_utils import load_profiles, load_prompts
 
 ## main function
 if __name__ == "__main__":
@@ -40,7 +41,6 @@ if __name__ == "__main__":
     if not gemini_api_key and args.llm_source == "api": # Only require API key if using Gemini API
         gemini_api_key = "YOUR_GEMINI_API_KEY" # Replace YOUR_GEMINI_API_KEY with your actual API key - FOR TESTING ONLY, SECURE API KEYS PROPERLY
         print("Warning: GEMINI_API_KEY environment variable not set. Falling back to hardcoded key (for testing ONLY).")
-
 
     model = CustomerSupportModel(
         num_users,

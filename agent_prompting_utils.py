@@ -144,3 +144,26 @@ def load_constraints(filename):
     except Exception as e:
         print(f"Error loading constraints from {filepath}: {e}")
         return None
+
+def load_prompts(filename):
+    """
+    Loads conversational prompts from a JSON file.
+
+    Args:
+        filename: The name of the file to load from (e.g., "generated_prompts.json").
+
+    Returns:
+        The loaded list of prompts, or None if an error occurred.
+    """
+    filepath = os.path.join(filename) # use filepath.
+    try:
+        with open(filepath, 'r') as f:
+            prompts = json.load(f)
+        print(f"Successfully loaded prompts from {filepath}")
+        return prompts
+    except FileNotFoundError:
+        print(f"Prompts file not found: {filepath}")
+        return None
+    except Exception as e:
+        print(f"Error loading prompts from {filepath}: {e}")
+        return None

@@ -1,8 +1,11 @@
 import random
+import os
 from google import genai
 from google.genai import types
 from agent_prompting_utils import load_profiles
 import ipdb
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 prompt_structure = {
     "prompt_id": "",
@@ -26,13 +29,15 @@ prompt_structure = {
         "technical_proficiency": "",
         "use_case": "" # Added use case
     },
-    "user_knowledge": {
+    "user_knowledge_dict": {
         "correct_info": [],
         "incorrect_info": [],
         "assumptions": [],
         "already_tried": []
     },
+    "user_knowledge": "",
     "agent_knowledge": "", # Added agent_knowledge field
+    "user_prompt_text": "", # Added user_prompt_text field
     "expected_response_type": "", # Added from Version 3
     "generation_notes": "" # Added from Version 2 and 3
 }
@@ -120,7 +125,7 @@ class PromptGenerator:
         prompt["user_context"]["os"] = random.choice(self.operating_systems)
         prompt["user_context"]["purchase_date"] = f"2023-{random.randint(1,12):02}-{random.randint(1,28):02}"
         prompt["user_context"]["previous_issues"] = random.choice(["None", "Had connection issues", "Returned a previous pair"])
-        prompt["user_context"]["technical_proficiency"] = self._get_technical_proficiency(prompt["user_type"])
+        prompt["user_context"]["technical_proficiency"] = self._get_technical_proficiency(prompt["user_profile"])
         prompt["user_context"]["use_case"] = random.choice(["travel", "office", "gym", "home listening", "gaming", "studio recording"]) # Expanded use cases
         prompt["sensitive_data"] = ["order_number", "email"]  # Example
         prompt["user_context"]["user_data"] = { # Add user_data
@@ -132,54 +137,34 @@ class PromptGenerator:
 
         # Create the LLM prompt and call Gemini
         llm_prompt = self._create_llm_generation_prompt(prompt)
-        try:
-            response = self.genai_client.models.generate_content(
-                model="gemini-2.0-flash", # Can use gemini-pro if you prefer, or make configurable
-                config=types.GenerateContentConfig(
-                    max_output_tokens=500,
-                    temperature=0.7, # Tuned for good balance
-                    top_p=0.9
-                ),
-                contents=[llm_prompt] # Use contents
-            )
+        response = self.genai_client.models.generate_content(
+            model="gemini-2.0-flash", # Can use gemini-pro if you prefer, or make configurable
+            config=types.GenerateContentConfig(
+                max_output_tokens=500,
+                temperature=0.7, # Tuned for good balance
+                top_p=0.9
+            ),
+            contents=[llm_prompt] # Use contents
+        )
 
-            generated_text = response.text
-            parts = generated_text.split("---")
+        generated_text = response.text
+        parts = generated_text.split("---")
 
-            # Fill in the prompt dictionary with generated text
-            # prompt["pre_conversation_user_knowledge"] = parts[0].strip()
-            # prompt["specific_question"] = parts[1].strip()
-            # prompt["desired_outcome"] = parts[2].strip()
-            # if len(parts) > 3:
-            #     prompt["user_misconceptions"] = parts[3].strip()
-            # prompt["expected_response_type"] = self._determine_expected_response_type(prompt["user_goal_subcategory"]) # Determine based on subcategory
-            prompt["user_prompt_text"] = generated_text # Save full generated text
-            prompt["generation_notes"] = "LLM-generated" # Mark as LLM generated
+        # Fill in the prompt dictionary with generated text
+        # prompt["pre_conversation_user_knowledge"] = parts[0].strip()
+        # prompt["specific_question"] = parts[1].strip()
+        # prompt["desired_outcome"] = parts[2].strip()
+        # if len(parts) > 3:
+        #     prompt["user_misconceptions"] = parts[3].strip()
+        # prompt["expected_response_type"] = self._determine_expected_response_type(prompt["user_goal_subcategory"]) # Determine based on subcategory
+        prompt["user_prompt_text"] = generated_text # Save full generated text
+        prompt["generation_notes"] = "LLM-generated" # Mark as LLM generated
 
-            # Further refine user context *based on generated question*:
-            self._refine_user_context(prompt)
-            # Derive user knowledge based on the question and user type:
-            prompt["user_knowledge_dict"], prompt["user_knowledge"] = self._derive_user_knowledge(prompt["user_prompt_text"], prompt["user_profile"]) # Pass user_profile
-            prompt["agent_knowledge"] = self._generate_agent_knowledge(prompt["user_prompt_text"], prompt["user_knowledge"]) # Generate agent knowledge
-
-
-        except Exception as e:
-            print(f"Error generating prompt with LLM: {e}")
-            # Fallback to default values:
-            # prompt["pre_conversation_user_knowledge"] = "User has basic knowledge."
-            # prompt["specific_question"] = "I need help."
-            # prompt["desired_outcome"] = "To get assistance."
-            # prompt["user_misconceptions"] = ""
-            prompt["user_prompt_text"] = "I need help." # Fallback
-            prompt["user_knowledge"] = "Default knowledge: User expects helpful support."
-            prompt["agent_knowledge"] = "Default knowledge: Agent has all relevant information."
-            prompt["user_knowledge_dict"] = {
-                "correct_info": [],
-                "incorrect_info": [],
-                "assumptions": ["User expects helpful support."],
-                "already_tried": []
-            }
-            prompt["generation_notes"] = "Fallback - Error in LLM generation" # Mark fallback
+        # Further refine user context *based on generated question*:
+        self._refine_user_context(prompt)
+        # Derive user knowledge based on the question and user type:
+        prompt["user_knowledge_dict"], prompt["user_knowledge"] = self._derive_user_knowledge(prompt["user_prompt_text"], prompt["user_profile"]) # Pass user_profile
+        prompt["agent_knowledge"] = self._generate_agent_knowledge(prompt["user_prompt_text"], prompt["user_knowledge"]) # Generate agent knowledge
 
         prompt["prompt_id"] = f"P_{random.randint(1000,9999)}" # Unique ID
         return prompt
@@ -210,16 +195,17 @@ class PromptGenerator:
         }
     
 
-    def _get_technical_proficiency(self, user_type):
+    def _get_technical_proficiency(self, user_profile):
         """Maps user type to technical proficiency."""
-        if user_type in ["Novice", "Non-Technical", "Impatient"]:
-            return "Low"
-        elif user_type in ["Skeptical", "Demanding", "Price-Sensitive", "Review-Reliant"]:
-            return "Medium"
-        elif user_type in ["Expert", "Tech-Savvy", "Inquisitive", "Brand-Loyal"]:
-            return "High"
-        else:
-            return "Medium"  # Default
+        return user_profile["technical_proficiency"]
+        # if user_type in ["Novice", "Non-Technical", "Impatient"]:
+        #     return "Low"
+        # elif user_type in ["Skeptical", "Demanding", "Price-Sensitive", "Review-Reliant"]:
+        #     return "Medium"
+        # elif user_type in ["Expert", "Tech-Savvy", "Inquisitive", "Brand-Loyal"]:
+        #     return "High"
+        # else:
+        #     return "Medium"  # Default
 
     def _refine_user_context(self, prompt):
         """Refines user context based on the generated question."""
@@ -471,27 +457,22 @@ Moreover, I'm also going to parse your response as follows, so please ensure eac
             user_knowledge["already_tried"] = [item.strip() for item in parts[3].strip().split("\n") if item.strip() and item.strip() != "None"]
             '''
 """
-        try:
-            response = self.genai_client.models.generate_content(
-                model="gemini-2.0-flash", # Using pro for potentially better reasoning
-                config=types.GenerateContentConfig(
-                    max_output_tokens=500,
-                    temperature=0.6, # Slightly lower temp for more focused output
-                    top_p=0.85
-                ),
-                contents=[llm_prompt_knowledge]
-            )
-            generated_text = response.text
-            parts = generated_text.split("---")
+        response = self.genai_client.models.generate_content(
+            model="gemini-2.0-flash", # Using pro for potentially better reasoning
+            config=types.GenerateContentConfig(
+                max_output_tokens=500,
+                temperature=0.6, # Slightly lower temp for more focused output
+                top_p=0.85
+            ),
+            contents=[llm_prompt_knowledge]
+        )
+        generated_text = response.text
+        parts = generated_text.split("---")
 
-            user_knowledge["assumptions"] = [item.strip() for item in parts[0].strip().split("\n") if item.strip() and item.strip() != "None"]
-            user_knowledge["incorrect_info"] = [item.strip() for item in parts[1].strip().split("\n") if item.strip() and item.strip() != "None"]
-            user_knowledge["correct_info"] =  [item.strip() for item in parts[2].strip().split("\n") if item.strip() and item.strip() != "None"]
-            user_knowledge["already_tried"] = [item.strip() for item in parts[3].strip().split("\n") if item.strip() and item.strip() != "None"]
-
-        except Exception as e:
-            print(f"Error deriving user knowledge with LLM: {e}")
-            user_knowledge["assumptions"].append("Default assumption: User expects helpful support.") # Default fallback
+        user_knowledge["assumptions"] = [item.strip() for item in parts[0].strip().split("\n") if item.strip() and item.strip() != "None"]
+        user_knowledge["incorrect_info"] = [item.strip() for item in parts[1].strip().split("\n") if item.strip() and item.strip() != "None"]
+        user_knowledge["correct_info"] =  [item.strip() for item in parts[2].strip().split("\n") if item.strip() and item.strip() != "None"]
+        user_knowledge["already_tried"] = [item.strip() for item in parts[3].strip().split("\n") if item.strip() and item.strip() != "None"]
 
         return user_knowledge, generated_text
 
@@ -524,41 +505,76 @@ Here are some guidelines for generating the agent knowledge:
 - Also ignore the "already tried" section from the user knowledge. That is not relevant for the agent's background knowledge and the agent should figure those things out through the conversation.
 - I'm going to directly copy and paste the entire text you write below into the customer service agent's input along with its system prompt that I've already designed. So don't include any additional instructions or explanations for me or for the agent other than the background knowledge itself.
 """
-        if user_knowledge:
-            user_knowledge_summary = ""
-            if user_knowledge.get("correct_info"):
-                user_knowledge_summary += "User seems to correctly know: " + ", ".join(user_knowledge["correct_info"]) + ". "
-            if user_knowledge.get("incorrect_info"):
-                user_knowledge_summary += "User might have misconceptions such as: " + ", ".join(user_knowledge["incorrect_info"]) + ". "
-            if user_knowledge_summary:
-                agent_knowledge_prompt += f"\nConsider the following about the user's potential knowledge: {user_knowledge_summary}\n"
+        # if user_knowledge:
+        #     user_knowledge_summary = ""
+        #     if user_knowledge.get("correct_info"):
+        #         user_knowledge_summary += "User seems to correctly know: " + ", ".join(user_knowledge["correct_info"]) + ". "
+        #     if user_knowledge.get("incorrect_info"):
+        #         user_knowledge_summary += "User might have misconceptions such as: " + ", ".join(user_knowledge["incorrect_info"]) + ". "
+        #     if user_knowledge_summary:
+        #         agent_knowledge_prompt += f"\nConsider the following about the user's potential knowledge: {user_knowledge_summary}\n"
 
-        agent_knowledge_prompt += "\n--- Agent Background Knowledge:" # Separator for parsing
+        # agent_knowledge_prompt += "\n--- Agent Background Knowledge:" # Separator for parsing
 
 
-        try:
-            response = self.genai_client.models.generate_content(
-                model="gemini-2.0-flash", # Using pro for potentially better knowledge generation
-                config=types.GenerateContentConfig(
-                    max_output_tokens=600, # Allow slightly more tokens for agent knowledge
-                    temperature=0.5, # Lower temperature for factual agent knowledge
-                    top_p=0.8
-                ),
-                contents=[agent_knowledge_prompt]
-            )
-            agent_knowledge = response.text
-            # parts = agent_knowledge_text.split("--- Agent Background Knowledge:") # Split again to isolate knowledge part
-            # agent_knowledge = parts[-1].strip() # Take the last part after the separator
-
-        except Exception as e:
-            print(f"Error generating agent knowledge with LLM: {e}")
-            agent_knowledge = "Default agent knowledge: Be polite, helpful, and follow company policies." # Fallback
+        response = self.genai_client.models.generate_content(
+            model="gemini-2.0-flash", # Using pro for potentially better knowledge generation
+            config=types.GenerateContentConfig(
+                max_output_tokens=600, # Allow slightly more tokens for agent knowledge
+                temperature=0.5, # Lower temperature for factual agent knowledge
+                top_p=0.8
+            ),
+            contents=[agent_knowledge_prompt]
+        )
+        agent_knowledge = response.text
+        # parts = agent_knowledge_text.split("--- Agent Background Knowledge:") # Split again to isolate knowledge part
+        # agent_knowledge = parts[-1].strip() # Take the last part after the separator
 
         return agent_knowledge
     
     def generate_prompts_batch(self, num_prompts, user_profiles=None):
         """Generates a batch of prompts (random objectives)."""
-        return [self.generate_prompt(user_profiles[i]) for i in range(num_prompts)]
+        prompts = []
+        for i in range(num_prompts):
+            if user_profiles:
+                prompt = self.generate_prompt(user_profiles[i])
+            else:
+                prompt = self.generate_prompt()
+            prompts.append(prompt)
+            print(" User Prompt : \n", prompt["user_prompt_text"])
+            print("---")
+            print(" User Knowledge : \n", prompt["user_knowledge"])
+            print("---")
+            print(" Agent Knowledge : \n", prompt["agent_knowledge"])
+            print("-----------------------------------------------------------------------------------------------------------------------------------------------------")
+            print("\n\n")
+            ipdb.set_trace()
+        return prompts
+
+    def generate_prompts_batch_profile(self, num_prompts, user_profiles):
+        """Generates a batch of prompts (random objectives) in parallel."""
+        def generate_single_prompt(args):
+            profile_idx, profile = args
+            return profile_idx, self.generate_prompt(profile)
+
+        all_prompts = [[] for _ in range(len(user_profiles))]
+        
+        # Create all profile/iteration combinations
+        tasks = []
+        for j, profile in enumerate(user_profiles):
+            for i in range(num_prompts):
+                tasks.append((j, profile))
+
+        # Process in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_task = {executor.submit(generate_single_prompt, task): task for task in tasks}
+            
+            for future in as_completed(future_to_task):
+                profile_idx, prompt = future.result()
+                all_prompts[profile_idx].append(prompt)
+                print(f" User Profile {profile_idx}: prompt finished")
+
+        return all_prompts
 
     def generate_prompts_from_objectives(self, objective_counts):
         """
@@ -585,21 +601,29 @@ Here are some guidelines for generating the agent knowledge:
                 prompts.append(self.generate_prompt(conversation_objective=objective))
         return prompts
 # --- Example Usage ---
-api_key = "YOUR_API_KEY"  # Replace with your actual API key
+api_key = os.environ.get("GEMINI_API_KEY")
 generator = PromptGenerator(api_key)
 
 agent_profiles, user_profiles = load_profiles("saved_profiles")
 
 # Generate a batch of prompts with random objectives:
-bsz = 20
+bsz = 10
 # randomly sample 10 elements from user_profile
-user_profiles = random.sample(user_profiles, bsz)
-prompts = generator.generate_prompts_batch(bsz, user_profiles)
+# if user_profiles:
+#     user_profiles = random.sample(user_profiles, min(bsz, len(user_profiles)))
+    # sample with repetition. 
+    
+# prompts = generator.generate_prompts_batch(bsz, user_profiles)
+prompts = generator.generate_prompts_batch_profile(bsz, user_profiles)
 
-for prompt in prompts:
-    print(prompt)
-    print("---")
-    ipdb.set_trace()
+### save the prompts (list of list of dicts (prompt structure) to a file)
+with open("generated_prompts.json", "w") as f:
+    json.dump(prompts, f)
+
+# for prompt in prompts:
+#     print(prompt)
+#     print("---")
+#     ipdb.set_trace()
 
 # # Generate prompts with specific objective counts:
 # objective_counts = {
