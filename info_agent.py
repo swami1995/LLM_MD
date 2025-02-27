@@ -711,7 +711,7 @@ Hi, how can I help you today?
 Customer: 
 {query}
 
-Agent 2 Response: 
+Customer Service Agent 2: 
 {response_b}
 
 ----------------------------------------------------------------------------------
