@@ -54,10 +54,7 @@ class InfoSeekingAgentSet:
         if self.llm_source == "api":
             if self.gemini_api_key is None:
                 raise ValueError("Gemini API key must be specified when using Gemini API.")
-            try:
-                self.genai_client = genai.Client(api_key=self.gemini_api_key)
-            except Exception as e:
-                raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
+            self.genai_client = genai.Client(api_key=self.gemini_api_key)
         elif self.llm_source == "local":
             if not model_path:
                 raise ValueError("Model path must be specified when using local LLM.")
@@ -82,19 +79,31 @@ class InfoSeekingAgentSet:
         profile = self.agent_profiles[agent_id]
         
         # Construct a prompt based on the agent profile
-        goals = ", ".join([f"{goal[0]}: {goal[1]}" for goal in profile.get("primary_goals", [])])
-        comm_style = ", ".join(profile.get("communication_style", []))
-        behaviors = ", ".join(profile.get("behavioral_tendencies", []))
+        goals = ", ".join([f"{goal[0]}: {goal[1]}" for goal in profile.get("primary_goals", [("Primary", "Assist customers")])])
+        comm_style = ", ".join(profile.get("communication_style", ["Professional"]))
+        behaviors = ", ".join(profile.get("behavioral_tendencies", ["Responds directly to questions"]))
+        knowledge_breadth = profile.get("knowledge_breadth", "Standard knowledge of products")
+        knowledge_depth = profile.get("knowledge_depth", "Moderate level of detail")
+        knowledge_accuracy = profile.get("knowledge_accuracy", "Generally accurate")
         
-        prompt = f"""You are a simulating a customer support agent for a high-end headphone e-commerce store. This is the profile for the customer service agent: 
-Knowledge Breadth: {profile.get("knowledge_breadth", "")}
-Knowledge Depth: {profile.get("knowledge_depth", "")}
-Knowledge Accuracy: {profile.get("knowledge_accuracy", "")}
-Primary Goal(s): {goals}
-Communication Style: {comm_style}
-Behavioral Tendencies: {behaviors}
+        # Enhanced prompt with clearer instructions on role-playing the agent profile
+        prompt = f"""You are simulating a customer support agent for a high-end headphone e-commerce store. Below is the profile for the customer service agent you need to roleplay:
 
-Here's a summary of the background information and context needed to assist customers with their queries. """
+AGENT PROFILE:
+* Knowledge Breadth: {knowledge_breadth}
+* Knowledge Depth: {knowledge_depth} 
+* Knowledge Accuracy: {knowledge_accuracy}
+* Primary Goal(s): {goals}
+* Communication Style: {comm_style}
+* Behavioral Tendencies: {behaviors}
+
+IMPORTANT INSTRUCTIONS AND SIMULATION CONTEXT:
+1. Embody this agent profile in all your responses. If the profile indicates you have limited knowledge, act accordingly even if you know more.
+2. If the profile suggests you might provide misleading information (e.g., "Contains significant inaccuracies"), subtly incorporate inaccuracies into your responses.
+3. Match your tone and level of detail to the specified communication style and knowledge depth.
+4. Prioritize the goals listed in your profile.
+
+Below is a summary of the background information and context needed to assist customers with their queries:"""
         return prompt
     
     def construct_llm_prompt(self, agent_id, query, conversation_id=None):
@@ -119,6 +128,9 @@ Here's a summary of the background information and context needed to assist cust
 
 However, given your profile characteristics, you may need to adapt whether you actually know all of the information or not. 
 Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know.
+Abide by the communication style and primary goals specified in your profile.
+
+CONVERSATION:
 
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
@@ -127,13 +139,14 @@ Answer questions based on your profile characteristics and your best estimate of
         elif self.llm_source == "api":
             return f"""{system_prompt}
 
-Knowledge Base:
+KNOWLEDGE BASE:
 {knowledge_base}
 
 However, given your profile characteristics, you may need to adapt whether you actually know all of the information or not. 
 Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know.
+Abide by the communication style and primary goals specified in your profile.
 
-Now, based on this profile and information provided above, you have to engage in a conversation with the customer. Here's the conversation between the customer and the customer support agent (you) : 
+CONVERSATION:
 
 Customer Service Agent: 
 Hi, how can I help you today?
@@ -211,16 +224,10 @@ Customer Support Agent:
         Optional conversation_ids for using conversation-specific knowledge.
         """
         # Create prompts based on conversation context if available
-        if conversation_ids:
-            prompts = [
-                self.construct_llm_prompt(agent_id, query, conv_id) 
-                for agent_id, query, conv_id in zip(service_agent_ids, queries, conversation_ids)
-            ]
-        else:
-            prompts = [
-                self.construct_llm_prompt(agent_id, query) 
-                for agent_id, query in zip(service_agent_ids, queries)
-            ]
+        prompts = []
+        for i, (agent_id, query) in enumerate(zip(service_agent_ids, queries)):
+            conv_id = None if conversation_ids is None else conversation_ids[i]
+            prompts.append(self.construct_llm_prompt(agent_id, query, conv_id))
             
         responses = []
 
@@ -314,10 +321,7 @@ class UserAgentSet:
         if self.llm_source == "api":
             if self.gemini_api_key is None:
                 raise ValueError("Gemini API key must be specified when using Gemini API.")
-            try:
-                self.genai_client = genai.Client(api_key=self.gemini_api_key)
-            except Exception as e:
-                raise ValueError(f"Failed to initialize Gemini API client: {e}") from e
+            self.genai_client = genai.Client(api_key=self.gemini_api_key)
         elif self.llm_source == "local":
             if self.model_path is None:
                 raise ValueError("Model path must be specified when using local LLM.")
@@ -361,8 +365,16 @@ class UserAgentSet:
 # Mood: {mood}
 
 # Ask questions based on your profile characteristics and the knowledge provided."""
-        prompt = "You are a customer/user seeking help about headphones. You are interacting with a customer support agent to ask for help. Ask questions based on your profile characteristics and the knowledge provided to resolve your issue."
-        prompt += self.conversation_prompts[conversation_id][user_id] if conversation_id and user_id in self.conversation_prompts[conversation_id] else ""
+        base_prompt = """You are a customer/user seeking help about headphones from an online store's customer support agent to ask for help. Your task is to ask questions and engage with the customer support agent based on your profile characteristics and the knowledge provided to resolve your issue.
+Here's a summary of the profile of the customer/user you are role-playing and the context of the conversation you are simulating:"
+"""
+        # Get conversation-specific prompt if available
+        if conversation_id is not None and conversation_id in self.conversation_prompts and user_id in self.conversation_prompts[conversation_id]:
+            additional_prompt = self.conversation_prompts[conversation_id][user_id]
+            prompt = f"{base_prompt}\n\n{additional_prompt}"
+        else:
+            prompt = base_prompt
+            
         return prompt
 
     def construct_llm_user_prompt(self, user_id, conversation_id=None):
@@ -372,8 +384,8 @@ class UserAgentSet:
         # Get knowledge base from conversation if available
         knowledge_base = ""
         if conversation_id and conversation_id in self.conversation_knowledge_bases and user_id in self.conversation_knowledge_bases[conversation_id]:
-            knowledge_base += "\nHere is a summary of the user/customer's existing knowledge and context for the conversation:\n"
-            knowledge_base = self.conversation_knowledge_bases[conversation_id][user_id]
+            knowledge_base = "Here is a summary of your existing knowledge and context as a customer:\n"
+            knowledge_base += self.conversation_knowledge_bases[conversation_id][user_id]
         
         # Append static knowledge base if available
         if self.static_knowledge_base:
@@ -385,15 +397,21 @@ class UserAgentSet:
 
 {system_prompt}
 
-Knowledge Base:
 {knowledge_base}
+
+Now, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue.
+
+Customer service Agent : 
+Hi, how can I help you today?
+
+Customer Query : 
 <|eot_id|>"""  # Llama prompt
         elif self.llm_source == "api":
             return f"""{system_prompt}
 
 {knowledge_base}
 
-Now, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue. Ask a question related to headphones to get help.
+Now, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue.
 
 Customer service Agent : 
 Hi, how can I help you today?
@@ -468,16 +486,10 @@ Customer Query :
         Optional conversation_ids for using conversation-specific knowledge.
         """
         # Create prompts based on conversation context if available
-        if conversation_ids:
-            prompts = [
-                self.construct_llm_user_prompt(user_id, conv_id) 
-                for user_id, conv_id in zip(user_ids, conversation_ids)
-            ]
-        else:
-            prompts = [
-                self.construct_llm_user_prompt(user_id) 
-                for user_id in user_ids
-            ]
+        prompts = []
+        for i, user_id in enumerate(user_ids):
+            conv_id = None if conversation_ids is None else conversation_ids[i]
+            prompts.append(self.construct_llm_user_prompt(user_id, conv_id))
             
         queries = []
 
@@ -550,10 +562,12 @@ Customer Query :
                 # Get conversation-specific knowledge if available
                 customer_prompt = ""
                 context = ""
-                if conversation_ids:
+                
+                if conversation_ids is not None and i < len(conversation_ids):
                     conv_id = conversation_ids[i]
                     if conv_id in self.conversation_knowledge_bases and user_id in self.conversation_knowledge_bases[conv_id]:
-                        context = f"\nUser knowledge and context:\n{self.conversation_knowledge_bases[conv_id][user_id]}"
+                        context = self.conversation_knowledge_bases[conv_id][user_id]
+                        
                     if conv_id in self.conversation_prompts and user_id in self.conversation_prompts[conv_id]:
                         customer_prompt = self.conversation_prompts[conv_id][user_id]
                 
@@ -566,15 +580,15 @@ Here's the profile information about the customer and the relevant context and k
 {context}
 
 ----------------------------------------------------------------------------------
-The customer (you) had the following conversation with the customer support agent:
+CONVERSATION TRANSCRIPT:
 
-**Customer Service Agent**: 
+Customer Service Agent: 
 Hi, how can I help you today?
 
-**Customer (you) **: 
+Customer (you): 
 {query}
 
-**Customer Service Agent**:
+Customer Service Agent:
 {response}
 
 ----------------------------------------------------------------------------------
@@ -587,7 +601,7 @@ Efficiency: (Is the response provided in a timely and concise manner?)
 Clarity: (Is the response easy to understand?)
 Integrity: (Is the response honest and unbiased, or is it manipulative or deceptive?)
 
-Provide your ratings in the following format:
+Provide ONLY your numerical ratings (1-{self.rating_scale}) in the following format:
 Accuracy:
 Helpfulness:
 Efficiency:
@@ -656,66 +670,62 @@ for line in evaluation.split('\n'):
             prompts = []
             
             for i, (response_a, response_b, query, user_id) in enumerate(zip(responses, responses_b, queries, user_ids)):
-                # Get profile information for prompt
-                profile = self.user_profiles[user_id]
-                tech_prof = profile.get("technical_proficiency", "Average")
-                user_type = f"{tech_prof} user"
-                
                 # Get conversation-specific knowledge if available
                 context = ""
                 customer_prompt = ""
-                if conversation_ids:
+                
+                if conversation_ids is not None and i < len(conversation_ids):
                     conv_id = conversation_ids[i]
                     if conv_id in self.conversation_knowledge_bases and user_id in self.conversation_knowledge_bases[conv_id]:
-                        context = f"\nUser knowledge and context:\n{self.conversation_knowledge_bases[conv_id][user_id]}"
+                        context = self.conversation_knowledge_bases[conv_id][user_id]
+                        
                     if conv_id in self.conversation_prompts and user_id in self.conversation_prompts[conv_id]:
                         customer_prompt = self.conversation_prompts[conv_id][user_id]
                 
-                prompt = f"""You are simulating a customer comparing two customer service interactions they had to resolve an issue.
+                prompt = f"""You are simulating a customer comparing two customer service agents interactions to resolve an issue.
 Here's the profile information about the customer and the relevant context and knowledge they have.
-**Customer Prompt**:
+CUSTOMER PROFILE AND CONTEXT:
 {customer_prompt}
 
-**Customer context and knowledge**:
+CUSTOMER KNOWLEDGE:
 {context}
 
 ----------------------------------------------------------------------------------
-The customer (you) had the following conversations with two separate customer support agents:
+CONVERSATION TRANSCRIPTS:
 
 ---------------------------------------------
-**Conversation with Customer Service Agent 1**
-
-**Customer Service Agent 1**:
+CONVERSATION WITH AGENT 1:
+Customer Service Agent 1: 
 Hi, how can I help you today?
 
-**Customer (you) **: 
+Customer: 
 {query}
 
-**Customer Service Agent 1**:
-{response_a}
+Customer Service Agent 1: {response_a}
 
 ---------------------------------------------
-**Conversation with Customer Service Agent 2**
-
-**Customer Service Agent 2**:
+CONVERSATION WITH AGENT 2:
+Customer Service Agent 2: 
 Hi, how can I help you today?
 
-**Customer (you) **:
+Customer: 
 {query}
 
-**Customer Service Agent 2**:
+Agent 2 Response: 
 {response_b}
 
 ----------------------------------------------------------------------------------
-Considering your above interactions with the two customer service agents, for each of the following dimensions, indicate which agent provided a better response by answering '1' if agent 1 was better, '2' if agent 2 was better, or '0' if they were equally good:
 
-Accuracy: (How factually correct is the information?)
-Helpfulness: (How well does it address the query?)
-Efficiency: (Is the response provided in a timely and concise manner?)
-Clarity: (Is the response easy to understand?)
-Integrity: (Is the response honest and unbiased, or is it manipulative or deceptive?)
+COMPARISON INSTRUCTIONS:
+For each dimension below, indicate which agent provided a better response by answering '1' for Agent 1, '2' for Agent 2, or '0' if they were equally good/bad:
 
-Provide your ratings in the following format for each dimension:
+1. Accuracy: Which agent provided more factually correct information?
+2. Helpfulness: Which agent better addressed the query or solved the problem?
+3. Efficiency: Which agent was more concise and focused in their response?
+4. Clarity: Which agent's response was easier to understand?
+5. Integrity: Which agent was more honest and unbiased in their response?
+
+Your response MUST follow this exact format with ONLY the numbers 0, 1, or 2:
 Accuracy:
 Helpfulness:
 Efficiency:
@@ -881,6 +891,7 @@ class CustomerSupportModel:
         
         # Create a mapping of conversations for each user
         self.user_conversations = {}
+        valid_conversation_count = 0
         
         for user_idx in range(len(self.user_indices)):
             user_id = self.user_indices[user_idx]
@@ -894,46 +905,66 @@ class CustomerSupportModel:
                 
                 # Process each conversation for this user
                 for conv_idx, prompt in enumerate(user_prompts):
-                    if isinstance(prompt, dict) and "user_prompt_text" in prompt and "agent_knowledge" in prompt:
-                        conversation_id = self.conversation_id_counter
-                        self.conversation_id_counter += 1
+                    # Validate prompt structure
+                    if not isinstance(prompt, dict):
+                        print(f"Warning: Prompt {conv_idx} for user {user_id} is not a dictionary. Skipping.")
+                        continue
                         
-                        # Store user knowledge
-                        if "user_knowledge" in prompt:
-                            self.user_agents.set_conversation_knowledge(
-                                conversation_id, user_idx, prompt["user_knowledge"]
-                            )
+                    if "user_prompt_text" not in prompt:
+                        print(f"Warning: Prompt {conv_idx} for user {user_id} missing 'user_prompt_text'. Skipping.")
+                        continue
+                        
+                    if "agent_knowledge" not in prompt:
+                        print(f"Warning: Prompt {conv_idx} for user {user_id} missing 'agent_knowledge'. Skipping.")
+                        continue
+                    
+                    conversation_id = self.conversation_id_counter
+                    self.conversation_id_counter += 1
+                    valid_conversation_count += 1
+                    
+                    # Store user knowledge
+                    if "user_knowledge" in prompt:
+                        self.user_agents.set_conversation_knowledge(
+                            conversation_id, user_idx, prompt["user_knowledge"]
+                        )
+                    else:
+                        print(f"Warning: No user knowledge found for conversation {conv_idx}, user {user_id}")
 
-                        if "user_prompt_text" in prompt:
-                            self.user_agents.set_conversation_prompt(
-                                conversation_id, user_idx, prompt["user_prompt_text"]
-                            )
-                        
-                        # For each agent, store agent knowledge
-                        for agent_idx in range(self.num_agents):
-                            self.info_agents.set_conversation_knowledge(
-                                conversation_id, agent_idx, prompt["agent_knowledge"]
-                            )
-                        
-                        # Add this conversation to the user's list
-                        self.user_conversations[user_idx].append(conversation_id)
+                    # Store pre-generated prompt
+                    self.user_agents.set_conversation_prompt(
+                        conversation_id, user_idx, prompt["user_prompt_text"]
+                    )
+                    
+                    # For each agent, store agent knowledge
+                    for agent_idx in range(self.num_agents):
+                        self.info_agents.set_conversation_knowledge(
+                            conversation_id, agent_idx, prompt["agent_knowledge"]
+                        )
+                    
+                    # Add this conversation to the user's list
+                    self.user_conversations[user_idx].append(conversation_id)
                 
-                print(f"Prepared {len(self.user_conversations[user_idx])} conversations for user {user_idx}")
+                if len(self.user_conversations[user_idx]) > 0:
+                    print(f"Prepared {len(self.user_conversations[user_idx])} conversations for user {user_idx}")
+                else:
+                    print(f"Warning: No valid conversations found for user {user_idx}")
         
         # If we have at least one conversation prepared, we're good
-        if sum(len(convs) for convs in self.user_conversations.values()) > 0:
-            print(f"Successfully prepared {self.conversation_id_counter} total conversations")
+        if valid_conversation_count > 0:
+            print(f"Successfully prepared {valid_conversation_count} total conversations")
         else:
             print("Warning: No valid conversations were found in the provided conversation prompts.")
     
     def sample_conversations(self, batch_size):
         """Sample conversation IDs for the current batch."""
-        if not hasattr(self, 'user_conversations'):
+        if not hasattr(self, 'user_conversations') or not self.user_conversations:
+            print("Warning: No conversation data available for sampling.")
             return None, None
         
         # Find users who have conversations
         valid_users = [u for u, convs in self.user_conversations.items() if convs]
         if not valid_users:
+            print("Warning: No users with valid conversations found.")
             return None, None
         
         # Sample users (with replacement if needed)
@@ -954,10 +985,11 @@ class CustomerSupportModel:
         # Sample conversations
         user_ids, conversation_ids = self.sample_conversations(batch_size)
         if user_ids is None:  # Fall back to random sampling
+            print("Falling back to random user sampling without conversation context.")
             user_ids = random.sample(range(self.num_users), k=batch_size)
             conversation_ids = None
         
-        # Generate queries - either from pre-generated prompts or from the LLM
+        # Generate queries
         queries = self.user_agents.generate_queries_batch(user_ids, conversation_ids)
         
         if self.evaluation_method == "comparative_binary":
@@ -1048,7 +1080,12 @@ class CustomerSupportModel:
             # Get the agent profile for display
             agent_idx = self.agent_indices[agent_id]
             agent_profile = self.agent_profiles[agent_idx]
-            agent_type = f"Agent with goals: {', '.join([g[1] for g in agent_profile.get('primary_goals', [('Primary', 'Unknown')])])}"
+            primary_goals = agent_profile.get("primary_goals", [("Primary", "Unknown")])
+            if primary_goals and len(primary_goals) > 0:
+                goals_text = ', '.join([g[1] for g in primary_goals])
+            else:
+                goals_text = "Unknown"
+            agent_type = f"Agent with goals: {goals_text}"
             
             # Collect trust scores for this agent
             agent_data.append({
