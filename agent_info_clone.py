@@ -132,8 +132,8 @@ Below is a summary of the background information and context needed to assist cu
         if conversation_history and len(conversation_history) > 0:
             conversation_text = "PREVIOUS CONVERSATION:\n"
             for turn in conversation_history:
-                conversation_text += f"Customer: \n{turn['user']}\n"
-                conversation_text += f"Customer Service Agent: \n{turn['agent']}\n\n"
+                conversation_text += f"Customer: {turn['user']}\n"
+                conversation_text += f"Customer Service Agent: {turn['agent']}\n\n"
         
         if self.llm_source == "local":
             return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
@@ -145,12 +145,7 @@ However, given your profile characteristics, you may need to adapt whether you a
 Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know.
 Abide by the communication style and primary goals specified in your profile.
 
-
-Customer Service Agent: 
-Hi, how can I help you today?
-
 {conversation_text}
-
 CURRENT CONVERSATION:
 
 <|eot_id|><|start_header_id|>user<|end_header_id|>
@@ -167,14 +162,13 @@ However, given your profile characteristics, you may need to adapt whether you a
 Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know.
 Abide by the communication style and primary goals specified in your profile.
 
+{conversation_text}
+CURRENT CONVERSATION:
+
 Customer Service Agent: 
 Hi, how can I help you today?
 
-{conversation_text}
-
-CURRENT CONVERSATION:
-
-Customer:
+Customer Query:
 {query}
 
 Customer Support Agent: 
@@ -230,24 +224,13 @@ Customer Support Agent:
                     self.chat_sessions[session_key] = chat
                     
                     # Send the first user message (current query)
-                    chat_response = chat.send_message(f"""Customer Service Agent (you): 
-Hi, how can I help you today?
-                                                      
-Customer: 
-{prompt_text}
-
-Customer Support Agent (you): 
-""")
+                    chat_response = chat.send_message(f"Customer: {prompt_text}")
                 else:
                     # Use existing chat session
                     chat = self.chat_sessions[session_key]
                     
                     # Send the next message in the conversation
-                    chat_response = chat.send_message(f"""Customer: 
-{prompt_text}
-
-Customer Support Agent (you):
-""")
+                    chat_response = chat.send_message(f"Customer: {prompt_text}")
                 
                 # Get the response text
                 response = chat_response
@@ -322,20 +305,54 @@ Customer Support Agent (you):
             # We can use ThreadPoolExecutor with chat sessions since each thread handles a separate conversation
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as executor:
                 if conversation_ids is not None and conversation_histories is not None:
-                    # Use executor.map() to maintain ordering of responses
-                    responses = list(executor.map(
-                        self._generate_gemini_content,
-                        queries,  # Send just the query, not the full prompt
-                        [conv_id for conv_id in conversation_ids],
-                        service_agent_ids,
-                        [history for history in conversation_histories]
-                    ))
+                    # Use ThreadPool with chat sessions - each thread gets a unique conversation
+                    futures = []
+                    for i, (agent_id, query) in enumerate(zip(service_agent_ids, queries)):
+                        conv_id = conversation_ids[i]
+                        history = conversation_histories[i]
+                        # Submit tasks for processing with chat sessions
+                        futures.append(
+                            executor.submit(
+                                self._generate_gemini_content,
+                                query,  # Send just the query, not the full prompt
+                                conversation_id=conv_id,
+                                agent_id=agent_id,
+                                history=history
+                            )
+                        )
+                    
+                    # Process futures as they complete
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            response_text = future.result()
+                            responses.append(response_text)
+                        except Exception as e:
+                            error_message = f"Error generating response: {e}"
+                            print(error_message)
+                            responses.append(error_message)
                 else:
                     # For one-off queries or when no conversation history is available
-                    responses = list(executor.map(
-                        self._generate_gemini_content,
-                        prompts
-                    ))
+                    future_to_query_index = {
+                        executor.submit(self._generate_gemini_content, prompt): i 
+                        for i, prompt in enumerate(prompts)
+                    }
+                    for future in concurrent.futures.as_completed(future_to_query_index):
+                        query_index = future_to_query_index[future]
+                        try:
+                            response_text = future.result()
+                            responses.append(response_text)
+                        except Exception as e:
+                            error_message = f"Thread generated an exception: {e}"
+                            print(error_message)
+                            responses.append(error_message)
+                
+                # Sort responses to match the original order of queries
+                # This is necessary because futures complete in non-deterministic order
+                if len(responses) != len(queries):
+                    print(f"Warning: Got {len(responses)} responses for {len(queries)} queries")
+                    # Pad with error messages if needed
+                    while len(responses) < len(queries):
+                        responses.append("Error: Missing response")
 
         elif self.llm_source == "local":  # Use local Llama model
             responses = self._generate_llama_response_batch(prompts)
@@ -510,12 +527,11 @@ IMPORTANT INSTRUCTIONS:
 
 Now, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue.
 
-Customer Service Agent: 
-Hi, how can I help you today?
-
 {conversation_text}
-
 CURRENT CONVERSATION:
+
+Customer service Agent : 
+{initial_greeting}
 
 Customer Query : 
 <|eot_id|>"""  # Llama prompt
@@ -526,14 +542,13 @@ Customer Query :
 
 Now, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue.
 
-Customer Service Agent: 
-Hi, how can I help you today?
-
 {conversation_text}
-
 CURRENT CONVERSATION:
 
-Customer: 
+Customer service Agent : 
+{initial_greeting}
+
+Customer Query : 
 """  # Gemini API prompt
         else:
             raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
@@ -599,11 +614,7 @@ Customer:
                     agent_message = "Hi, how can I help you today?" if not history or not history[-1].get('agent') else history[-1].get('agent', '')
                     
                     # Send the first request
-                    chat_response = chat.send_message(f"""Customer Service Agent: 
-{agent_message}
-
-Customer (you):
-""")
+                    chat_response = chat.send_message(f"Customer Service Agent: {agent_message}")
                 else:
                     # Use existing chat session
                     chat = self.chat_sessions[session_key]
@@ -612,11 +623,7 @@ Customer (you):
                     agent_message = history[-1].get('agent', 'What else can I help you with?')
                     
                     # Send the agent's message to get the user's response
-                    chat_response = chat.send_message(f"""Customer Service Agent: 
-{agent_message}
-
-Customer (you):
-""")
+                    chat_response = chat.send_message(f"Customer Service Agent: {agent_message}")
                 
                 # Get the response text
                 response = chat_response
@@ -691,20 +698,53 @@ Customer (you):
             # We can use ThreadPoolExecutor with chat sessions since each thread handles a separate conversation
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor:
                 if conversation_ids is not None and conversation_histories is not None:
-                    # Use executor.map() to maintain ordering of responses
-                    queries = list(executor.map(
-                        self._generate_gemini_query,
-                        ["" for _ in range(len(user_ids))],  # Empty prompts since we're using chat history
-                        [conv_id for conv_id in conversation_ids],
-                        user_ids,
-                        [history for history in conversation_histories]
-                    ))
+                    # Use ThreadPool with chat sessions - each thread gets a unique conversation
+                    futures = []
+                    for i, user_id in enumerate(user_ids):
+                        conv_id = conversation_ids[i]
+                        history = conversation_histories[i]
+                        # Submit tasks for processing with chat sessions
+                        futures.append(
+                            executor.submit(
+                                self._generate_gemini_query,
+                                "",  # Empty prompt since we're using chat history
+                                conversation_id=conv_id,
+                                user_id=user_id,
+                                history=history
+                            )
+                        )
+                    
+                    # Process futures as they complete
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            query_text = future.result()
+                            queries.append(query_text)
+                        except Exception as e:
+                            error_message = f"Error generating query: {e}"
+                            print(error_message)
+                            queries.append(error_message)
                 else:
                     # For one-off queries or when no conversation history is available
-                    queries = list(executor.map(
-                        self._generate_gemini_query,
-                        prompts
-                    ))
+                    future_to_user_index = {
+                        executor.submit(self._generate_gemini_query, prompt): i 
+                        for i, prompt in enumerate(prompts)
+                    }
+                    for future in concurrent.futures.as_completed(future_to_user_index):
+                        user_index = future_to_user_index[future]
+                        try:
+                            query_text = future.result()
+                            queries.append(query_text)
+                        except Exception as e:
+                            error_message = f"Thread generated an exception: {e}"
+                            print(error_message)
+                            queries.append(error_message)
+                
+                # Make sure we have the right number of queries
+                if len(queries) != len(user_ids):
+                    print(f"Warning: Got {len(queries)} queries for {len(user_ids)} users")
+                    # Pad with error messages if needed
+                    while len(queries) < len(user_ids):
+                        queries.append("Error: Missing query")
 
         elif self.llm_source == "local":  # Use local Llama model
             queries = self._generate_llama_query_batch(prompts)
@@ -1216,7 +1256,7 @@ class CustomerSupportModel:
             return None, None
         
         # Sample users (with replacement if needed)
-        sampled_users = random.choices(valid_users, k=batch_size)
+        sampled_users = random.choices(valid_users, k=min(batch_size, len(valid_users)))
         
         # For each sampled user, pick a conversation
         sampled_conversations = []
