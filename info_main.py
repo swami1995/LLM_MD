@@ -10,11 +10,14 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3-8B-Instruct", help="Path to the pretrained LLM model. Required if --llm_source is 'local'.")
     parser.add_argument("--evaluation_method", type=str, choices=["specific_ratings", "comparative_binary"], default="specific_ratings", help="Evaluation method for LLM agents.")
     parser.add_argument("--rating_scale", type=int, choices=[5, 10], default=5, help="Rating scale for LLM agents.")
-    parser.add_argument("--llm_source", type=str, choices=["local", "api"], default="api", help="Source of LLM: 'local' (Llama) or 'api' (Gemini). Default is 'api'.") # Added llm_source argument
+    parser.add_argument("--llm_source", type=str, choices=["local", "api"], default="api", help="Source of LLM: 'local' (Llama) or 'api' (Gemini). Default is 'api'.")
+    parser.add_argument("--max_dialog_rounds", type=int, default=1, help="Maximum number of dialog rounds for each conversation. Default is 1.")
+    parser.add_argument("--num_steps", type=int, default=1, help="Number of simulation steps to run. Default is 1.")
+    parser.add_argument("--use_chat_api", action="store_true", help="Use Gemini's chat API for more efficient multi-turn dialogs. Only applicable when --llm_source is 'api'.")
     args = parser.parse_args()
 
     # Define the knowledge base
-    agent_knowledge_base = user_knowledge_base = {
+    static_knowledge_base = {
         "What is your return policy?": "We offer a 30-day return policy for most items. Please see our full return policy here: [link to policy]",
         "How do I track my order?": "You can track your order by logging into your account and going to the 'Order History' section. Or you can use this link : [link to tracking]",
         "What are your hours of operation?": "Our customer support team is available from 9 AM to 5 PM PST, Monday through Friday.",
@@ -31,10 +34,81 @@ if __name__ == "__main__":
         "How do I cancel my order?": "You can cancel your order within 24 hours of placing it by contacting our customer support team.",
         "Do you have a loyalty program?": "Yes, we have a loyalty program that rewards frequent customers with points that can be redeemed for discounts.",
     }
-    num_users = 10
+    
+    # Load profiles and prompts
+    agent_profiles = load_profiles("agent_profiles.json") if os.path.exists("agent_profiles.json") else []
+    user_profiles = load_profiles("user_profiles.json") if os.path.exists("user_profiles.json") else []
+    conversation_prompts = load_prompts("conversation_prompts.json") if os.path.exists("conversation_prompts.json") else []
+    
+    # If no profiles loaded, use default values
+    if not agent_profiles:
+        print("Warning: No agent profiles found. Using default profiles.")
+        agent_profiles = [
+            {
+                "primary_goals": [("Primary", "Assist customers efficiently")],
+                "communication_style": ["Professional", "Concise"],
+                "behavioral_tendencies": ["Responds directly to questions"],
+                "knowledge_breadth": "Comprehensive knowledge of products",
+                "knowledge_depth": "High level of detail",
+                "knowledge_accuracy": "Highly accurate"
+            },
+            {
+                "primary_goals": [("Primary", "Maximize customer satisfaction")],
+                "communication_style": ["Friendly", "Conversational"],
+                "behavioral_tendencies": ["Goes above and beyond", "Provides suggestions"],
+                "knowledge_breadth": "Standard knowledge of products",
+                "knowledge_depth": "Moderate level of detail",
+                "knowledge_accuracy": "Generally accurate"
+            },
+            {
+                "primary_goals": [("Primary", "Increase sales"), ("Secondary", "Assist customers")],
+                "communication_style": ["Persuasive", "Enthusiastic"],
+                "behavioral_tendencies": ["Recommends premium products", "Upsells when possible"],
+                "knowledge_breadth": "Focused on premium products",
+                "knowledge_depth": "Deep knowledge of premium features",
+                "knowledge_accuracy": "Accurate but emphasizes benefits"
+            }
+        ]
+    
+    if not user_profiles:
+        print("Warning: No user profiles found. Using default profiles.")
+        user_profiles = [
+            {
+                "technical_proficiency": "High",
+                "patience": "Low",
+                "trust_propensity": "Skeptical",
+                "focus": "Technical details",
+                "communication_style": ["Direct", "Technical"],
+                "mood": ["Neutral"]
+            },
+            {
+                "technical_proficiency": "Medium",
+                "patience": "Medium",
+                "trust_propensity": "Neutral",
+                "focus": "Solution-oriented",
+                "communication_style": ["Conversational"],
+                "mood": ["Positive"]
+            },
+            {
+                "technical_proficiency": "Low",
+                "patience": "High",
+                "trust_propensity": "Trusting",
+                "focus": "Basic functionality",
+                "communication_style": ["Verbose", "Novice"],
+                "mood": ["Confused", "Anxious"]
+            }
+        ]
+    
+    # Fill in arrays to meet required numbers
+    while len(agent_profiles) < 3:
+        agent_profiles.append(agent_profiles[0])
+    while len(user_profiles) < 3:
+        user_profiles.append(user_profiles[0])
+    
+    num_users = 3
     num_agents = 3
     alpha = 0.1  # Learning rate
-    bsz = 10  # Batch size
+    bsz = 3  # Batch size
 
     # *** IMPORTANT: Replace with your actual Gemini API key ***
     gemini_api_key = os.environ.get("GEMINI_API_KEY") # Get API key from environment variable - recommended
@@ -42,21 +116,34 @@ if __name__ == "__main__":
         gemini_api_key = "YOUR_GEMINI_API_KEY" # Replace YOUR_GEMINI_API_KEY with your actual API key - FOR TESTING ONLY, SECURE API KEYS PROPERLY
         print("Warning: GEMINI_API_KEY environment variable not set. Falling back to hardcoded key (for testing ONLY).")
 
+    # Validate that chat API is only used with Gemini API
+    if args.use_chat_api and args.llm_source != "api":
+        print("Warning: --use_chat_api is only applicable when using Gemini API. Ignoring this flag.")
+        args.use_chat_api = False
+    
+    if args.use_chat_api:
+        print(f"Initializing CustomerSupportModel with max_dialog_rounds={args.max_dialog_rounds} using Gemini Chat API")
+    else:
+        print(f"Initializing CustomerSupportModel with max_dialog_rounds={args.max_dialog_rounds}")
+        
     model = CustomerSupportModel(
-        num_users,
-        num_agents,
-        user_knowledge_base,
-        agent_knowledge_base,
-        alpha,
+        num_users=num_users,
+        num_agents=num_agents,
+        alpha=alpha,
         batch_size=bsz,
-        use_llm=args.use_llm,
         model_path=args.model_path,
         evaluation_method=args.evaluation_method,
         rating_scale=args.rating_scale,
         gemini_api_key=gemini_api_key,
-        llm_source=args.llm_source # Pass llm_source
+        llm_source=args.llm_source,
+        agent_profiles=agent_profiles,
+        user_profiles=user_profiles,
+        conversation_prompts=conversation_prompts,
+        static_knowledge_base=static_knowledge_base,
+        max_dialog_rounds=args.max_dialog_rounds,
+        use_chat_api=args.use_chat_api  # Pass the new parameter
     )
 
-
-    for i in range(1):  # Run for 100 steps
+    for i in range(args.num_steps):
+        print(f"\n=== Running Step {i+1}/{args.num_steps} ===")
         model.step()
