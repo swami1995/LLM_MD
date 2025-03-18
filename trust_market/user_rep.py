@@ -66,6 +66,11 @@ class UserRepresentative(InformationSource):
         self.represented_users = set()  # Set of user IDs this representative speaks for
         self.agent_conversations = {}  # Indexed by agent_id
         self.user_conversations = {}  # Indexed by user_id
+        self.observed_conversations = []  # All conversations observed by this representative
+        
+        # Investment multipliers
+        self.divest_multiplier = 0.2
+        self.invest_multiplier = 0.2
         
         # Configuration for dimension importance by segment
         self.segment_weights = {
@@ -116,12 +121,6 @@ class UserRepresentative(InformationSource):
         if user_id not in self.represented_users:
             return
             
-        # Record conversation for later analysis, organized by agent and user
-        if not hasattr(self, 'agent_conversations'):
-            self.agent_conversations = {}  # Indexed by agent_id
-        if not hasattr(self, 'user_conversations'):
-            self.user_conversations = {}  # Indexed by user_id
-            
         # Initialize dictionaries for this agent/user if they don't exist
         if agent_id not in self.agent_conversations:
             self.agent_conversations[agent_id] = []
@@ -138,11 +137,14 @@ class UserRepresentative(InformationSource):
         }
         
         # Store in both dictionaries
-        self.agent_conversations[agent_id].append(conversation_record)
-        self.user_conversations[user_id].append(conversation_record)
+        self.agent_conversations[agent_id].append(conversation)
+        self.user_conversations[user_id].append(conversation)
 
-        self.divest_multiplier = 0.2  # Reset divest multiplier after each conversation
-        self.invest_multiplier = 0.2  # Reset invest multiplier after each conversation
+        self.observed_conversations.append(conversation_record)  # Track all conversations observed by this representative
+    
+    def observed_agents(self):
+        """Return a set of all agent IDs that this representative has observed."""
+        return set(self.agent_conversations.keys())
     
 
 class HolisticBatchEvaluator:
@@ -476,10 +478,13 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     
     def get_agent_conversations(self, agent_id, max_count=10):
         """Get conversations for a specific agent."""
-        return [
-            conv['conversation'] for conv in self.observed_conversations
-            if conv['agent_id'] == agent_id and conv['user_id'] in self.represented_users
-        ][-max_count:]
+        if agent_id not in self.agent_conversations:
+            return []
+        
+        conversations = self.agent_conversations[agent_id]
+        
+        # Return the most recent conversations up to max_count
+        return conversations[-max_count:] if conversations else []
     
     def evaluate_agent(self, agent_id, dimension=None, evaluation_round=None):
         """
@@ -523,10 +528,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             return {dim: (score, min(conf, 0.3)) for dim, (score, conf) in base_scores.items()}
         
         # Find other agents to compare against
-        other_agents = set()
-        for conv in self.observed_conversations:
-            if conv['agent_id'] != agent_id and conv['user_id'] in self.represented_users:
-                other_agents.add(conv['agent_id'])
+        other_agents = self.observed_agents()
+        other_agents.discard(agent_id)  # Remove the current agent from the set
         
         # Filter to agents with enough conversations
         valid_comparison_agents = []
@@ -659,17 +662,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         reallocation_percentage = 0.3  # Percentage of current allocations to free up
         min_reallocation_threshold = 0.2  # Minimum change in relative strength to trigger reallocation
         
-        # Get current market state - total capacity and current allocations
-        influence_capacity = self.market.source_influence_capacity.get(
-            self.source_id, {dim: 0.0 for dim in self.expertise_dimensions}
-        )
-        
-        allocated_influence = self.market.allocated_influence.get(
-            self.source_id, {dim: 0.0 for dim in self.expertise_dimensions}
-        )
-        
+
         # Track current investments by agent and dimension
-        # We'll need this to know what's already invested where
         current_investments = {}
         
         # Get current endorsements from the market
@@ -702,7 +696,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         if len(observed_agents) < 2:
             return []
         
-        # Get market scores and our evaluations - same as before
+        # Get market scores and our evaluations
         try:
             market_scores = {}
             for agent_id in observed_agents:
@@ -730,12 +724,11 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             return []
         
         # Identify investment opportunities based on relative positions
-        # (Same code as before for calculating relative positions)
         investment_opportunities = {}
         
         # Process each dimension separately
-        own_relative_positions = {}  # Store for later use
-        market_relative_positions = {}  # Store for later use
+        own_relative_positions = {}
+        market_relative_positions = {}
         
         for dimension in self.expertise_dimensions:
             # Skip if we don't have enough evaluations for this dimension
@@ -762,15 +755,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 if agent_id in dimension_evaluations
             }
             
-            # Calculate relative positioning in our evaluations
-            dimension_own_relative = {}
-            for agent_id, score in dimension_evaluations.items():
-                outperforms_count = sum(1 for other_id, other_score in dimension_evaluations.items()
-                                if other_id != agent_id and score > other_score)
-                if len(dimension_evaluations) > 1:
-                    dimension_own_relative[agent_id] = outperforms_count / (len(dimension_evaluations) - 1)
-                else:
-                    dimension_own_relative[agent_id] = 0.5
+            # Calculate relative positioning using helper method
+            dimension_own_relative = self._get_relative_positions(dimension_evaluations, dimension)
+            dimension_market_relative = self._get_relative_positions(dimension_market_scores, dimension)
             
             # Store in global dict for later use
             for agent_id, position in dimension_own_relative.items():
@@ -778,17 +765,6 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                     own_relative_positions[agent_id] = {}
                 own_relative_positions[agent_id][dimension] = position
             
-            # Calculate relative positioning in market evaluations
-            dimension_market_relative = {}
-            for agent_id, score in dimension_market_scores.items():
-                outperforms_count = sum(1 for other_id, other_score in dimension_market_scores.items()
-                                if other_id != agent_id and score > other_score)
-                if len(dimension_market_scores) > 1:
-                    dimension_market_relative[agent_id] = outperforms_count / (len(dimension_market_scores) - 1)
-                else:
-                    dimension_market_relative[agent_id] = 0.5
-            
-            # Store in global dict for later use
             for agent_id, position in dimension_market_relative.items():
                 if agent_id not in market_relative_positions:
                     market_relative_positions[agent_id] = {}
@@ -823,117 +799,169 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                         'segment_weight': segment_weight,
                         'strength': opportunity_strength,
                         # Add current investment amount (if any)
-                        'current_investment': current_investments.get(agent_id, {}).get(dimension, 0.0)
+                        'current_investment': current_investments.get(agent_id, {}).get(dimension, 0.0) or 0.0
                     })
         
-        if not investment_opportunities:
+        if not any(investment_opportunities.values()):
             return []
         
         # Calculate relative strength and optimal allocations
+        self._calculate_investment_strategy(investment_opportunities, total_current_investment)
+        
+        # Prepare new investment plan
+        return self._prepare_investment_actions(
+            investment_opportunities, 
+            total_current_investment,
+            reallocation_percentage, 
+            available_influence
+        )
+    
+    def _calculate_investment_strategy(self, investment_opportunities, total_current_investment):
+        """
+        Calculate investment strategy based on opportunity strength.
+        
+        Parameters:
+        - investment_opportunities: Dict of investment opportunities by dimension
+        - total_current_investment: Dict of total current investments by dimension
+        """
+        # Calculate relative strength for each opportunity
         total_strength = {}
         for dimension in investment_opportunities:
-            total_strength[dimension] = sum([opp['strength'] for opp in investment_opportunities[dimension] if opp['direction'] > 0])
+            opportunities = investment_opportunities[dimension]
+            if not opportunities:
+                continue
+                
+            total_strength[dimension] = sum(
+                opp['strength'] for opp in opportunities if opp['direction'] > 0
+            ) or 1.0  # Avoid division by zero
             
-            if total_strength[dimension] > 0:
-                for opp in investment_opportunities[dimension]:
+            # Calculate relative strength
+            for opp in opportunities:
+                if opp['direction'] > 0 and total_strength[dimension] > 0:
                     opp['relative_strength'] = opp['strength'] / total_strength[dimension]
-            else:
-                equal_share = 1.0 / len(investment_opportunities[dimension])
-                for opp in investment_opportunities[dimension]:
-                    opp['relative_strength'] = equal_share
+                else:
+                    # Equal distribution if no positive direction or zero total strength
+                    opp['relative_strength'] = 1.0 / len(opportunities)
         
-        # Calculate how much to free up from current investments for each dimension
-        amount_to_free_up = {}
+        # Calculate normalized current investment and invest/divest signals
         for dimension in investment_opportunities:
-            amount_to_free_up[dimension] = total_current_investment[dimension] * reallocation_percentage
+            opportunities = investment_opportunities[dimension]
+            if not opportunities:
+                continue
+                
+            total_current = sum(opp['current_investment'] for opp in opportunities) #or 1.0  # Avoid division by zero
+            
+            for opp in opportunities:
+                current = opp['current_investment'] if opp['current_investment'] else 0.0
+                opp['current_investment_normalized'] = current / total_current if total_current > 0 else 0.0
+                opp['invest_divest_normalized'] = (
+                    opp['direction'] * opp['relative_strength'] - opp['current_investment_normalized']
+                )
+    
+    def _prepare_investment_actions(self, investment_opportunities, total_current_investment, 
+                                  reallocation_percentage, available_influence):
+        """
+        Prepare investment and divestment actions based on calculated strategy.
         
-        # Calculate total available influence (unused + freed up) for each dimension
-        available_influence = {
-            dim: (capacity - allocated_influence.get(dim, 0)) 
-            for dim, capacity in influence_capacity.items()
+        Parameters:
+        - investment_opportunities: Dict of investment opportunities by dimension
+        - total_current_investment: Dict of total current investments by dimension
+        - reallocation_percentage: Percentage of current allocations to free up
+        - available_influence: Currently available influence by dimension
+        
+        Returns:
+        - List of investment/divestment actions
+        """
+        # Calculate how much to free up from current investments
+        amount_to_free_up = {
+            dim: total_current_investment.get(dim, 0.0) * reallocation_percentage
+            for dim in investment_opportunities
         }
         
-        # Calculate total available influence (unused + freed up) for each dimension 
-        total_available = {}
-        for dimension in investment_opportunities:
-            total_available[dimension] = available_influence[dimension] + amount_to_free_up[dimension]
+        # Calculate total available influence (unused + freed up)
+        total_available = {
+            dim: available_influence.get(dim, 0.0) + amount_to_free_up.get(dim, 0.0)
+            for dim in investment_opportunities
+        }
         
-        ### We should first estimate the relative strength for each entity in the market. 
-        ### Then we can calculate the target allocation for each entity based on their relative strength.
-        ### target allocation = total investment capacity * relative strength ## if shorting was allowed
+        # Prepare divestments and investments
+        divestments = []
+        investments = []
         
-        # Calculate target allocations based on relative strength
-        # for opp in investment_opportunities:
-        #     # Target allocation is proportion of total available based on relative strength
-        #     opp['target_allocation'] = total_current_investment * opp['relative_strength'] * opp['direction']
-            
-        #     # Calculate delta from current allocation
-        #     current = opp['current_investment']
-        #     target = opp['target_allocation']
-        #     opp['allocation_delta'] = target - current
-            
-        #     # Flag whether this requires reallocation (significant change)
-        #     significant_change = abs(opp['allocation_delta']) > (current * min_reallocation_threshold)
-        #     opp['needs_reallocation'] = significant_change or current == 0   
-        
-        ### Normalized current investment
-        for dimension in investment_opportunities:
-            xsum = sum([opp['current_investment'] for opp in investment_opportunities[dimension]])
-            for opp in investment_opportunities[dimension]:
-                x = opp['current_investment']
-                xn = x / xsum
-                opp['current_investment_normalized'] = xn    
-                opp['invest_divest_normalized'] = opp['direction']*opp['relative_strength'] - xn
-        # Prepare new investment plan
-        divestments = []  # Actions to reduce or remove investments
-        investments = []  # Actions to create or increase investments
-        
-        # First, handle divestments to free up influence
+        # Handle divestments to free up influence
         divest_amount = {}
         total_divest_amount = {}
         total_available_amount = {}
-        for dimension in investment_opportunities:
+        
+        for dimension, opportunities in investment_opportunities.items():
+            if not opportunities:
+                continue
+                
             divest_amount[dimension] = {}
-            total_divest_amount[dimension] = 0
-            for opp in investment_opportunities[dimension]:
-                # if opp['allocation_delta'] < 0 and opp['current_investment'] > 0:
-                # Need to reduce investment
+            total_divest_amount[dimension] = 0.0
+            
+            for opp in opportunities:
                 if opp['invest_divest_normalized'] < 0:
                     agent_id = opp['agent_id']
-                    divest_amount[dimension][agent_id] = - opp['invest_divest_normalized'] * self.divest_multiplier
-                    total_divest_amount[dimension] += divest_amount[dimension][agent_id]
+                    amount = -opp['invest_divest_normalized'] * self.divest_multiplier
+                    divest_amount[dimension][agent_id] = amount
+                    total_divest_amount[dimension] += amount
                     
-                    if divest_amount[dimension][agent_id] > 0:
-                        divestments.append((agent_id, dimension, -divest_amount[dimension][agent_id]))
+                    if amount > 0:
+                        divestments.append((agent_id, dimension, -amount, None))
             
-            total_available_amount[dimension] = available_influence[dimension] + total_divest_amount[dimension]
+            total_available_amount[dimension] = (
+                available_influence.get(dimension, 0.0) + total_divest_amount.get(dimension, 0.0)
+            )
         
-        # Then, handle investments (both new and increases)
-        total_normalized_investment_amount = {
-            dimension: sum([opp['invest_divest_normalized'] for opp in investment_opportunities[dimension] if opp['invest_divest_normalized'] > 0]) for dimension in investment_opportunities
-        }
-        for dimension in investment_opportunities:
-            total_available = total_available_amount[dimension]
-            for opp in investment_opportunities[dimension]:
-                if opp['invest_divest_normalized'] > 0:
-                    # Need to increase investment
-                    agent_id = opp['agent_id']
-                    dimension = opp['dimension']
-                    own_confidence = opp['own_confidence']
-                    opp['investment_amount'] = (opp['invest_divest_normalized']/total_normalized_investment_amount[dimension]) * total_available * self.invest_multiplier
-
-                    if opp['investment_amount'] > 0:
-                        investments.append((agent_id, dimension, opp['investment_amount'], own_confidence))
-
-        # Combine divestments and investments for final action plan
-        actions = []
+        # Handle investments
+        for dimension, opportunities in investment_opportunities.items():
+            if not opportunities:
+                continue
+                
+            positive_opportunities = [
+                opp for opp in opportunities if opp['invest_divest_normalized'] > 0
+            ]
+            
+            if not positive_opportunities:
+                continue
+                
+            total_positive = sum(opp['invest_divest_normalized'] for opp in positive_opportunities)
+            
+            if total_positive <= 0:
+                continue
+                
+            total_available = total_available_amount.get(dimension, 0.0)
+            
+            for opp in positive_opportunities:
+                agent_id = opp['agent_id']
+                amount = (opp['invest_divest_normalized'] / total_positive) * total_available * self.invest_multiplier
+                confidence = opp['own_confidence']
+                
+                if amount > 0:
+                    investments.append((agent_id, dimension, amount, confidence))
         
-        # First divest (negative amounts)
-        for agent_id, dimension, amount in divestments:
-            actions.append((agent_id, dimension, amount, None))  # Confidence not needed for divestments
+        # Combine divestments and investments
+        return divestments + investments
+    
+    def _get_relative_positions(self, evaluations, dimension):
+        """
+        Calculate relative positioning of agents for a specific dimension.
         
-        # Then invest (positive amounts)
-        for agent_id, dimension, amount, confidence in investments:
-            actions.append((agent_id, dimension, amount, confidence))
+        Parameters:
+        - evaluations: Dict mapping agent_ids to scores
+        - dimension: The dimension to calculate positions for
         
-        return actions
+        Returns:
+        - Dict mapping agent_ids to relative positions (0-1)
+        """
+        if len(evaluations) <= 1:
+            return {agent_id: 0.5 for agent_id in evaluations}
+            
+        dimension_relative = {}
+        for agent_id, score in evaluations.items():
+            outperforms_count = sum(1 for other_id, other_score in evaluations.items()
+                            if other_id != agent_id and score > other_score)
+            dimension_relative[agent_id] = outperforms_count / (len(evaluations) - 1)
+            
+        return dimension_relative
