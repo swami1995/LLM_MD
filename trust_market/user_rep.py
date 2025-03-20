@@ -686,10 +686,10 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         
         # Calculate total current investment for each dimension
         total_current_investment = {}
-        for dimension in self.expertise_dimensions:
-            total_current_investment[dimension] = sum(
-                amounts.get(dimension, 0.0) for amounts in current_investments.values()
-            )
+        # for dimension in self.expertise_dimensions:
+        #     total_current_investment[dimension] = sum(
+        #         amounts.get(dimension, 0.0) for amounts in current_investments.values()
+        #     )
         
         # Analyze market for investment opportunities
         observed_agents = self.observed_agents()
@@ -809,12 +809,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         self._calculate_investment_strategy(investment_opportunities, total_current_investment)
         
         # Prepare new investment plan
-        return self._prepare_investment_actions(
-            investment_opportunities, 
-            total_current_investment,
-            reallocation_percentage, 
-            available_influence
-        )
+        return self._prepare_investment_actions(investment_opportunities)
     
     def _calculate_investment_strategy(self, investment_opportunities, total_current_investment):
         """
@@ -858,8 +853,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                     opp['direction'] * opp['relative_strength'] - opp['current_investment_normalized']
                 )
     
-    def _prepare_investment_actions(self, investment_opportunities, total_current_investment, 
-                                  reallocation_percentage, available_influence):
+    def _prepare_investment_actions(self, investment_opportunities):
         """
         Prepare investment and divestment actions based on calculated strategy.
         
@@ -872,17 +866,6 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         Returns:
         - List of investment/divestment actions
         """
-        # Calculate how much to free up from current investments
-        amount_to_free_up = {
-            dim: total_current_investment.get(dim, 0.0) * reallocation_percentage
-            for dim in investment_opportunities
-        }
-        
-        # Calculate total available influence (unused + freed up)
-        total_available = {
-            dim: available_influence.get(dim, 0.0) + amount_to_free_up.get(dim, 0.0)
-            for dim in investment_opportunities
-        }
         
         # Prepare divestments and investments
         divestments = []
@@ -892,6 +875,11 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         divest_amount = {}
         total_divest_amount = {}
         total_available_amount = {}
+        available_influence = {
+            dim : self.market.source_influence_capacity.get(self.source_id, {}).get(dim, 0.0) - 
+                  self.market.allocated_influence.get(self.source_id, {}).get(dim, 0.0)
+            for dim in self.expertise_dimensions
+        }
         
         for dimension, opportunities in investment_opportunities.items():
             if not opportunities:
@@ -965,3 +953,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             dimension_relative[agent_id] = outperforms_count / (len(evaluations) - 1)
             
         return dimension_relative
+    
+## comparative evaluation of agents with LLMs
+## pass dimensions as input to perform_hybrid_audit
+## figure out this bs around evaluation rounds
+## 
