@@ -610,7 +610,7 @@ class AuditorWithProfileAnalysis(Auditor):
         self.agent_profiles[agent_id] = profile
         self._invalidate_cache(agent_id)
     
-    def add_agent_conversation(self, agent_id, conversation):
+    def add_conversation(self, conversation, user_id, agent_id):
         """Add a conversation for an agent to be used in evaluations."""
         if agent_id not in self.agent_conversations:
             self.agent_conversations[agent_id] = []
