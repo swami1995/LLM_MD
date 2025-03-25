@@ -78,7 +78,6 @@ class TrustMarketSystem:
             source.source_id, source.source_type, initial_influence, is_primary
         )
         
-    
     def register_user_representative(self, representative, evaluation_frequency=1, iniitial_influence=None):
         """
         Register a user representative in the system.
@@ -193,9 +192,6 @@ class TrustMarketSystem:
         
         # Run source evaluations based on their frequency
         self._run_source_evaluations()
-        
-        # # Calculate and distribute rewards based on agent performance
-        # self._distribute_source_rewards()
     
     def _process_user_ratings(self):
         """Process all user ratings collected in this round."""
@@ -217,12 +213,6 @@ class TrustMarketSystem:
             if self.evaluation_round - last_evaluated >= frequency:
                 # Run evaluation
                 try:
-                    # # Get recent conversations to evaluate
-                    # recent_conversations = self._get_recent_conversations(source_id)
-                    
-                    # # Evaluate agents
-                    # evaluations = self._evaluate_source_agents(source, recent_conversations)
-                    
                     # Decide investments
                     investments = source.decide_investments(evaluation_round=self.evaluation_round)
                     
@@ -235,95 +225,7 @@ class TrustMarketSystem:
                     
                 except Exception as e:
                     print(f"Error evaluating source {source_id}: {str(e)}")
-    
-    def _get_recent_conversations(self, source_id):
-        """Get recent conversations relevant to a source."""
-        # This can be customized based on source type
-        source = self.information_sources.get(source_id)
-        
-        # For user representatives, they track their own conversations
-        if hasattr(source, 'observed_conversations'):
-            return source.observed_conversations
-        
-        # For other sources, return all recent conversations
-        recent = []
-        for conv_id, conv in self.conversation_histories.items():
-            if not conv["evaluated"]:
-                recent.append(conv)
-                conv["evaluated"] = True
-        
-        return recent
-    
-    def _evaluate_source_agents(self, source, conversations):
-        """Have a source evaluate agents based on conversations."""
-        # Skip if no conversations
-        if not conversations:
-            return {}
-        
-        # Group conversations by agent
-        agent_conversations = defaultdict(list)
-        for conv in conversations:
-            if isinstance(conv, dict) and "agent_id" in conv and "history" in conv:
-                agent_conversations[conv["agent_id"]].append(conv["history"])
-            elif hasattr(conv, "agent_id") and hasattr(conv, "conversation"):
-                agent_conversations[conv.agent_id].append(conv.conversation)
-        
-        # Evaluate each agent
-        evaluations = {}
-        for agent_id, convs in agent_conversations.items():
-            # Some sources evaluate individual conversations, others evaluate batches
-            if hasattr(source, 'evaluate_agent_batch'):
-                ratings = source.evaluate_agent_batch(agent_id, convs)
-            else:
-                # Evaluate each conversation
-                combined_ratings = defaultdict(list)
-                for conversation in convs:
-                    ratings = source.evaluate_agent(agent_id, conversation)
-                    if ratings:
-                        for dimension, (rating, confidence) in ratings.items():
-                            combined_ratings[dimension].append((rating, confidence))
-                
-                # Average the ratings
-                ratings = {}
-                for dimension, values in combined_ratings.items():
-                    if values:
-                        avg_rating = sum(r for r, _ in values) / len(values)
-                        avg_confidence = sum(c for _, c in values) / len(values)
-                        ratings[dimension] = (avg_rating, avg_confidence)
-            
-            if ratings:
-                evaluations[agent_id] = ratings
-                source.record_evaluation(agent_id, ratings)
-                
-                # Extract just the ratings (without confidence) for performance tracking
-                performance_scores = {dim: rating for dim, (rating, _) in ratings.items()}
-                self.trust_market.update_agent_performance(agent_id, performance_scores)
-        
-        return evaluations
-    
-    def _distribute_source_rewards(self):
-        """Calculate and distribute rewards to sources based on agent performance."""
-        # Only distribute rewards every N rounds
-        reward_frequency = self.config.get('reward_distribution_frequency', 5)
-        if self.evaluation_round % reward_frequency != 0:
-            return
-            
-        # Calculate rewards based on agent performance
-        rewards = self.trust_market.calculate_source_rewards()
-        
-        # Update source performance based on rewards
-        for source_id, dimension_rewards in rewards.items():
-            # Normalize rewards to 0-1 scale for performance tracking
-            performance_scores = {}
-            for dimension, reward in dimension_rewards.items():
-                # Convert reward to performance score (0-1)
-                # Assuming rewards are roughly in -100 to 100 range
-                normalized_score = min(1.0, max(0.0, (reward + 100) / 200))
-                performance_scores[dimension] = normalized_score
-            
-            # Update source performance
-            self.trust_market.update_source_performance(source_id, performance_scores)
-    
+
     def run_evaluation_rounds(self, num_rounds):
         """
         Run multiple evaluation rounds.

@@ -213,6 +213,10 @@ class TrustMarket:
             for dimension in self.dimensions:
                 self.agent_trust_scores[agent_id][dimension] = sum([self.source_investments[source_id][agent_id].get(dimension, 0.0) for source_id in self.source_investments]) 
 
+        if self.use_dimension_correlations:
+            # Apply correlations if enabled
+            for agent_id in affected_agents:
+                self.apply_dimension_correlations(agent_id, self.dimensions)
 
         ### These probably happen periodically at each time step increments
         # temporal decay of trust scores (remove the laptop time based decay).
@@ -227,6 +231,22 @@ class TrustMarket:
         #         self.allocated_influence[source_id][dimension] *= decay_rate
         # Recalculate trust scores for this agent
         # self.recalculate_agent_trust(agent_id)
+    
+    def decay_trust_scores(self, decay_rate: float = 0.99) -> None:
+        """
+        Apply a decay rate to all invested trust scores in the
+        market to simulate temporal decay.
+        """
+        for dimension in self.dimensions:
+            for agent_id in self.agent_trust_scores:
+                # Apply decay to trust scores
+                self.agent_trust_scores[agent_id][dimension] *= decay_rate
+
+            for source_id in self.source_investments:
+                self.allocated_influence[source_id][dimension] *= decay_rate
+                self.source_available_capacity[source_id][dimension] *= decay_rate
+                for agent_id in self.source_investments[source_id]:
+                    self.source_investments[source_id][agent_id][dimension] *= decay_rate
     
     def record_user_feedback(self, user_id: str, agent_id: int, 
                             ratings: Dict, confidence: float = 0.9) -> None:
@@ -272,102 +292,7 @@ class TrustMarket:
         # if self.use_dimension_correlations and affected_dimensions:
         #     self.apply_dimension_correlations(agent_id, affected_dimensions)
     
-    def recalculate_agent_trust(self, agent_id: int, specific_dimension: str = None) -> None:
-        """
-        Recalculate trust scores for an agent based on current investments.
-        
-        Parameters:
-        - agent_id: The agent to recalculate
-        - specific_dimension: Optional specific dimension to recalculate (default: all)
-        """
-        dimensions_to_update = [specific_dimension] if specific_dimension else self.dimensions
-        affected_dimensions = []
-        
-        for dimension in dimensions_to_update:
-            if dimension not in self.dimensions:
-                continue
-                
-            # Get current score before update
-            old_score = self.agent_trust_scores[agent_id][dimension]
-            
-            # Get all investments for this agent and dimension
-            total_weighted_investment = 0.0
-            total_investment = 0.0
-            
-            for source_id in self.source_investments:
-                if agent_id in self.source_investments[source_id]:
-                    investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
-                    
-                    if investment > 0:
-                        # Apply primary vs secondary source weighting
-                        weight = self.primary_source_weight if source_id in self.primary_sources else self.secondary_source_weight
-                        
-                        # Add to totals
-                        weighted_investment = investment * weight
-                        total_weighted_investment += weighted_investment
-                        total_investment += investment
-            
-            # Calculate new score based on investments
-            if total_investment > 0:
-                # Normalized score based on weighted investments
-                # This assumes investments themselves carry the trust valuation
-                new_score = total_weighted_investment / (
-                    total_investment * max(self.primary_source_weight, self.secondary_source_weight)
-                )
-                
-                # Ensure score is in valid range
-                new_score = min(1.0, max(0.0, new_score))
-                
-                # Apply smoothing to prevent drastic changes
-                smoothing = self.config.get('trust_update_smoothing', 0.8)
-                final_score = old_score * smoothing + new_score * (1 - smoothing)
-                
-                # Update the trust score
-                self.agent_trust_scores[agent_id][dimension] = final_score
-                
-                # Record for dimension correlation updates
-                if abs(final_score - old_score) > 0.01:  # Only count significant changes
-                    affected_dimensions.append(dimension)
-                    
-                    # Record in temporal DB
-                    self.temporal_db['trust_scores'].append({
-                        'evaluation_round': self.evaluation_round,
-                        'timestamp': time.time(),
-                        'agent_id': agent_id,
-                        'dimension': dimension,
-                        'old_score': old_score,
-                        'new_score': final_score,
-                        'change_source': 'investment_update',
-                        'source_id': None
-                    })
-            
-            # If no investments, score decays slightly toward default
-            else:
-                decay_rate = self.config.get('no_investment_decay', 0.99)
-                default_score = self.config.get('default_trust_score', 0.5)
-                
-                new_score = old_score * decay_rate + default_score * (1 - decay_rate)
-                self.agent_trust_scores[agent_id][dimension] = new_score
-                
-                if abs(new_score - old_score) > 0.01:
-                    affected_dimensions.append(dimension)
-                    
-                    # Record in temporal DB
-                    self.temporal_db['trust_scores'].append({
-                        'evaluation_round': self.evaluation_round,
-                        'timestamp': time.time(),
-                        'agent_id': agent_id,
-                        'dimension': dimension,
-                        'old_score': old_score,
-                        'new_score': new_score,
-                        'change_source': 'decay',
-                        'source_id': None
-                    })
-        
-        # Apply dimension correlations if enabled
-        if self.use_dimension_correlations and affected_dimensions:
-            self.apply_dimension_correlations(agent_id, affected_dimensions)
-    
+
     def apply_dimension_correlations(self, agent_id: int, changed_dimensions: List[str]) -> None:
         """
         Apply correlations between dimensions to propagate trust changes.
@@ -431,57 +356,7 @@ class TrustMarket:
                     'change_source': 'correlation',
                     'source_id': None
                 })
-    
-    def update_source_performance(self, source_id: str, performance_scores: Dict[str, float]) -> None:
-        """
-        Update a source's performance metrics and adjust influence capacity.
-        
-        Parameters:
-        - source_id: The source to update
-        - performance_scores: Dict mapping dimensions to performance scores (0-1)
-        """
-        # Record performance
-        self.source_performance
-        for dimension, score in performance_scores.items():
-            if dimension in self.dimensions:
-                self.source_performance[source_id][dimension].append({
-                    'evaluation_round': self.evaluation_round,
-                    'score': score,
-                    'timestamp': time.time()
-                })
-                
-                # Record in temporal DB
-                self.temporal_db['source_performance'].append({
-                    'evaluation_round': self.evaluation_round,
-                    'timestamp': time.time(),
-                    'source_id': source_id,
-                    'dimension': dimension,
-                    'performance_score': score
-                })
-                
-                # Update influence capacity based on performance
-                current_capacity = self.source_influence_capacity[source_id][dimension]
-                
-                # Adjust capacity based on performance
-                if score >= 0.5:  # Good performance
-                    growth_rate = self.config.get('influence_growth_rate', 0.05)
-                    new_capacity = current_capacity * (1 + (score - 0.5) * growth_rate)
-                else:  # Poor performance
-                    decay_rate = self.config.get('influence_decay_rate', 0.1)
-                    new_capacity = current_capacity * (1 - (0.5 - score) * decay_rate)
-                
-                # Apply limits to capacity changes
-                max_growth = self.config.get('max_capacity_growth', 1.2)
-                max_decay = self.config.get('max_capacity_decay', 0.8)
-                
-                if new_capacity > current_capacity:
-                    new_capacity = min(new_capacity, current_capacity * max_growth)
-                else:
-                    new_capacity = max(new_capacity, current_capacity * max_decay)
-                
-                # Update capacity
-                self.source_influence_capacity[source_id][dimension] = new_capacity
-    
+       
     def update_agent_performance(self, agent_id: int, performance_scores: Dict[str, float]) -> None:
         """
         Record agent performance for later analysis and reward calculation.
@@ -507,38 +382,7 @@ class TrustMarket:
                     'dimension': dimension,
                     'performance_score': score
                 })
-    
-    def calculate_source_rewards(self) -> Dict[str, Dict[str, float]]:
-        """
-        Calculate rewards for sources based on performance of their investments.
-        
-        Returns:
-        - Dict mapping source_ids to {dimension: reward} dictionaries
-        """
-        rewards = defaultdict(lambda: defaultdict(float))
-        
-        # Get latest agent performance
-        latest_performance = {}
-        for agent_id, dimensions in self.agent_performance.items():
-            latest_performance[agent_id] = {}
-            for dimension, entries in dimensions.items():
-                if entries:
-                    latest_performance[agent_id][dimension] = entries[-1]['score']
-        
-        # Calculate rewards based on performance of investments
-        for source_id, agent_investments in self.source_investments.items():
-            for agent_id, dimensions in agent_investments.items():
-                if agent_id in latest_performance:
-                    for dimension, investment in dimensions.items():
-                        if dimension in latest_performance[agent_id]:
-                            # Reward is proportional to investment * performance
-                            performance = latest_performance[agent_id][dimension]
-                            reward = investment * (performance - 0.5) * 2  # Normalize to -1 to 1 range
-                            
-                            rewards[source_id][dimension] += reward
-        
-        return rewards
-    
+
     def increment_evaluation_round(self, increment: int = 1) -> None:
         """
         Increment the evaluation round counter.
@@ -547,6 +391,11 @@ class TrustMarket:
         - increment: Amount to increment the counter
         """
         self.evaluation_round += increment
+        # Decay trust scores periodically
+        self.decay_trust_scores(self.config.get('trust_decay_rate', 0.99))
+        if self.use_dimension_correlations:
+            for agent_id in self.agent_trust_scores:
+                self.apply_dimension_correlations(agent_id, self.dimensions)
     
     def get_agent_trust(self, agent_id: int) -> Dict[str, float]:
         """Get current trust scores for an agent across all dimensions."""

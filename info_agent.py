@@ -1485,62 +1485,62 @@ class CustomerSupportModel:
         # Call multi-turn dialog instead of the single-turn version
         self.multi_turn_dialog()
 
-def collect_data(self):
-    agent_data = []
-    for agent_id in range(self.num_agents):
-        # Get the agent profile for display
-        agent_idx = self.agent_indices[agent_id]
-        agent_profile = self.agent_profiles[agent_idx]
-        primary_goals = agent_profile.get("primary_goals", [("Primary", "Unknown")])
-        if primary_goals and len(primary_goals) > 0:
-            goals_text = ', '.join([g[1] for g in primary_goals])
-        else:
-            goals_text = "Unknown"
-        agent_type = f"Agent with goals: {goals_text}"
+    def collect_data(self):
+        agent_data = []
+        for agent_id in range(self.num_agents):
+            # Get the agent profile for display
+            agent_idx = self.agent_indices[agent_id]
+            agent_profile = self.agent_profiles[agent_idx]
+            primary_goals = agent_profile.get("primary_goals", [("Primary", "Unknown")])
+            if primary_goals and len(primary_goals) > 0:
+                goals_text = ', '.join([g[1] for g in primary_goals])
+            else:
+                goals_text = "Unknown"
+            agent_type = f"Agent with goals: {goals_text}"
+            
+            # Collect trust scores for this agent with the new 10-dimensional trust framework
+            agent_data.append({
+                "agent_id": agent_id,
+                "agent_type": agent_type,
+                "Factual_Correctness": self.info_agents.trust_scores[agent_id]["Factual_Correctness"],
+                "Process_Reliability": self.info_agents.trust_scores[agent_id]["Process_Reliability"],
+                "Value_Alignment": self.info_agents.trust_scores[agent_id]["Value_Alignment"],
+                "Communication_Quality": self.info_agents.trust_scores[agent_id]["Communication_Quality"],
+                "Problem_Resolution": self.info_agents.trust_scores[agent_id]["Problem_Resolution"],
+                "Safety_Security": self.info_agents.trust_scores[agent_id]["Safety_Security"],
+                "Transparency": self.info_agents.trust_scores[agent_id]["Transparency"],
+                "Adaptability": self.info_agents.trust_scores[agent_id]["Adaptability"],
+                "Trust_Calibration": self.info_agents.trust_scores[agent_id]["Trust_Calibration"],
+                "Manipulation_Resistance": self.info_agents.trust_scores[agent_id]["Manipulation_Resistance"],
+                "Overall": self.info_agents.trust_scores[agent_id]["Overall"],
+                "Factual_Correctness_Elo": self.info_agents.trust_scores[agent_id]["Factual_Correctness_Elo"],
+                "Process_Reliability_Elo": self.info_agents.trust_scores[agent_id]["Process_Reliability_Elo"],
+                "Value_Alignment_Elo": self.info_agents.trust_scores[agent_id]["Value_Alignment_Elo"],
+                "Communication_Quality_Elo": self.info_agents.trust_scores[agent_id]["Communication_Quality_Elo"],
+                "Problem_Resolution_Elo": self.info_agents.trust_scores[agent_id]["Problem_Resolution_Elo"],
+                "Safety_Security_Elo": self.info_agents.trust_scores[agent_id]["Safety_Security_Elo"],
+                "Transparency_Elo": self.info_agents.trust_scores[agent_id]["Transparency_Elo"],
+                "Adaptability_Elo": self.info_agents.trust_scores[agent_id]["Adaptability_Elo"],
+                "Trust_Calibration_Elo": self.info_agents.trust_scores[agent_id]["Trust_Calibration_Elo"],
+                "Manipulation_Resistance_Elo": self.info_agents.trust_scores[agent_id]["Manipulation_Resistance_Elo"],
+            })
         
-        # Collect trust scores for this agent with the new 10-dimensional trust framework
-        agent_data.append({
-            "agent_id": agent_id,
-            "agent_type": agent_type,
-            "Factual_Correctness": self.info_agents.trust_scores[agent_id]["Factual_Correctness"],
-            "Process_Reliability": self.info_agents.trust_scores[agent_id]["Process_Reliability"],
-            "Value_Alignment": self.info_agents.trust_scores[agent_id]["Value_Alignment"],
-            "Communication_Quality": self.info_agents.trust_scores[agent_id]["Communication_Quality"],
-            "Problem_Resolution": self.info_agents.trust_scores[agent_id]["Problem_Resolution"],
-            "Safety_Security": self.info_agents.trust_scores[agent_id]["Safety_Security"],
-            "Transparency": self.info_agents.trust_scores[agent_id]["Transparency"],
-            "Adaptability": self.info_agents.trust_scores[agent_id]["Adaptability"],
-            "Trust_Calibration": self.info_agents.trust_scores[agent_id]["Trust_Calibration"],
-            "Manipulation_Resistance": self.info_agents.trust_scores[agent_id]["Manipulation_Resistance"],
-            "Overall": self.info_agents.trust_scores[agent_id]["Overall"],
-            "Factual_Correctness_Elo": self.info_agents.trust_scores[agent_id]["Factual_Correctness_Elo"],
-            "Process_Reliability_Elo": self.info_agents.trust_scores[agent_id]["Process_Reliability_Elo"],
-            "Value_Alignment_Elo": self.info_agents.trust_scores[agent_id]["Value_Alignment_Elo"],
-            "Communication_Quality_Elo": self.info_agents.trust_scores[agent_id]["Communication_Quality_Elo"],
-            "Problem_Resolution_Elo": self.info_agents.trust_scores[agent_id]["Problem_Resolution_Elo"],
-            "Safety_Security_Elo": self.info_agents.trust_scores[agent_id]["Safety_Security_Elo"],
-            "Transparency_Elo": self.info_agents.trust_scores[agent_id]["Transparency_Elo"],
-            "Adaptability_Elo": self.info_agents.trust_scores[agent_id]["Adaptability_Elo"],
-            "Trust_Calibration_Elo": self.info_agents.trust_scores[agent_id]["Trust_Calibration_Elo"],
-            "Manipulation_Resistance_Elo": self.info_agents.trust_scores[agent_id]["Manipulation_Resistance_Elo"],
-        })
-    
-    print("\n=== Current Agent Trust Scores ===")
-    for agent in agent_data:
-        print(f"Agent {agent['agent_id']} ({agent['agent_type']}):")
-        print("  Primary Trust Dimensions:")
-        print(f"    Factual Correctness: {agent['Factual_Correctness']:.2f}, Process Reliability: {agent['Process_Reliability']:.2f}")
-        print(f"    Value Alignment: {agent['Value_Alignment']:.2f}, Communication Quality: {agent['Communication_Quality']:.2f}")
-        print(f"    Problem Resolution: {agent['Problem_Resolution']:.2f}")
-        
-        print("  Safety & Transparency Dimensions:")
-        print(f"    Safety & Security: {agent['Safety_Security']:.2f}, Transparency: {agent['Transparency']:.2f}")
-        print(f"    Trust Calibration: {agent['Trust_Calibration']:.2f}, Manipulation Resistance: {agent['Manipulation_Resistance']:.2f}")
-        print(f"    Adaptability: {agent['Adaptability']:.2f}")
-        
-        print("  Elo Ratings (Comparative Performance):")
-        print(f"    FC:{agent['Factual_Correctness_Elo']:.1f}, PR:{agent['Process_Reliability_Elo']:.1f}, VA:{agent['Value_Alignment_Elo']:.1f}")
-        print(f"    CQ:{agent['Communication_Quality_Elo']:.1f}, RS:{agent['Problem_Resolution_Elo']:.1f}, SS:{agent['Safety_Security_Elo']:.1f}")
-        print(f"    T:{agent['Transparency_Elo']:.1f}, A:{agent['Adaptability_Elo']:.1f}")
-        print(f"    TC:{agent['Trust_Calibration_Elo']:.1f}, MR:{agent['Manipulation_Resistance_Elo']:.1f}")
-        print()
+        print("\n=== Current Agent Trust Scores ===")
+        for agent in agent_data:
+            print(f"Agent {agent['agent_id']} ({agent['agent_type']}):")
+            print("  Primary Trust Dimensions:")
+            print(f"    Factual Correctness: {agent['Factual_Correctness']:.2f}, Process Reliability: {agent['Process_Reliability']:.2f}")
+            print(f"    Value Alignment: {agent['Value_Alignment']:.2f}, Communication Quality: {agent['Communication_Quality']:.2f}")
+            print(f"    Problem Resolution: {agent['Problem_Resolution']:.2f}")
+            
+            print("  Safety & Transparency Dimensions:")
+            print(f"    Safety & Security: {agent['Safety_Security']:.2f}, Transparency: {agent['Transparency']:.2f}")
+            print(f"    Trust Calibration: {agent['Trust_Calibration']:.2f}, Manipulation Resistance: {agent['Manipulation_Resistance']:.2f}")
+            print(f"    Adaptability: {agent['Adaptability']:.2f}")
+            
+            print("  Elo Ratings (Comparative Performance):")
+            print(f"    FC:{agent['Factual_Correctness_Elo']:.1f}, PR:{agent['Process_Reliability_Elo']:.1f}, VA:{agent['Value_Alignment_Elo']:.1f}")
+            print(f"    CQ:{agent['Communication_Quality_Elo']:.1f}, RS:{agent['Problem_Resolution_Elo']:.1f}, SS:{agent['Safety_Security_Elo']:.1f}")
+            print(f"    T:{agent['Transparency_Elo']:.1f}, A:{agent['Adaptability_Elo']:.1f}")
+            print(f"    TC:{agent['Trust_Calibration_Elo']:.1f}, MR:{agent['Manipulation_Resistance_Elo']:.1f}")
+            print()
