@@ -6,7 +6,8 @@ from collections import defaultdict
 from trust_market.info_sources import InformationSource
 from typing import Dict, List, Tuple, Set, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor
-
+from google import genai
+from google.genai import types
 
 class Auditor(InformationSource):
     """
@@ -264,16 +265,15 @@ class ProfileAnalyzer:
     Analyzes agent profiles using LLM to assess trustworthiness across different dimensions.
     """
     
-    def __init__(self, llm_client=None, api_key=None):
+    def __init__(self, api_key=None):
         """
         Initialize the profile analyzer.
         
-        Parameters:
-        - llm_client: Pre-configured LLM client
+        Parameters:\
         - api_key: API key for LLM service if client not provided
         """
-        self.llm_client = llm_client
         self.api_key = api_key
+        self.genai_client = genai.Client(api_key=self.api_key)
         
         # Map of dimension names to descriptions for LLM prompting
         self.dimension_descriptions = {
@@ -297,12 +297,16 @@ class ProfileAnalyzer:
         Get structured response from LLM service.
         Implement with actual LLM API in production.
         """
-        if self.llm_client:
+        if self.genai_client:
             try:
                 # Implementation depends on which LLM service is being used
-                response = self.llm_client.models.generate_content(
-                    model="gemini-1.0-pro",
-                    prompt=prompt
+                response = self.genai_client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=500,
+                        temperature=0.7
+                    ),
+                    contents=[prompt]
                 )
                 return response.text
             except Exception as e:
@@ -542,12 +546,12 @@ class AuditorWithProfileAnalysis(Auditor):
     making more sophisticated investment decisions.
     """
     
-    def __init__(self, source_id, market=None, llm_client=None, api_key=None):
+    def __init__(self, source_id, market=None, api_key=None):
         super().__init__(source_id, market)
         
         # Initialize analyzers
-        self.profile_analyzer = ProfileAnalyzer(llm_client=llm_client, api_key=api_key)
-        self.batch_evaluator = BatchEvaluator(llm_client=llm_client, api_key=api_key)
+        self.profile_analyzer = ProfileAnalyzer(api_key=api_key)
+        self.batch_evaluator = BatchEvaluator(api_key=api_key)
         
         # Track agent profiles and conversations
         self.agent_profiles = {}
@@ -1302,16 +1306,15 @@ class BatchEvaluator:
     providing magnitude of differences to inform investment decisions.
     """
     
-    def __init__(self, llm_client=None, api_key=None):
+    def __init__(self, api_key=None):
         """
         Initialize the batch evaluator.
         
         Parameters:
-        - llm_client: Pre-configured LLM client
         - api_key: API key for LLM service if client not provided
         """
-        self.llm_client = llm_client
         self.api_key = api_key
+        self.genai_client = genai.Client(api_key=self.api_key)
         
         # Map of dimension names to descriptions for LLM prompting
         self.dimension_descriptions = {
@@ -1335,12 +1338,16 @@ class BatchEvaluator:
         Get structured response from LLM service.
         This is a placeholder - implement with actual LLM API in production.
         """
-        if self.llm_client:
+        if self.genai_client:
             # Implementation depends on which LLM service is being used
             try:
-                response = self.llm_client.models.generate_content(
-                    model="gemini-1.0-pro",
-                    prompt=prompt
+                response = self.genai_client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=500,
+                        temperature=0.7
+                    ),
+                    contents=[prompt]
                 )
                 return response.text
             except Exception as e:

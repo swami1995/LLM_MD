@@ -2,6 +2,8 @@ import math
 import numpy as np
 from collections import defaultdict
 from trust_market.info_sources import InformationSource
+from google import genai
+from google.genai import types
 
 class UserRepresentative(InformationSource):
     """
@@ -153,16 +155,15 @@ class HolisticBatchEvaluator:
     providing magnitude of differences to inform investment decisions.
     """
     
-    def __init__(self, llm_client=None, api_key=None):
+    def __init__(self, api_key=None):
         """
         Initialize the holistic batch evaluator.
         
         Parameters:
-        - llm_client: Pre-configured LLM client
         - api_key: API key for LLM service if client not provided
         """
-        self.llm_client = llm_client
         self.api_key = api_key
+        self.genai_client = genai.Client(api_key=self.api_key)
         
         # Map of dimension names to descriptions for LLM prompting
         self.dimension_descriptions = {
@@ -186,12 +187,16 @@ class HolisticBatchEvaluator:
         Get structured response from LLM service.
         This is a placeholder - implement with actual LLM API in production.
         """
-        if self.llm_client:
+        if self.genai_client:
             # Implementation depends on which LLM service is being used
-            response = self.llm_client.models.generate_content(
-                model="gemini-1.0-pro",
-                prompt=prompt
-            )
+            response = self.genai_client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=500,
+                        temperature=0.7
+                    ),
+                    contents=[prompt]
+                )
             return response.text
         else:
             # Mock implementation for testing - in reality you'd use an actual LLM
@@ -446,11 +451,11 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     User representative that evaluates agents holistically across batches of conversations.
     """
     
-    def __init__(self, source_id, user_segment, representative_profile, market=None, llm_client=None):
+    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None):
         super().__init__(source_id, user_segment, representative_profile, market)
         
         # Initialize holistic evaluator
-        self.evaluator = HolisticBatchEvaluator(llm_client=llm_client)
+        self.evaluator = HolisticBatchEvaluator(api_key=api_key)
         
         # Cache for agent evaluations
         self.agent_evaluation_cache = {}
