@@ -170,13 +170,14 @@ class UserRepresentative(InformationSource):
 class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     """
     User representative that evaluates agents holistically across batches of conversations using LLM.
-    """
+"""
 
-    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None): # Added api_key
+    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None, api_model_name='gemini-2.0-flash'): # Added api_key
         super().__init__(source_id, user_segment, representative_profile, market)
 
         # Initialize holistic evaluator (using BatchEvaluator from auditor.py)
-        self.evaluator = BatchEvaluator(api_key=api_key) # Pass API key
+        self.api_model_name = api_model_name
+        self.evaluator = BatchEvaluator(api_key=api_key, api_model_name=api_model_name) # Pass API key
 
         # Cache for agent evaluations from holistic comparison
         self.agent_evaluation_cache = {} # {agent_id: {dimension: (score, confidence)}}

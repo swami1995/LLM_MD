@@ -15,9 +15,12 @@ from google.genai import types
 # --- LLM-Powered Analyzer Classes (ProfileAnalyzer, BatchEvaluator) ---
 class ProfileAnalyzer:
     """Analyzes agent profiles using LLM."""
-    def __init__(self, api_key=None):
+    def __init__(self, api_key=None, api_model_name='gemini-2.0-flash'):
+        self.api_model_name = api_model_name
+        self.genai_client = None
         self.api_key = api_key
-        self.genai_client = genai.Client(api_key=self.api_key)
+        if api_key is not None:
+            self.genai_client = genai.Client(api_key=self.api_key)
         
         # Map of dimension names to descriptions for LLM prompting
         self.dimension_descriptions = {
@@ -40,7 +43,7 @@ class ProfileAnalyzer:
             try:
                 # Implementation depends on which LLM service is being used
                 response = self.genai_client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model=self.api_model_name,
                     config=types.GenerateContentConfig(
                         max_output_tokens=500,
                         temperature=0.7
@@ -199,7 +202,7 @@ Format your response as a JSON object with this structure:
 class AuditorWithProfileAnalysis(InformationSource):
     """Enhanced auditor using profile analysis and conversation history."""
 
-    def __init__(self, source_id, market=None, api_key=None): # Added api_key
+    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.0-flash'): # Added api_key
         expertise_dimensions = [
             "Factual_Correctness", "Process_Reliability", "Value_Alignment",
             "Communication_Quality", "Problem_Resolution", "Safety_Security",
@@ -222,8 +225,8 @@ class AuditorWithProfileAnalysis(InformationSource):
         self.agent_conversations = defaultdict(list) # Stores {agent_id: [conversation_history, ...]}
 
         # Initialize LLM-based analyzers
-        self.profile_analyzer = ProfileAnalyzer(api_key=api_key)
-        self.batch_evaluator = BatchEvaluator(api_key=api_key)
+        self.profile_analyzer = ProfileAnalyzer(api_key=api_key, api_model_name=api_model_name)
+        self.batch_evaluator = BatchEvaluator(api_key=api_key, api_model_name=api_model_name)
 
         # Track agent profiles received
         self.agent_profiles = {}
@@ -686,8 +689,9 @@ class AuditorWithProfileAnalysis(InformationSource):
 
 class BatchEvaluator:
     """Evaluates batches of conversations or compares profiles using LLM."""
-    def __init__(self, api_key=None):
+    def __init__(self, api_key=None, api_model_name='gemini-2.0-flash'):
         self.api_key = api_key
+        self.api_model_name = api_model_name
         self.genai_client = None
         self.genai_client = genai.Client(api_key=self.api_key)
         self.dimension_descriptions = ProfileAnalyzer().dimension_descriptions # Reuse descriptions
@@ -697,11 +701,10 @@ class BatchEvaluator:
         """Gets response from LLM or returns mock."""
         if self.genai_client:
             try:
-                response = self.genai_client.generative_model("gemini-1.5-flash").generate_content(
+                response = self.genai_client.generative_model(self.api_model_name).generate_content(
                     contents=[prompt],
                     generation_config=genai.types.GenerationConfig(
-                        # response_mime_type="application/json", # Request JSON
-                        max_output_tokens=1000, # More tokens for comparisons
+                        max_output_tokens=1000,
                         temperature=0.3
                     )
                 )

@@ -26,16 +26,17 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3-8B-Instruct", help="Path to the pretrained LLM model. Required if --llm_source is 'local'.")
     parser.add_argument("--llm_source", type=str, choices=["local", "api"], default="api", help="Source of LLM: 'local' (Llama) or 'api' (Gemini). Default is 'api'.")
     parser.add_argument("--max_dialog_rounds", type=int, default=3, help="Maximum number of dialog rounds for each conversation. Default is 3.")
-    parser.add_argument("--num_steps", type=int, default=5, help="Number of simulation steps (evaluation rounds) to run. Default is 5.")
+    parser.add_argument("--num_steps", type=int, default=2, help="Number of simulation steps (evaluation rounds) to run. Default is 5.")
     parser.add_argument("--use_chat_api", action="store_true", help="Use Gemini's chat API for more efficient multi-turn dialogs. Only applicable when --llm_source is 'api'.")
     parser.add_argument("--batch_size", type=int, default=3, help="Number of conversations per simulation step. Default is 3.")
+    parser.add_argument("--use_static_kb", action="store_true", help="Use a static knowledge base for the simulation. Default is False.")
 
     # --- Evaluation & Trust Market Args ---
-    parser.add_argument("--evaluation_method", type=str, choices=["specific_ratings", "comparative_binary"], default="specific_ratings", help="Evaluation method for user feedback.")
+    parser.add_argument("--evaluation_method", type=str, choices=["specific_ratings", "comparative_binary"], default="comparative_binary", help="Evaluation method for user feedback.")
     parser.add_argument("--rating_scale", type=int, choices=[5, 10], default=5, help="Rating scale for user feedback (specific_ratings).")
     parser.add_argument("--trust_decay_rate", type=float, default=0.99, help="Decay rate for trust scores per round.")
-    parser.add_argument("--auditor_frequency", type=int, default=2, help="Frequency (in rounds) for auditor evaluations.")
-    parser.add_argument("--user_rep_frequency", type=int, default=1, help="Frequency (in rounds) for user representative evaluations.")
+    parser.add_argument("--auditor_frequency", type=int, default=5, help="Frequency (in rounds) for auditor evaluations.")
+    parser.add_argument("--user_rep_frequency", type=int, default=3, help="Frequency (in rounds) for user representative evaluations.")
 
 
     args = parser.parse_args()
@@ -54,6 +55,8 @@ if __name__ == "__main__":
         else:
              print("Warning: GEMINI_API_KEY environment variable not set. Using hardcoded key (for testing ONLY).")
 
+    if args.llm_source == 'api':
+        args.api_model_name = "gemini-2.5-pro-preview-03-25"
 
     # Validate chat API usage
     if args.use_chat_api and args.llm_source != "api":
@@ -61,23 +64,25 @@ if __name__ == "__main__":
         args.use_chat_api = False
 
     # --- Knowledge Base ---
-    static_knowledge_base = {
-        "What is your return policy?": "We offer a 30-day return policy for most items. Please see our full return policy here: [link to policy]",
-        "How do I track my order?": "You can track your order by logging into your account and going to the 'Order History' section. Or you can use this link : [link to tracking]",
-        "What are your hours of operation?": "Our customer support team is available from 9 AM to 5 PM PST, Monday through Friday.",
-        "How do I contact customer support?": "You can reach us by phone at [phone number], by email at [email address], or through live chat on our website.",
-        "Do you offer international shipping?": "Yes, we offer international shipping to select countries. Shipping rates and times vary depending on the destination.",
-        "What payment methods do you accept?": "We accept Visa, Mastercard, American Express, and PayPal.",
-        "How do I reset my password?": "You can reset your password by clicking on the 'Forgot Password' link on the login page.",
-        "Do you have a physical store?": "No, we are an online-only retailer.",
-        "What is your privacy policy?": "You can find our full privacy policy here: [link to privacy policy]",
-        "How do I create an account?": "You can create an account by clicking on the 'Sign Up' link at the top of our website.",
-        "How long does shipping take?": "Domestic orders typically take 3-5 business days to arrive. International shipping times vary.",
-        "Do you offer gift wrapping?": "Yes, we offer gift wrapping for a small fee during checkout.",
-        "What is your warranty policy?": "Our products come with a standard one-year warranty against defects. Extended warranties are available for purchase.",
-        "How do I cancel my order?": "You can cancel your order within 24 hours of placing it by contacting our customer support team.",
-        "Do you have a loyalty program?": "Yes, we have a loyalty program that rewards frequent customers with points that can be redeemed for discounts.",
-    }
+    static_knowledge_base = None
+    if args.use_static_kb:
+        static_knowledge_base = {
+            "What is your return policy?": "We offer a 30-day return policy for most items. Please see our full return policy here: [link to policy]",
+            "How do I track my order?": "You can track your order by logging into your account and going to the 'Order History' section. Or you can use this link : [link to tracking]",
+            "What are your hours of operation?": "Our customer support team is available from 9 AM to 5 PM PST, Monday through Friday.",
+            "How do I contact customer support?": "You can reach us by phone at [phone number], by email at [email address], or through live chat on our website.",
+            "Do you offer international shipping?": "Yes, we offer international shipping to select countries. Shipping rates and times vary depending on the destination.",
+            "What payment methods do you accept?": "We accept Visa, Mastercard, American Express, and PayPal.",
+            "How do I reset my password?": "You can reset your password by clicking on the 'Forgot Password' link on the login page.",
+            "Do you have a physical store?": "No, we are an online-only retailer.",
+            "What is your privacy policy?": "You can find our full privacy policy here: [link to privacy policy]",
+            "How do I create an account?": "You can create an account by clicking on the 'Sign Up' link at the top of our website.",
+            "How long does shipping take?": "Domestic orders typically take 3-5 business days to arrive. International shipping times vary.",
+            "Do you offer gift wrapping?": "Yes, we offer gift wrapping for a small fee during checkout.",
+            "What is your warranty policy?": "Our products come with a standard one-year warranty against defects. Extended warranties are available for purchase.",
+            "How do I cancel my order?": "You can cancel your order within 24 hours of placing it by contacting our customer support team.",
+            "Do you have a loyalty program?": "Yes, we have a loyalty program that rewards frequent customers with points that can be redeemed for discounts.",
+        }
 
     # --- Load Profiles & Prompts ---
     agent_profiles_all, user_profiles_all = load_profiles("saved_profiles") if os.path.exists("saved_profiles/agent_profiles.json") else ([], [])
@@ -158,7 +163,6 @@ if __name__ == "__main__":
     user_profiles = [user_profiles_all[i] for i in sampled_indices]
     conversation_prompts = [conversation_prompts[i] for i in sampled_indices] if conversation_prompts and len(conversation_prompts) == len(user_profiles_all) else []
     
-    
     print(f"Simulating with {len(agent_profiles)} agent profiles and {len(user_profiles)} user profiles.")
 
 
@@ -180,7 +184,8 @@ if __name__ == "__main__":
         conversation_prompts=conversation_prompts,
         static_knowledge_base=static_knowledge_base,
         max_dialog_rounds=args.max_dialog_rounds,
-        use_chat_api=args.use_chat_api
+        use_chat_api=args.use_chat_api,
+        api_model_name=args.api_model_name,
     )
 
     # --- 2. Initialize Trust Market System ---
@@ -210,7 +215,8 @@ if __name__ == "__main__":
     auditor = AuditorWithProfileAnalysis(
         source_id="auditor_main",
         market=trust_market_system.trust_market, # Pass the market instance
-        api_key=gemini_api_key if args.llm_source == "api" else None
+        api_key=gemini_api_key if args.llm_source == "api" else None,
+        api_model_name=args.api_model_name if args.llm_source == "api" else None,
         # Pass llm_client if you initialize it separately
     )
     # Provide profiles *after* simulation module registration (which copies profiles to market sys)
@@ -226,7 +232,8 @@ if __name__ == "__main__":
         user_segment="balanced", # Define segment characteristics if needed
         representative_profile={}, # Can add details about the rep's focus
         market=trust_market_system.trust_market,
-        api_key=gemini_api_key if args.llm_source == "api" else None
+        api_key=gemini_api_key if args.llm_source == "api" else None,
+        api_model_name=args.api_model_name if args.llm_source == "api" else None,
         # Pass llm_client if needed
     )
     # Map users in the simulation to this representative

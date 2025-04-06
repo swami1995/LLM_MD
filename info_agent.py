@@ -8,11 +8,13 @@ import concurrent.futures
 from google import genai
 from google.genai import types
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import ipdb
 
+parallel_api_calls = True
 # --- InfoSeekingAgentSet ---
 class InfoSeekingAgentSet:
-    def __init__(self, agent_profiles, model_path=None,
-                 gemini_api_key=None, llm_source="api", static_knowledge_base=None):
+    def __init__(self, agent_profiles, model_path=None, gemini_api_key=None, 
+                 llm_source="api", api_model_name = 'gemini-2.0-flash', static_knowledge_base=None):
         # Removed alpha, evaluation_method, rating_scale - TrustMarket handles scoring
 
         self.agent_profiles = agent_profiles
@@ -28,6 +30,7 @@ class InfoSeekingAgentSet:
         self.gemini_api_key = gemini_api_key
         self.genai_client = None # Initialize later if needed
         self.llm_source = llm_source
+        self.api_model_name = api_model_name
 
         # Chat sessions for Gemini API (keep this for efficient dialog)
         self.chat_sessions = {}
@@ -41,6 +44,7 @@ class InfoSeekingAgentSet:
             if self.gemini_api_key is None:
                 raise ValueError("Gemini API key must be specified when using Gemini API.")
             self.genai_client = genai.Client(api_key=self.gemini_api_key)
+            print("Gemini API client initialized for InfoAgent.")
         elif self.llm_source == "local":
             if not model_path:
                 raise ValueError("Model path must be specified when using local LLM.")
@@ -99,7 +103,7 @@ AGENT PROFILE:
 IMPORTANT INSTRUCTIONS:
 1. Embody this profile. If knowledge is limited, act accordingly. If inaccuracies are suggested, subtly incorporate them.
 2. Match tone and detail to the profile. Prioritize the specified goals.
-3. Include "[END_CONVERSATION]" if the issue seems resolved. Include "[ESCALATE]" if needed.
+3. Include "[END_CONVERSATION]" if the issue seems resolved and you'd like to end the conversation. Include "[ESCALATE]" if needed. Try not to end the conversation prematurely. 
 4. Base your responses ONLY on the provided KNOWLEDGE BASE below and the conversation history. Do NOT use external knowledge unless absolutely necessary to interpret the query.
 
 KNOWLEDGE BASE:
@@ -181,12 +185,13 @@ KNOWLEDGE BASE:
         Helper function to generate content using Gemini API.
         Uses chat session API if use_chat_api is True and context is provided.
         """
-        try:
+        #try:
+        if True:
             # If we're doing single-turn conversations or no conversation context was provided
             if conversation_id is None or agent_id is None or history is None or not use_chat_api:
                 # Use the standard generate_content API for one-off queries
                 response = self.genai_client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model=self.api_model_name,
                     config=types.GenerateContentConfig(
                         max_output_tokens=500,
                         temperature=0.7
@@ -214,10 +219,13 @@ KNOWLEDGE BASE:
                     # Create the full system prompt
                     full_system_prompt = f"{system_prompt}\n\nKNOWLEDGE BASE:\n{knowledge_base}\n\nHowever, given your profile characteristics, you may need to adapt whether you actually know all of the information or not. Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know. Abide by the communication style and primary goals specified in your profile."
                     
+                    # print(f"Agent System Prompt (AID : {agent_id}) : ", full_system_prompt)
+                    
                     # Create a new chat session with the system prompt
                     chat = self.genai_client.chats.create(
-                        model="gemini-2.0-flash",
-                        system_prompt=full_system_prompt
+                        model=self.api_model_name,
+                        config=types.GenerateContentConfig(
+                            system_instruction=full_system_prompt),
                     )
                     self.chat_sessions[session_key] = chat
                     
@@ -252,10 +260,10 @@ Customer Support Agent (you):
 
             return response.text if hasattr(response, 'text') and response.text else "Error: Gemini API returned empty response."
 
-        except Exception as e:
-            error_message = f"Gemini API error: {e}"
-            print(error_message)
-            return error_message
+        # except Exception as e:
+        #     error_message = f"Gemini API error: {e}"
+        #     print(error_message)
+        #     return error_message
 
 
     def _generate_llama_response_batch(self, prompts: List[str]) -> List[str]:
@@ -334,29 +342,44 @@ Customer Support Agent (you):
         responses_raw = []
 
         if self.llm_source == "api":
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as executor:
-                 # Map the appropriate arguments based on whether chat API is used
-                 if use_chat_api and conversation_ids is not None and conversation_histories is not None:
-                      # Map arguments for chat API (_generate_gemini_content expects query as first arg)
-                      future_results = executor.map(
-                           self._generate_gemini_content,
-                           prompts_or_queries, # These are just the queries
-                           conversation_ids,
-                           service_agent_ids,
-                           conversation_histories,
-                           [use_chat_api] * len(queries) # Pass use_chat_api flag
-                      )
-                 else:
-                      # Map arguments for non-chat API (_generate_gemini_content expects full prompt)
-                      future_results = executor.map(
-                           self._generate_gemini_content,
-                           prompts_or_queries, # These are the full prompts
-                           [None] * len(queries), # No conv_id needed here
-                           [None] * len(queries), # No agent_id needed here
-                           [None] * len(queries), # No history needed here
-                           [False] * len(queries) # Explicitly False for use_chat_api
-                      )
-                 responses_raw = list(future_results)
+            if parallel_api_calls:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as executor:
+                    # Map the appropriate arguments based on whether chat API is used
+                    if use_chat_api and conversation_ids is not None and conversation_histories is not None:
+                        # Map arguments for chat API (_generate_gemini_content expects query as first arg)
+                        future_results = executor.map(
+                            self._generate_gemini_content,
+                            prompts_or_queries, # These are just the queries
+                            conversation_ids,
+                            service_agent_ids,
+                            conversation_histories,
+                            [use_chat_api] * len(queries) # Pass use_chat_api flag
+                        )
+                    else:
+                        # Map arguments for non-chat API (_generate_gemini_content expects full prompt)
+                        future_results = executor.map(
+                            self._generate_gemini_content,
+                            prompts_or_queries, # These are the full prompts
+                            [None] * len(queries), # No conv_id needed here
+                            [None] * len(queries), # No agent_id needed here
+                            [None] * len(queries), # No history needed here
+                            [False] * len(queries) # Explicitly False for use_chat_api
+                        )
+                    responses_raw = list(future_results)
+            
+            else:
+                # serial version with a simple for loop
+                for i, query in enumerate(prompts_or_queries):
+                    conv_id = conversation_ids[i] if conversation_ids else None
+                    history = conversation_histories[i] if conversation_histories else None
+                    response = self._generate_gemini_content(
+                        query,
+                        conversation_id=conv_id,
+                        agent_id=service_agent_ids[i],
+                        history=history,
+                        use_chat_api=use_chat_api
+                    )
+                    responses_raw.append(response)
 
         elif self.llm_source == "local":
             responses_raw = self._generate_llama_response_batch(prompts_or_queries) # Pass full prompts
@@ -372,10 +395,10 @@ Customer Support Agent (you):
 
             if "[END_CONVERSATION]" in response:
                 should_end = True
-                response = response.replace("[END_CONVERSATION]", "").strip()
+                response = response.replace("[END_CONVERSATION]", "[ENDING CONVERSATION]").strip()
             elif "[ESCALATE]" in response:
                 should_end = True
-                response = response.replace("[ESCALATE]", "").strip()
+                response = response.replace("[ESCALATE]", "[ESCALATING THE ISSUE FOR RESOLUTION]").strip()
             # Check for internal error messages
             elif response.startswith("[ERROR:"):
                  print(f"LLM Generation Error Detected: {response}")
@@ -392,11 +415,11 @@ Customer Support Agent (you):
 # --- UserAgentSet ---
 class UserAgentSet:
     def __init__(self, user_profiles, model_path=None, evaluation_method="specific_ratings",
-                 rating_scale=5, gemini_api_key=None, llm_source="api", static_knowledge_base=None):
+                 rating_scale=5, gemini_api_key=None, llm_source="api", api_model_name='gemini-2.0-flash', static_knowledge_base=None):
 
         self.user_profiles = user_profiles
         self.num_users = len(user_profiles)
-        self.user_ids = list(range(self.num_users)) # Using simple integer IDs
+        self.user_ids = list(range(self.num_users))
         self.static_knowledge_base = static_knowledge_base
 
         # Conversation knowledge and specific prompts/scenarios
@@ -410,6 +433,7 @@ class UserAgentSet:
         self.gemini_api_key = gemini_api_key
         self.genai_client = None
         self.llm_source = llm_source
+        self.api_model_name = api_model_name
 
         # Chat sessions for Gemini API (for query generation)
         self.chat_sessions = {}
@@ -431,6 +455,7 @@ class UserAgentSet:
             if self.gemini_api_key is None:
                 raise ValueError("Gemini API key must be specified when using Gemini API.")
             self.genai_client = genai.Client(api_key=self.gemini_api_key)
+            print("Gemini API client initialized for UserAgentSet.")
         elif self.llm_source == "local":
             if self.model_path is None:
                 raise ValueError("Model path must be specified when using local LLM.")
@@ -473,8 +498,8 @@ YOUR PROFILE:
 * Patience Level: {profile.get('patience', 'Medium')}
 * Trust Propensity: {profile.get('trust_propensity', 'Neutral')}
 * Focus: {profile.get('focus', 'Resolution')}
-* Communication Style: {', '.join(profile.get('communication_style', ['Conversational']))}
-* Current Mood: {', '.join(profile.get('mood', ['Neutral']))}
+* Communication Style: {profile.get('communication_style', ['Conversational'])}
+* Current Mood: {profile.get('mood', ['Neutral'])}
 """
         # Base prompt instructing the user role
         base_prompt = f"""You are roleplaying a customer seeking help about headphones from an online store's support agent. Engage based on your profile and the conversation context.
@@ -576,12 +601,13 @@ IMPORTANT INSTRUCTIONS:
         Helper function to generate user queries using Gemini API.
         Uses chat session API if use_chat_api is True and context is provided.
         """
-        try:
+        # try:
+        if True:
             # If we're doing single-turn conversations or no conversation context was provided
             if conversation_id is None or user_id is None or history is None or not use_chat_api:
                 # Use the standard generate_content API for one-off queries
                 response = self.genai_client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model=self.api_model_name,
                     config=types.GenerateContentConfig(
                         max_output_tokens=500,
                         temperature=0.7
@@ -609,11 +635,14 @@ IMPORTANT INSTRUCTIONS:
                     
                     # Create the full system prompt
                     full_system_prompt = f"{system_prompt}\n\n{knowledge_base}\n\nNow, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue."
-                    
+
+                    # print(f"User System Prompt (UID : {user_id}) : ", full_system_prompt)
+                                                                                                                                                                                                                                                                                                                                                                                                                          
                     # Create a new chat session with the system prompt
                     chat = self.genai_client.chats.create(
-                        model="gemini-2.0-flash",
-                        system_prompt=full_system_prompt
+                        model=self.api_model_name,
+                        config=types.GenerateContentConfig(
+                            system_instruction=full_system_prompt),
                     )
                     self.chat_sessions[session_key] = chat
                     
@@ -660,10 +689,11 @@ Customer (you):
 
             return response.text if hasattr(response, 'text') and response.text else "Error: Gemini API returned empty response."
 
-        except Exception as e:
-            error_message = f"Gemini API error: {e}"
-            print(error_message)
-            return error_message
+        # except Exception as e:
+        #     error_message = f"Gemini API error: {e}"
+        #     print(error_message)
+        #     ipdb.set_trace()
+        #     return error_message
 
     def _generate_llama_query_batch(self, prompts: List[str]) -> List[str]:
         """Helper function to generate queries in batch using local Llama model."""
@@ -733,24 +763,31 @@ Customer (you):
         queries_raw = []
 
         if self.llm_source == "api":
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor:
-                 if use_chat_api and conversation_ids is not None and conversation_histories is not None:
-                      future_results = executor.map(
-                           self._generate_gemini_query,
-                           prompts_or_triggers, # These are just triggers (" ")
-                           conversation_ids,
-                           user_ids,
-                           conversation_histories,
-                           [use_chat_api] * len(user_ids)
-                      )
-                 else:
-                      future_results = executor.map(
-                           self._generate_gemini_query,
-                           prompts_or_triggers, # These are full prompts
-                           [None] * len(user_ids), [None] * len(user_ids), [None] * len(user_ids),
-                           [False] * len(user_ids)
-                      )
-                 queries_raw = list(future_results)
+            if parallel_api_calls:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor:
+                    if use_chat_api and conversation_ids is not None and conversation_histories is not None:
+                        future_results = executor.map(
+                            self._generate_gemini_query,
+                            prompts_or_triggers, # These are just triggers (" ")
+                            conversation_ids,
+                            user_ids,
+                            conversation_histories,
+                            [use_chat_api] * len(user_ids)
+                        )
+                    else:
+                        future_results = executor.map(
+                            self._generate_gemini_query,
+                            prompts_or_triggers, # These are full prompts
+                            [None] * len(user_ids), [None] * len(user_ids), [None] * len(user_ids),
+                            [False] * len(user_ids)
+                        )
+                    queries_raw = list(future_results)
+            else:
+                # serial version with a simple for loop
+                for i, (user_id, trigger) in enumerate(zip(user_ids, prompts_or_triggers)):
+                    conv_id = conversation_ids[i] if conversation_ids else None
+                    history = conversation_histories[i] if conversation_histories else None
+                    queries_raw.append(self._generate_gemini_query(trigger, conv_id, user_id, history, use_chat_api))
 
         elif self.llm_source == "local":
             queries_raw = self._generate_llama_query_batch(prompts_or_triggers) # Pass full prompts
@@ -760,6 +797,7 @@ Customer (you):
         # Process queries for ending signals and errors
         processed_queries = []
         for query in queries_raw:
+            transfer_request = False
             should_end = False
             if not isinstance(query, str):
                  query = "[ERROR: Invalid query response type]"
@@ -768,12 +806,13 @@ Customer (you):
                 should_end = True
                 query = query.replace("[END_CONVERSATION]", "").strip()
             elif "[REQUEST_TRANSFER]" in query:
+                transfer_request = True
                 should_end = True # Also signals end from user perspective for this agent
                 query = query.replace("[REQUEST_TRANSFER]", "").strip()
             elif query.startswith("[ERROR:"):
                  print(f"LLM Query Generation Error Detected: {query}")
 
-            processed_queries.append((query, should_end))
+            processed_queries.append((query, should_end, transfer_request))
 
         return processed_queries
 
@@ -1104,40 +1143,31 @@ Do NOT include explanations or any other text.
             print("Error: Gemini client not initialized for UserAgentSet ratings.")
             return ["[ERROR: Gemini client not initialized]"] * len(prompts)
 
-        responses = [""] * len(prompts) # Initialize with placeholders
-        model_name = "gemini-2.0-flash"
-
+        responses = [""] * len(prompts)
         def call_gemini(index, prompt):
-            try:
-                response = self.genai_client.generative_model(model_name).generate_content(
-                    contents=[prompt],
-                    generation_config=genai.types.GenerationConfig(
-                        max_output_tokens=400, # Enough for ratings/comparisons
-                        temperature=0.2 # Low temp for structured output
-                    )
-                )
-                # --- Response Processing (Similar to generation) ---
-                if not response.candidates:
-                     reason = "No candidates"
-                     if hasattr(response, 'prompt_feedback'): reason = f"Blocked: {response.prompt_feedback.block_reason}"
-                     return f"[ERROR: Gemini rating issue - {reason}]"
-                first_candidate = response.candidates[0]
-                if first_candidate.finish_reason != types.FinishReason.STOP and first_candidate.finish_reason != types.FinishReason.MAX_TOKENS:
-                     return f"[ERROR: Rating gen stopped - {first_candidate.finish_reason}]"
-                if first_candidate.content and first_candidate.content.parts:
-                    return first_candidate.content.parts[0].text
-                else: return "[ERROR: Gemini rating empty content]"
-            except Exception as e:
-                return f"[ERROR: Gemini API call failed - {type(e).__name__}]"
+            response = self.genai_client.models.generate_content(
+                model=self.api_model_name,
+                config=types.GenerateContentConfig(
+                    max_output_tokens=500,
+                    temperature=0.7
+                ),
+                contents=[prompt]
+            )
+            return response.text if hasattr(response, 'text') else "Error: Gemini API returned empty response."
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor:
-            future_to_index = {executor.submit(call_gemini, i, prompt): i for i, prompt in enumerate(prompts)}
-            for future in concurrent.futures.as_completed(future_to_index):
-                index = future_to_index[future]
-                try:
-                    responses[index] = future.result()
-                except Exception as e:
-                    responses[index] = f"[ERROR: Thread execution failed - {e}]"
+        if parallel_api_calls:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor:
+                future_to_index = {executor.submit(call_gemini, i, prompt): i for i, prompt in enumerate(prompts)}
+                for future in concurrent.futures.as_completed(future_to_index):
+                    index = future_to_index[future]
+                    try:
+                        responses[index] = future.result()
+                    except Exception as e:
+                        responses[index] = f"[ERROR: Thread execution failed - {e}]"
+        else:
+            # serial version with a simple for loop
+            for i, prompt in enumerate(prompts):
+                responses[i] = call_gemini(i, prompt)
         return responses
 
 # --- CustomerSupportModel ---
@@ -1145,18 +1175,19 @@ class CustomerSupportModel:
     # Removed alpha from init
     def __init__(self, num_users, num_agents, batch_size=3, model_path=None,
                  evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None,
-                 llm_source="api", agent_profiles=None, user_profiles=None,
+                 llm_source="api", api_model_name='gemini-2.0-flash', agent_profiles=None, user_profiles=None,
                  conversation_prompts=None, static_knowledge_base=None,
                  max_dialog_rounds=1, use_chat_api=False):
 
         self.num_users = num_users
         self.num_agents = num_agents
-        self.batch_size = batch_size # Use the passed batch_size
+        self.batch_size = batch_size
         self.model_path = model_path
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
         self.gemini_api_key = gemini_api_key
         self.llm_source = llm_source
+        self.api_model_name = api_model_name
         self.static_knowledge_base = static_knowledge_base
         self.conversation_id_counter = 0
         self.max_dialog_rounds = max_dialog_rounds
@@ -1185,21 +1216,22 @@ class CustomerSupportModel:
 
         # --- Initialize Agent Sets ---
         self.user_agents = UserAgentSet(
-            user_profiles=self.user_profiles_all, # Pass the full list
+            user_profiles=self.user_profiles_all,
             model_path=self.model_path,
             evaluation_method=self.evaluation_method,
             rating_scale=self.rating_scale,
             gemini_api_key=self.gemini_api_key,
             llm_source=self.llm_source,
+            api_model_name=self.api_model_name,
             static_knowledge_base=self.static_knowledge_base
         )
 
         self.info_agents = InfoSeekingAgentSet(
-            agent_profiles=self.agent_profiles_all, # Pass the full list
+            agent_profiles=self.agent_profiles_all,
             model_path=self.model_path,
-            # Removed scoring params
             gemini_api_key=self.gemini_api_key,
             llm_source=self.llm_source,
+            api_model_name=self.api_model_name,
             static_knowledge_base=self.static_knowledge_base
         )
 
@@ -1355,6 +1387,7 @@ class CustomerSupportModel:
                      "agent_b_profile_idx": self.agent_indices[service_agent_ids_b[i]],
                  }
                  conversation_data_list.append(conv_data)
+            ipdb.set_trace()
 
         else: # specific_ratings
             service_agent_ids = random.sample(range(self.num_agents), k=batch_size)
@@ -1420,7 +1453,7 @@ class CustomerSupportModel:
 
             active_sub_index = 0
             for i in active_indices:
-                 query, user_should_end = query_results[active_sub_index]
+                 query, user_should_end, transfer_request = query_results[active_sub_index]
                  active_sub_index += 1
 
                  # Append new turn or update existing placeholder
@@ -1429,7 +1462,7 @@ class CustomerSupportModel:
                  else:
                       conversation_histories[i][-1]['user'] = query
 
-                 print(f"    User {user_ids[i]}: {query}" + (" [Wants to end]" if user_should_end else ""))
+                 print(f"    User {user_ids[i]}: {query}" + (" [Wants to end]" if user_should_end else "") + ("[Requested Transfer to another agent]" if transfer_request else ""))
 
                  if user_should_end:
                       active_conversations[i] = False
@@ -1461,6 +1494,7 @@ class CustomerSupportModel:
 
                  if agent_should_end:
                       active_conversations[i] = False
+            ipdb.set_trace()
 
         print("  --- Dialog Batch Finished ---")
         return conversation_histories

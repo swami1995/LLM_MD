@@ -44,8 +44,9 @@ prompt_structure = {
 
 
 class PromptGenerator:
-    def __init__(self, gemini_api_key):
+    def __init__(self, gemini_api_key, api_model_name='gemini-2.0-flash'):
         self.genai_client = genai.Client(api_key=gemini_api_key)
+        self.api_model_name = api_model_name
         self.headphone_models = [
             "Sony WH-1000XM5", "Bose Noise Cancelling Headphones 700",
             "Apple AirPods Max", "Sennheiser Momentum 4 Wireless",
@@ -138,7 +139,7 @@ class PromptGenerator:
         # Create the LLM prompt and call Gemini
         llm_prompt = self._create_llm_generation_prompt(prompt)
         response = self.genai_client.models.generate_content(
-            model="gemini-2.0-flash", # Can use gemini-pro if you prefer, or make configurable
+            model=self.api_model_name, # Can use gemini-pro if you prefer, or make configurable
             config=types.GenerateContentConfig(
                 max_output_tokens=500,
                 temperature=0.7, # Tuned for good balance
@@ -260,8 +261,8 @@ Here's the User Profile that I want the user agent to simulate:
     Patience Level: {user_profile['patience']}
     Trust Propensity: {user_profile['trust_propensity']}
     Focus: {user_profile['focus']}
-    Communication Style: {', '.join(user_profile['communication_style'])}
-    Mood: {', '.join(user_profile['mood'])}
+    Communication Style: {user_profile['communication_style']}
+    Mood: {user_profile['mood']}
 
 Here's the context for the conversation that I want the user agent to simulate:
 Conversation Category: '{objective_cat}'
@@ -426,8 +427,8 @@ Here's the User Profile of one of the user agents I'm simulating:
     Patience Level: {user_profile['patience']}
     Trust Propensity: {user_profile['trust_propensity']}
     Focus: {user_profile['focus']}
-    Communication Style: {', '.join(user_profile['communication_style'])}
-    Mood: {', '.join(user_profile['mood'])}
+    Communication Style: {user_profile['communication_style']}
+    Mood: {user_profile['mood']}
 
 I'm using this user agent to simulate one of the interactions. Here's the prompt I designed for the user agent for this interaction: 
 

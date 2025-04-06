@@ -256,11 +256,12 @@ def generate_user_profile(constraints, max_retries=10): # increased retries.
 #     (The changes are primarily in the constraints and select_with_constraints)
 
 class ProfileGenerator:
-    def __init__(self, gemini_api_key, agent_constraints, user_constraints):
-        self.genai_client = genai.Client(api_key=gemini_api_key)
+    def __init__(self, api_key, agent_constraints, user_constraints, api_model_name='gemini-2.0-flash'):
+        self.genai_client = genai.Client(api_key=api_key)
         self.agent_constraints = agent_constraints
         self.user_constraints = user_constraints
-
+        self.api_model_name = api_model_name
+        
     def generate_and_validate_agent(self, num_attempts=5):
         """Generates, validates, and refines an agent profile."""
 
@@ -345,9 +346,9 @@ Agent Profile:
 Knowledge Breadth: {profile['knowledge_breadth']}
 Knowledge Depth: {profile['knowledge_depth']}
 Knowledge Accuracy: {profile['knowledge_accuracy']}
-Primary Goal(s): {', '.join([f'{p[0]}: {p[1]}' for p in profile['primary_goals']])}
-Communication Style: {', '.join(profile['communication_style'])}
-Behavioral Tendencies: {', '.join(profile['behavioral_tendencies'])}
+Primary Goal(s): {', '.join([f'{p[0]}: {p[1]}' for p in profile['primary_goals']]) if len(profile['primary_goals']) > 1 else f'{profile['primary_goals'][0][0]}: {profile['primary_goals'][0][1]}'}
+Communication Style: {profile['communication_style']}
+Behavioral Tendencies: {profile['behavioral_tendencies']}
 
 Consider the following:
 1.  **Consistency:** Do the traits contradict each other?  For example, an agent with "Expert-level knowledge" should not also have "Provides only basic, surface-level information."
