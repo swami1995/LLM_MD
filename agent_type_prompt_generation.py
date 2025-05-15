@@ -58,7 +58,6 @@ def select_with_constraints(dimension, constraints, current_choices, agent_or_us
 
         selected_values.append(selected_value)
         available_values.remove(selected_value)  # Prevent re-selection within the same dimension
-
     return selected_values if num_to_select > 1 else selected_values[0] # returning list or single element.
 
 
@@ -205,6 +204,8 @@ def generate_agent_profile(constraints, max_retries=10): # increased retries
         selected_goals = select_with_constraints("primary_goals", constraints, [], "agent", num_goals) # Pass in the number of goals.
         if selected_goals is None:
             continue # Retry
+        if type(selected_goals) == str:
+            selected_goals = [selected_goals]
         profile["primary_goals"] = [("Primary" if i == 0 else ("Secondary" if i == 1 else "Tertiary"), goal)
                                       for i, goal in enumerate(selected_goals)]
         chosen_values.extend(selected_goals)
@@ -294,31 +295,37 @@ class ProfileGenerator:
         """Validates and refines an agent profile using the LLM."""
 
         prompt = self._create_validation_prompt_agent(profile)
-        response = self.genai_client.models.generate_content(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                max_output_tokens=1000,
-                temperature=0.7
-            ),
-            contents=[prompt]
-        )
+        success = False
+        counter = 0
+        while not success and counter < 5:  # Retry up to 5 times
+            counter += 1
+            try:
+                response = self.genai_client.models.generate_content(
+                    model=self.api_model_name,
+                    # config=types.GenerateContentConfig(
+                    #     max_output_tokens=1000,
+                    #     temperature=0.7
+                    # ),
+                    contents=[prompt]
+                )
 
-        try:
-            response_text = response.text
+                response_text = response.text
+                # ipdb.set_trace()
 
-            refined_profile = self._parse_refined_profile_agent(response_text)
-            return True, refined_profile, response_text
-        
-        except Exception as e:
-            print(f"Error validating/refining agent profile: {e}")
-            return False, profile
+                refined_profile = self._parse_refined_profile_agent(response_text)
+                success = True
+                return True, refined_profile, response_text
+            
+            except Exception as e:
+                print(f"Error validating/refining agent profile: {e}")
+                # return False, profile
 
     def validate_and_refine_user(self, profile):
         """Validates and refines a user profile using the LLM."""
         prompt = self._create_validation_prompt_user(profile)
         return True, profile, prompt
         response = self.genai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=self.api_model_name,
             config=types.GenerateContentConfig(
                 max_output_tokens=1000,
                 temperature=0.7
@@ -339,6 +346,7 @@ class ProfileGenerator:
         """Creates the LLM prompt for agent profile validation."""
 
         # More specific instructions for the LLM
+        # print(profile['primary_goals'])
         prompt = f"""
 I'm trying to simulate a customer support agent service with LLMs acting as user agents as well as customer support agents. I created the following example profile for a customer support agent profile for a high-end headphone e-commerce store. Could you review it and determine if it is reasonable. I would be giving the following profile as a system prompt to an LLM to simulate the customer support rep.
 
@@ -346,7 +354,7 @@ Agent Profile:
 Knowledge Breadth: {profile['knowledge_breadth']}
 Knowledge Depth: {profile['knowledge_depth']}
 Knowledge Accuracy: {profile['knowledge_accuracy']}
-Primary Goal(s): {', '.join([f'{p[0]}: {p[1]}' for p in profile['primary_goals']]) if len(profile['primary_goals']) > 1 else f'{profile['primary_goals'][0][0]}: {profile['primary_goals'][0][1]}'}
+Primary Goal(s): {', '.join([f'{p[0]}: {p[1]}' for p in profile['primary_goals']]) if len(profile['primary_goals']) > 1 else (f'{p[0]}: {p[1]}' for p in profile['primary_goals'])}
 Communication Style: {profile['communication_style']}
 Behavioral Tendencies: {profile['behavioral_tendencies']}
 
@@ -541,7 +549,9 @@ if not api_key:
 # Load constraints from JSON files
 agent_constraints = load_constraints("profile_constraints/agent_constraints.json")
 user_constraints = load_constraints("profile_constraints/user_constraints.json")
-profile_generator = ProfileGenerator(api_key, agent_constraints, user_constraints)
+# api_model_name = "gemini-2.0-flash"#5-pro-preview-03-25"  # or "gemini-2.0"
+api_model_name = "gemini-2.5-pro-preview-05-06" 
+profile_generator = ProfileGenerator(api_key, agent_constraints, user_constraints, api_model_name=api_model_name)
 
 save_profiles(20, 100, "saved_profiles", profile_generator)
 ipdb.set_trace()

@@ -17,7 +17,8 @@ import ipdb
 # Import LLM client setup (assuming you have a helper, otherwise initialize here)
 # Example: from llm_utils import initialize_llm_client
 # For Gemini API, genai client is initialized within agent classes if needed
-
+# max dialog rounds = 3
+# user rep frequency = 3
 
 ## main function
 if __name__ == "__main__":
@@ -25,7 +26,7 @@ if __name__ == "__main__":
     # --- Simulation Args ---
     parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3-8B-Instruct", help="Path to the pretrained LLM model. Required if --llm_source is 'local'.")
     parser.add_argument("--llm_source", type=str, choices=["local", "api"], default="api", help="Source of LLM: 'local' (Llama) or 'api' (Gemini). Default is 'api'.")
-    parser.add_argument("--max_dialog_rounds", type=int, default=3, help="Maximum number of dialog rounds for each conversation. Default is 3.")
+    parser.add_argument("--max_dialog_rounds", type=int, default=1, help="Maximum number of dialog rounds for each conversation. Default is 3.")
     parser.add_argument("--num_steps", type=int, default=2, help="Number of simulation steps (evaluation rounds) to run. Default is 5.")
     parser.add_argument("--use_chat_api", action="store_true", help="Use Gemini's chat API for more efficient multi-turn dialogs. Only applicable when --llm_source is 'api'.")
     parser.add_argument("--batch_size", type=int, default=3, help="Number of conversations per simulation step. Default is 3.")
@@ -36,7 +37,7 @@ if __name__ == "__main__":
     parser.add_argument("--rating_scale", type=int, choices=[5, 10], default=5, help="Rating scale for user feedback (specific_ratings).")
     parser.add_argument("--trust_decay_rate", type=float, default=0.99, help="Decay rate for trust scores per round.")
     parser.add_argument("--auditor_frequency", type=int, default=5, help="Frequency (in rounds) for auditor evaluations.")
-    parser.add_argument("--user_rep_frequency", type=int, default=3, help="Frequency (in rounds) for user representative evaluations.")
+    parser.add_argument("--user_rep_frequency", type=int, default=2, help="Frequency (in rounds) for user representative evaluations.")
 
 
     args = parser.parse_args()
@@ -56,7 +57,9 @@ if __name__ == "__main__":
              print("Warning: GEMINI_API_KEY environment variable not set. Using hardcoded key (for testing ONLY).")
 
     if args.llm_source == 'api':
-        args.api_model_name = "gemini-2.5-pro-preview-03-25"
+        # args.api_model_name = "gemini-2.5-pro-preview-05-06"
+        args.api_model_name = "gemini-2.5-flash-preview-04-17" 
+        # args.api_model_name = "gemini-2.0-flash"
 
     # Validate chat API usage
     if args.use_chat_api and args.llm_source != "api":

@@ -45,7 +45,6 @@ class ProfileAnalyzer:
                 response = self.genai_client.models.generate_content(
                     model=self.api_model_name,
                     config=types.GenerateContentConfig(
-                        max_output_tokens=500,
                         temperature=0.7
                     ),
                     contents=[prompt]
@@ -619,6 +618,47 @@ class AuditorWithProfileAnalysis(InformationSource):
              positions[agent_id] = (num_agents - 1 - i) / (num_agents - 1) if num_agents > 1 else 0.5
         return positions
 
+    def _get_relative_positions(self, evaluations):
+        """
+        Calculates relative position (0-1) based on ranking OR Min-Max scaling.
+        Assumes valid numeric inputs in evaluations.
+        """
+        # --- Control Flag ---
+        use_min_max_scaling = True # <<< MODIFY MANUALLY TO SWITCH
+        # --------------------
+
+        if not evaluations: return {}
+        num_agents = len(evaluations)
+        if num_agents == 1: return {agent_id: 0.5 for agent_id in evaluations}
+
+        agent_ids = list(evaluations.keys())
+
+        if use_min_max_scaling:
+            # --- Min-Max Scaling Logic (No Error Checks) ---
+            scores = [evaluations[aid] for aid in agent_ids] # Assumes scores are numeric
+            min_score, max_score = min(scores), max(scores)
+            score_range = max_score - min_score
+
+            if score_range == 0: # All scores are identical
+                return {aid: 0.5 for aid in agent_ids}
+            else:
+                # Normalize scores to 0-1
+                return {
+                    aid: (evaluations[aid] - min_score) / score_range
+                    for aid in agent_ids
+                }
+        else:
+            # --- Original Ranking Logic (No Error Checks) ---
+            # Sort agent IDs by score, highest first (assumes comparable scores)
+            sorted_agent_ids = sorted(agent_ids, key=lambda aid: evaluations[aid], reverse=True)
+
+            denominator = num_agents - 1
+            # Calculate rank-based position (0 to 1, higher score closer to 1)
+            return {
+                agent_id: (denominator - i) / denominator
+                for i, agent_id in enumerate(sorted_agent_ids)
+            }
+    
     def _calculate_investment_strategy(self, investment_opportunities, total_current_investments):
          """Calculates normalized investment signals based on opportunity strength."""
          # (Same logic as before, using 'strength' and 'current_investment')
@@ -701,10 +741,10 @@ class BatchEvaluator:
         """Gets response from LLM or returns mock."""
         if self.genai_client:
             try:
-                response = self.genai_client.generative_model(self.api_model_name).generate_content(
+                response = self.genai_client.models.generate_content(
+                    model=self.api_model_name,
                     contents=[prompt],
-                    generation_config=genai.types.GenerationConfig(
-                        max_output_tokens=1000,
+                    config=types.GenerateContentConfig(
                         temperature=0.3
                     )
                 )
@@ -780,7 +820,7 @@ class BatchEvaluator:
         return f"AGENT A ({profile_id_a}) PROFILE:\n{profile_a_formatted}\n\nAGENT B ({profile_id_b}) PROFILE:\n{profile_b_formatted}"
 
 
-    def format_conversation_batch(self, conversations, max_conversations=5, max_length=1000):
+    def format_conversation_batch(self, conversations, max_conversations=5, max_length=10000):
         """Formats a list of conversations into a string block."""
         # (Same implementation as before)
         if len(conversations) > max_conversations:

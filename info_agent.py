@@ -193,7 +193,7 @@ KNOWLEDGE BASE:
                 response = self.genai_client.models.generate_content(
                     model=self.api_model_name,
                     config=types.GenerateContentConfig(
-                        max_output_tokens=500,
+                        # max_output_tokens=500,
                         temperature=0.7
                     ),
                     contents=[prompt_text]
@@ -609,7 +609,7 @@ IMPORTANT INSTRUCTIONS:
                 response = self.genai_client.models.generate_content(
                     model=self.api_model_name,
                     config=types.GenerateContentConfig(
-                        max_output_tokens=500,
+                        # max_output_tokens=500,
                         temperature=0.7
                     ),
                     contents=[prompt_text]
@@ -619,6 +619,9 @@ IMPORTANT INSTRUCTIONS:
                 session_key = f"user_{user_id}_conv_{conversation_id}"
                 
                 # If this is a new conversation, create a new chat session
+                # Add agent_id to session_key to avoid conflicts
+                # reset history in between each conversation, restore independence of entities. 
+                # print(f"User {user_id} conversation id: ", conversation_id)
                 if session_key not in self.chat_sessions:
                     system_prompt = self.get_user_prompt(user_id, conversation_id)
                     
@@ -1148,7 +1151,7 @@ Do NOT include explanations or any other text.
             response = self.genai_client.models.generate_content(
                 model=self.api_model_name,
                 config=types.GenerateContentConfig(
-                    max_output_tokens=500,
+                    # max_output_tokens=500,
                     temperature=0.7
                 ),
                 contents=[prompt]
@@ -1263,32 +1266,32 @@ class CustomerSupportModel:
                  continue
 
             for conv_template_idx, prompt_data in enumerate(user_prompt_list):
-                 if not isinstance(prompt_data, dict) or "user_prompt_text" not in prompt_data or "agent_knowledge" not in prompt_data:
-                      print(f"Warning: Invalid prompt format for user profile {user_profile_idx}, prompt {conv_template_idx}. Skipping.")
-                      continue
+                if not isinstance(prompt_data, dict) or "user_prompt_text" not in prompt_data or "agent_knowledge" not in prompt_data:
+                    print(f"Warning: Invalid prompt format for user profile {user_profile_idx}, prompt {conv_template_idx}. Skipping.")
+                    continue
 
-                 conversation_id = self.conversation_id_counter
-                 self.conversation_id_counter += 1
-                 valid_conversation_count += 1
+                conversation_id = self.conversation_id_counter
+                self.conversation_id_counter += 1
+                valid_conversation_count += 1
 
-                 # Store user knowledge (if any)
-                 if "user_knowledge" in prompt_data:
-                     self.user_agents.set_conversation_knowledge(
-                         conversation_id, user_sim_id, prompt_data["user_knowledge"]
-                     )
+                # Store user knowledge (if any)
+                if "user_knowledge" in prompt_data:
+                    self.user_agents.set_conversation_knowledge(
+                        conversation_id, user_sim_id, prompt_data["user_knowledge"]
+                    )
 
-                 # Store the specific scenario/prompt text for the user
-                 self.user_agents.set_conversation_prompt(
-                     conversation_id, user_sim_id, prompt_data["user_prompt_text"]
-                 )
+                # Store the specific scenario/prompt text for the user
+                self.user_agents.set_conversation_prompt(
+                    conversation_id, user_sim_id, prompt_data["user_prompt_text"]
+                )
 
-                 # Store agent knowledge for ALL agents for this conversation
-                 for agent_sim_id in range(self.num_agents):
-                     self.info_agents.set_conversation_knowledge(
-                         conversation_id, agent_sim_id, prompt_data["agent_knowledge"]
-                     )
+                # Store agent knowledge for ALL agents for this conversation
+                for agent_sim_id in range(self.num_agents):
+                    self.info_agents.set_conversation_knowledge(
+                        conversation_id, agent_sim_id, prompt_data["agent_knowledge"]
+                    )
 
-                 self.user_conversations[user_sim_id].append(conversation_id)
+                self.user_conversations[user_sim_id].append(conversation_id)
 
             if self.user_conversations[user_sim_id]:
                  print(f"Prepared {len(self.user_conversations[user_sim_id])} conversations for user sim_id {user_sim_id} (profile index {user_profile_idx})")
@@ -1387,7 +1390,7 @@ class CustomerSupportModel:
                      "agent_b_profile_idx": self.agent_indices[service_agent_ids_b[i]],
                  }
                  conversation_data_list.append(conv_data)
-            ipdb.set_trace()
+            # ipdb.set_trace()
 
         else: # specific_ratings
             service_agent_ids = random.sample(range(self.num_agents), k=batch_size)
@@ -1494,7 +1497,9 @@ class CustomerSupportModel:
 
                  if agent_should_end:
                       active_conversations[i] = False
-            ipdb.set_trace()
+            # ipdb.set_trace()
+        self.user_agents.chat_sessions.clear() # Clear chat sessions after each batch
+        self.info_agents.chat_sessions.clear()
 
         print("  --- Dialog Batch Finished ---")
         return conversation_histories

@@ -149,7 +149,7 @@ class TrustMarketSystem:
     # --- End Registration Helpers ---
 
 
-    def record_conversation_data(self, conv_data: Dict):
+    def record_conversation_data(self, conv_data: Dict, comparative=False):
         """
         Stores conversation history and distributes it to information sources.
 
@@ -175,11 +175,18 @@ class TrustMarketSystem:
                     # Pass necessary info. Sources might need to handle comparative data.
                     # Simple approach: pass primary history and IDs. Sources can fetch profiles if needed.
                     source.add_conversation(
-                        conversation=history,
+                        conversation_history=history,
                         user_id=conv_data['user_id'],
                         agent_id=conv_data['agent_id']
                         # Optionally pass agent_b_id, history_b if source handles it
                     )
+                    if comparative and 'agent_b_id' in conv_data:
+                        source.add_conversation(
+                            conversation_history=conv_data['history_b'],
+                            user_id=conv_data['user_id'],
+                            agent_id=conv_data['agent_b_id']
+                        )
+
                 except Exception as e:
                     print(f"    Error passing conversation {conv_id} to source {source_id}: {e}")
 
@@ -246,12 +253,12 @@ class TrustMarketSystem:
         # 2. Run Simulation & Get Feedback/Data
         if self.simulation_module:
             print("  Running simulation batch...")
-            try:
-                simulation_output = self.simulation_module.multi_turn_dialog()
-                print("  Simulation batch finished. Processing output...")
-                self._process_simulation_output(simulation_output)
-            except Exception as e:
-                print(f"  Error during simulation run or processing: {e}")
+            # try:
+            simulation_output = self.simulation_module.multi_turn_dialog()
+            print("  Simulation batch finished. Processing output...")
+            self._process_simulation_output(simulation_output)
+            # except Exception as e:
+            #     print(f"  Error during simulation run or processing: {e}")
                 # Optionally add more robust error handling (e.g., skip round?)
         else:
             print("  Warning: No simulation module registered. Skipping simulation step.")
@@ -259,7 +266,7 @@ class TrustMarketSystem:
         # 3. Run Information Source Evaluations
         print("  Running information source evaluations...")
         self._run_source_evaluations()
-
+        ipdb.set_trace()  # Debugging breakpoint
         # 4. Display Scores for the Round
         self.display_current_scores()
         print(f"--- Finished Evaluation Round {self.evaluation_round} ---")
@@ -270,7 +277,7 @@ class TrustMarketSystem:
         if not output:
             print("  No output received from simulation module.")
             return
-
+        # ipdb.set_trace()  # Debugging breakpoint
         # Process specific ratings
         if output.get("specific_ratings"):
             ratings_batch = output["specific_ratings"]
@@ -291,9 +298,12 @@ class TrustMarketSystem:
                     print(f"  Warning: Missing conversation data for specific rating index {i}.")
 
         # Process comparative winners
+        comparative = False
         if output.get("comparative_winners"):
             comparisons = output["comparative_winners"]
             print(f"  Processing {len(comparisons)} comparative results...")
+            # self.debug_print_comparisons(output)
+            comparative = True
             for comparison in comparisons:
                 self.process_comparative_feedback(comparison)
 
@@ -302,9 +312,34 @@ class TrustMarketSystem:
             conv_data_list = output["conversation_data"]
             print(f"  Recording {len(conv_data_list)} conversations...")
             for conv_data in conv_data_list:
-                self.record_conversation_data(conv_data)
+                self.record_conversation_data(conv_data, comparative=comparative)
 
         print("  Finished processing simulation output.")
+
+    def debug_print_comparisons(self, output):
+        comparisons = output.get("comparative_winners", [])
+        conv_data = output.get("conversation_data", [])
+        for i, (comparisons, conv_data) in enumerate(zip(comparisons, conv_data)):
+            print(f"  Comparison {i}: User {conv_data['user_id']} compared A={comparisons['agent_a_id']}, B={comparisons['agent_b_id']}")
+            print("    Winners:", comparisons['winners'])
+            print("\n" + "-"*50 + "\n")
+            print("    CONVERSATION HISTORY A:")
+            # Loop through the conversation history
+            for turn in conv_data.get('history', []):
+                if 'agent' in turn:
+                    print(f"      AGENT : {turn['agent']}")
+                if 'user' in turn:
+                    print(f"      USER  : {turn['user']}")
+            print("\n" + "-"*50 + "\n")
+            print("    CONVERSATION HISTORY B:")
+            # Loop through the conversation history
+            for turn in conv_data.get('history_b', []):
+                if 'agent' in turn:
+                    print(f"      AGENT : {turn['agent']}")
+                if 'user' in turn:
+                    print(f"      USER  : {turn['user']}")
+            print("\n" + "-"*50 + "\n")
+        ipdb.set_trace()  # Debugging breakpoint
 
 
     def _run_source_evaluations(self):
@@ -317,24 +352,24 @@ class TrustMarketSystem:
             # Check if it's time to evaluate
             if (self.evaluation_round - last_evaluated) >= frequency:
                 print(f"    Evaluating source: {source_id} (Last eval: {last_evaluated}, Freq: {frequency})")
-                try:
-                    # Let the source decide investments based on its internal logic/data
-                    investments = source.decide_investments(evaluation_round=self.evaluation_round)
+                # try:
+                # Let the source decide investments based on its internal logic/data
+                investments = source.decide_investments(evaluation_round=self.evaluation_round)
 
-                    if investments:
-                        print(f"      Source {source_id} decided {len(investments)} investments/divestments.")
-                        # Process the investments in the market
-                        self.trust_market.process_investments(source_id, investments)
-                    else:
-                        print(f"      Source {source_id} made no investment decisions this round.")
+                if investments:
+                    print(f"      Source {source_id} decided {len(investments)} investments/divestments.")
+                    # Process the investments in the market
+                    self.trust_market.process_investments(source_id, investments)
+                else:
+                    print(f"      Source {source_id} made no investment decisions this round.")
 
-                    # Record that this source was evaluated in this round
-                    self.source_last_evaluated[source_id] = self.evaluation_round
-                    evaluated_sources.append(source_id)
+                # Record that this source was evaluated in this round
+                self.source_last_evaluated[source_id] = self.evaluation_round
+                evaluated_sources.append(source_id)
 
-                except Exception as e:
-                    print(f"    Error evaluating source {source_id}: {str(e)}")
-                    # Optionally skip updating last_evaluated on error?
+                # except Exception as e:
+                #     print(f"    Error evaluating source {source_id}: {str(e)}")
+                #     # Optionally skip updating last_evaluated on error?
 
         if not evaluated_sources:
             print("    No information sources due for evaluation this round.")

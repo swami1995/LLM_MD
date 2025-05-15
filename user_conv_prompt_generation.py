@@ -141,13 +141,15 @@ class PromptGenerator:
         response = self.genai_client.models.generate_content(
             model=self.api_model_name, # Can use gemini-pro if you prefer, or make configurable
             config=types.GenerateContentConfig(
-                max_output_tokens=500,
                 temperature=0.7, # Tuned for good balance
                 top_p=0.9
             ),
             contents=[llm_prompt] # Use contents
         )
-
+        # ipdb.set_trace()
+        if response.text is None:
+            print("Error: No response from LLM.")
+            ipdb.set_trace()
         generated_text = response.text
         parts = generated_text.split("---")
 
@@ -459,9 +461,9 @@ Moreover, I'm also going to parse your response as follows, so please ensure eac
             '''
 """
         response = self.genai_client.models.generate_content(
-            model="gemini-2.0-flash", # Using pro for potentially better reasoning
+            model=self.api_model_name, # Using pro for potentially better reasoning
             config=types.GenerateContentConfig(
-                max_output_tokens=500,
+                # max_output_tokens=500,
                 temperature=0.6, # Slightly lower temp for more focused output
                 top_p=0.85
             ),
@@ -519,9 +521,9 @@ Here are some guidelines for generating the agent knowledge:
 
 
         response = self.genai_client.models.generate_content(
-            model="gemini-2.0-flash", # Using pro for potentially better knowledge generation
+            model=self.api_model_name, # Using pro for potentially better knowledge generation
             config=types.GenerateContentConfig(
-                max_output_tokens=600, # Allow slightly more tokens for agent knowledge
+                # max_output_tokens=600, # Allow slightly more tokens for agent knowledge
                 temperature=0.5, # Lower temperature for factual agent knowledge
                 top_p=0.8
             ),
@@ -567,14 +569,20 @@ Here are some guidelines for generating the agent knowledge:
                 tasks.append((j, profile))
 
         # Process in parallel using ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_task = {executor.submit(generate_single_prompt, task): task for task in tasks}
-            
-            for future in as_completed(future_to_task):
-                profile_idx, prompt = future.result()
+        parallel = True
+        if parallel:
+            with ThreadPoolExecutor(max_workers=50) as executor:
+                future_to_task = {executor.submit(generate_single_prompt, task): task for task in tasks}
+                
+                for future in as_completed(future_to_task):
+                    profile_idx, prompt = future.result()
+                    all_prompts[profile_idx].append(prompt)
+                    print(f" User Profile {profile_idx}: prompt finished")
+        else:
+            for task in tasks:
+                profile_idx, prompt = generate_single_prompt(task)
                 all_prompts[profile_idx].append(prompt)
                 print(f" User Profile {profile_idx}: prompt finished")
-
         return all_prompts
 
     def generate_prompts_from_objectives(self, objective_counts):
@@ -603,12 +611,13 @@ Here are some guidelines for generating the agent knowledge:
         return prompts
 # --- Example Usage ---
 api_key = os.environ.get("GEMINI_API_KEY")
-generator = PromptGenerator(api_key)
+api_model_name = 'gemini-2.5-pro-preview-05-06'
+generator = PromptGenerator(api_key, api_model_name)
 
 agent_profiles, user_profiles = load_profiles("saved_profiles")
 
 # Generate a batch of prompts with random objectives:
-bsz = 10
+bsz = 4
 # randomly sample 10 elements from user_profile
 # if user_profiles:
 #     user_profiles = random.sample(user_profiles, min(bsz, len(user_profiles)))
@@ -618,7 +627,7 @@ bsz = 10
 prompts = generator.generate_prompts_batch_profile(bsz, user_profiles)
 
 ### save the prompts (list of list of dicts (prompt structure) to a file)
-with open("generated_prompts.json", "w") as f:
+with open("generated_prompts_fixed.json", "w") as f:
     json.dump(prompts, f)
 
 # for prompt in prompts:

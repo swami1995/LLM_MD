@@ -31,7 +31,7 @@ def save_profiles(n, m, folder_name, profile_generator):
         else: # error handling
             print(f"Could not generate a valid agent profile for iteration {i}.")
 
-    agent_filename = os.path.join(folder_name, "agent_profiles.json")
+    agent_filename = os.path.join(folder_name, "agent_profiles_fixed.json")
     try:
         with open(agent_filename, 'w') as f:
             json.dump(agent_profiles, f, indent=4)  # Save the entire list
@@ -55,7 +55,7 @@ def save_profiles(n, m, folder_name, profile_generator):
             print(f"Could not generate a valid user profile for iteration {i}.")
 
 
-    user_filename = os.path.join(folder_name, "user_profiles.json")
+    user_filename = os.path.join(folder_name, "user_profiles_fixed.json")
     try:
         with open(user_filename, 'w') as f:
             json.dump(user_profiles, f, indent=4)  # Save the entire list
@@ -78,8 +78,8 @@ def load_profiles(folder_name):
         or if either file is not found.
     """
 
-    agent_filename = os.path.join(folder_name, "agent_profiles.json")
-    user_filename = os.path.join(folder_name, "user_profiles.json")
+    agent_filename = os.path.join(folder_name, "agent_profiles_fixed.json")
+    user_filename = os.path.join(folder_name, "user_profiles_fixed.json")
 
     agent_profiles = None
     user_profiles = None

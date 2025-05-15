@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple, Set, Optional, Union, Any
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import seaborn as sns # Optional for visualization
+import ipdb # Optional for debugging
 
 class TrustMarket:
     """
@@ -136,6 +137,7 @@ class TrustMarket:
             if dimension not in self.source_influence_capacity[source_id]:
                 continue
             old_agent_trust_scores[dimension] = {agent_id: sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments]) for agent_id in self.source_investments[source_id]}
+        ipdb.set_trace()
         for agent_id, dimension, amount, confidence in investments:
             if dimension not in self.dimensions:
                 # print(f"    Warning: Invalid dimension '{dimension}' for agent {agent_id}. Skipping.")
@@ -161,8 +163,6 @@ class TrustMarket:
                 if actual_divestment > 0.001: # Threshold to avoid tiny changes
                     # print(f"    Divested {-change_amount:.3f} from Agent {agent_id} on {dimension}")
                     
-
-
                     old_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension] 
                     self.source_investments[source_id][agent_id][dimension] -= actual_divestment
                     new_agent_trust_scores = sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments])
@@ -185,11 +185,12 @@ class TrustMarket:
 
                 if actual_investment > 0.001: # Threshold
                     self.source_investments[source_id][agent_id][dimension] += actual_investment
-                    new_agent_trust_score = sum([self.source_investments[s][agent_id][dimension].get(dimension, 0.0) for s in self.source_investments])
+                    new_agent_trust_score = sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments])
 
                     for other_agent_id in self.source_investments[source_id]:
                         if self.source_investments[source_id][other_agent_id][dimension] > 0:
                             # Redistribute invested influence to other agents
+                            ipdb.set_trace()
                             self.source_investments[source_id][other_agent_id][dimension] = (self.source_investments[source_id][other_agent_id][dimension]) * new_agent_trust_score / old_agent_trust_scores[dimension][agent_id]
 
                     new_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension]
@@ -371,7 +372,7 @@ class TrustMarket:
         adjustment = self.comparative_feedback_strength # Use configured strength
         affected_dimensions_a = set()
         affected_dimensions_b = set()
-
+        
         for dimension, winner in winners.items():
             if dimension not in self.dimensions: continue
 
@@ -382,12 +383,16 @@ class TrustMarket:
             if winner == 'A':
                 new_a = min(self.max_trust, score_a + adjustment)
                 new_b = max(self.min_trust, score_b - adjustment)
-                # print(f"    Dim '{dimension}': A wins ({score_a:.3f}->{new_a:.3f}, {score_b:.3f}->{new_b:.3f})")
+                # print('A wins')
+                print(f"    Dim '{dimension}': A wins ({score_a:.3f}->{new_a:.3f}, {score_b:.3f}->{new_b:.3f})")
             elif winner == 'B':
                 new_a = max(self.min_trust, score_a - adjustment)
                 new_b = min(self.max_trust, score_b + adjustment)
-                # print(f"    Dim '{dimension}': B wins ({score_a:.3f}->{new_a:.3f}, {score_b:.3f}->{new_b:.3f})")
+                # print('B wins')
+                print(f"    Dim '{dimension}': B wins ({score_a:.3f}->{new_a:.3f}, {score_b:.3f}->{new_b:.3f})")
             # Else (Tie): new_a, new_b remain unchanged
+            else:
+                print(f"    Dim '{dimension}': Tie (no change)")
 
             # Update if changed significantly
             if abs(new_a - score_a) > 0.001:
@@ -408,7 +413,7 @@ class TrustMarket:
                     'old_score': score_b, 'new_score': new_b,
                     'change_source': 'comparative_feedback', 'source_id': f"vs_{agent_a_id}"
                 })
-
+                
         # Apply correlations if enabled
         if self.use_dimension_correlations:
             if affected_dimensions_a:
@@ -559,10 +564,10 @@ class TrustMarket:
             for agent_id, dimensions in self.source_investments[source_id].items():
                 for dimension, amount in dimensions.items():
                     if amount > 0.001: # Threshold for significance
-                            endorsements.append({
-                                'agent_id': agent_id, 'dimension': dimension,
-                                'influence_amount': amount
-                            })
+                        endorsements.append({
+                            'agent_id': agent_id, 'dimension': dimension,
+                            'influence_amount': amount
+                        })
         return endorsements
 
     def summarize_market_state(self):

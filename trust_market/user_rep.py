@@ -8,6 +8,7 @@ from trust_market.auditor import BatchEvaluator # Use BatchEvaluator for compari
 # Assuming google.genai for LLM calls
 from google import genai
 from google.genai import types
+import ipdb
 
 # --- Base UserRepresentative (Simplified Logic) ---
 class UserRepresentative(InformationSource):
@@ -213,39 +214,50 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         Returns: Dict mapping dimensions to (rating_0_1, confidence) tuples.
         TODO : Make the compared pairs into a dictionary storing the corresponding scores for each agent pair within a round for caching purposes to avoid recomputing. 
+        TODO : Need to be more careful about keeping/carrying forward derived scores across evaluation rounds.
         """
+        print(f"\n--- UserRep {self.source_id} evaluating Agent {agent_id} for round {evaluation_round} ---") # DEBUG START
+
         dimensions_to_evaluate = dimensions or self.expertise_dimensions
         # Use cache if available and for the current round
         cache_key = (agent_id, tuple(sorted(dimensions_to_evaluate)), evaluation_round)
         if evaluation_round == self.last_evaluation_round and cache_key in self.agent_evaluation_cache:
-             # print(f"Cache hit for UserRep eval agent {agent_id} round {evaluation_round}")
-             return self.agent_evaluation_cache[cache_key]
+            print(f"DEBUG: Cache hit for UserRep eval agent {agent_id} round {evaluation_round}. Returning cached result.") # DEBUG CACHE
+            return self.agent_evaluation_cache[cache_key]
 
         # Reset comparison tracking if it's a new round
         if evaluation_round and evaluation_round != self.last_evaluation_round:
             #  self.derived_agent_scores = {} # Reset derived scores each round
-             self.compared_pairs = set()
-             self.last_evaluation_round = evaluation_round
-             print(f"UserRep {self.source_id} starting new evaluation round {evaluation_round}")
+            print(f"DEBUG: New evaluation round {evaluation_round}. Resetting derived scores and compared pairs.") # DEBUG ROUND RESET
+            # !!! IMPORTANT: Ensure this reset happens if needed. If you want scores to persist across rounds
+            #     in some way, the logic needs careful review. Let's assume reset per round for now.
+            self.compared_pairs = set()
+            self.last_evaluation_round = evaluation_round
+            print(f"UserRep {self.source_id} starting new evaluation round {evaluation_round}")
 
         # --- Start Evaluation Logic ---
         # Get base scores (from previous comparisons in this round or neutral)
         base_scores_0_1 = self.derived_agent_scores.get(agent_id, {})
+        print(f"DEBUG: Agent {agent_id} - Base derived scores for this round: {base_scores_0_1}") # DEBUG BASE
+
         base_scores_with_conf = {
-             dim: (score, 0.5) # Assign moderate confidence to derived scores
-             for dim, score in base_scores_0_1.items()
-             if dim in dimensions_to_evaluate
+            dim: (score, 0.5) # Assign moderate confidence to derived scores
+            for dim, score in base_scores_0_1.items()
+            if dim in dimensions_to_evaluate
         }
         if not base_scores_0_1: # Initialize if no prior derived score
-             base_scores_with_conf = {dim: (0.5, 0.3) for dim in dimensions_to_evaluate}
+            base_scores_with_conf = {dim: (0.5, 0.3) for dim in dimensions_to_evaluate}
+
+        print(f"DEBUG: Agent {agent_id} - Initial scores with confidence: {base_scores_with_conf}") # DEBUG BASE CONF
 
         agent_conversations = self.get_agent_conversations(agent_id)
-        min_convs = self.config.get('min_conversations_required', 3)
+        min_convs = self.config.get('min_conversations_required', 1)
 
-        if len(agent_conversations) < min_convs:
-             # print(f"Agent {agent_id} has too few conversations ({len(agent_conversations)} < {min_convs}) for holistic eval.")
-             # Return base score with reduced confidence
-             return {dim: (score, min(conf, 0.3)) for dim, (score, conf) in base_scores_with_conf.items()}
+        # if len(agent_conversations) < min_convs:
+        #     print(f"DEBUG: Agent {agent_id} has too few convs ({len(agent_conversations)}). Returning base scores with low conf.") # DEBUG LOW CONV
+        #     # print(f"Agent {agent_id} has too few conversations ({len(agent_conversations)} < {min_convs}) for holistic eval.")
+        #     # Return base score with reduced confidence
+        #     return {dim: (score, min(conf, 0.3)) for dim, (score, conf) in base_scores_with_conf.items()}
 
         # Find other agents with enough conversations to compare against
         other_agent_ids = self.observed_agents()
@@ -256,8 +268,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
              if len(other_convs) >= min_convs:
                  valid_comparison_agents.append((other_id, other_convs))
 
+        print(f"DEBUG: Agent {agent_id} - Found {len(valid_comparison_agents)} valid comparison agents.") # DEBUG PEERS
         if not valid_comparison_agents:
-             # print(f"No valid comparison agents found for agent {agent_id}.")
+             print(f"No valid comparison agents found for agent {agent_id}.")
              return base_scores_with_conf # Return base if no one to compare to
 
         # --- Select Comparison Subset ---
@@ -275,6 +288,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             #     comparison_agents_selected = new_comps + random.sample(old_comps, min(needed, len(old_comps)))
         else:
             comparison_agents_selected = valid_comparison_agents
+        selected_ids = [oid for oid, _ in comparison_agents_selected]
+        print(f"DEBUG: Agent {agent_id} - Selected comparison agents: {selected_ids}") # DEBUG SELECTED PEERS
 
         # --- Perform Comparisons ---
         accumulated_scores = defaultdict(list)
@@ -282,6 +297,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # print(f"UserRep {self.source_id} comparing agent {agent_id} against {[oid for oid, _ in comparison_agents_selected]}")
 
         for other_id, other_convs in comparison_agents_selected:
+            print(f"DEBUG: --> Comparing {agent_id} vs {other_id}") # DEBUG COMPARISON PAIR
             # if (agent_id, other_id) in self.compared_pairs: continue # Skip if already compared this round
 
             # self.compared_pairs.add((agent_id, other_id))
@@ -293,16 +309,22 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 other_convs, other_id,
                 dimensions_to_evaluate # Pass only relevant dimensions
             )
+            print(f"DEBUG: Raw comparison result ({agent_id} vs {other_id}): {comparison_results}") # DEBUG LLM RAW
 
             # Get pseudo-absolute scores from comparison
             derived_scores = self.evaluator.get_agent_scores(comparison_results, agent_id, other_id)
 
             # Accumulate scores for the target agent_id
             for dim in dimensions_to_evaluate:
-                 if dim in derived_scores.get(agent_id, {}):
-                      accumulated_scores[dim].append(derived_scores[agent_id][dim])
+                if dim in derived_scores.get(agent_id, {}):
+                    accumulated_scores[dim].append(derived_scores[agent_id][dim])
+                else:
+                    print(f"DEBUG WARNING: Agent {agent_id} not found in derived scores from comparison with {other_id}")
+
+
             comparison_count += 1
 
+        print(f"DEBUG: Agent {agent_id} - Accumulated scores from {comparison_count} comparisons: {dict(accumulated_scores)}") # DEBUG ACCUMULATED
         # --- Calculate Final Scores ---
         final_eval_scores = {}
         weight_new = self.config.get('new_evaluation_weight', 0.7)
@@ -314,51 +336,71 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 # Confidence reflects number of comparisons and base confidence
                 confidence = min(0.9, 0.4 + (comparison_count * 0.05) + base_conf * 0.1)
                 final_eval_scores[dim] = (final_score, confidence)
+                print(f"DEBUG: Agent {agent_id} Dim {dim}: new_avg={new_avg:.3f}, base={base_score:.3f} -> final={final_score:.3f}, conf={confidence:.3f}") # DEBUG FINAL CALC
             else: # No new comparison data for this dimension
                 final_eval_scores[dim] = (base_score, base_conf * 0.9) # Use base, reduce confidence slightly
+                print(f"DEBUG: Agent {agent_id} Dim {dim}: No new data. Using base={base_score:.3f}, final_conf={base_conf * 0.9:.3f}") # DEBUG FINAL BASE
 
         # Update derived scores cache for potential use by other agents' evals this round
         if agent_id not in self.derived_agent_scores: self.derived_agent_scores[agent_id] = {}
         for dim, (score, _) in final_eval_scores.items():
             self.derived_agent_scores[agent_id][dim] = score
 
+        print(f"DEBUG: Updated derived_agent_scores for round {evaluation_round}: {self.derived_agent_scores}") # DEBUG UPDATE DERIVED
         self.agent_evaluation_cache[cache_key] = final_eval_scores # Cache the final result
+        print(f"--- UserRep {self.source_id} finished evaluating Agent {agent_id}. Final Scores: {final_eval_scores} ---") # DEBUG END
         return final_eval_scores
 
 
     # Override decide_investments to use the holistic evaluation
     def decide_investments(self, evaluation_round=None):
-        """Makes investment decisions based on holistic comparative evaluation."""
+        """Makes investment decisions based on holistic comparative evaluation.
+        TODO: Median investment computation might not handle zero investments correctly. Not sure if it's a problem.
+        """
         print(f"UserRep {self.source_id} deciding investments for round {evaluation_round}.")
         investments = []
         if not self.market: return []
 
         # --- Fetch Market State ---
-        try:
-            available_influence = {}
-            allocated_influence = self.market.allocated_influence.get(self.source_id, {})
-            capacity = self.market.source_influence_capacity.get(self.source_id, {})
-            for dim in self.expertise_dimensions:
-                 available_influence[dim] = capacity.get(dim, 0.0) - allocated_influence.get(dim, 0.0)
+        # try:
+        # ipdb.set_trace()
+        available_influence = {}
+        allocated_influence = self.market.allocated_influence.get(self.source_id, {})
+        capacity = self.market.source_influence_capacity.get(self.source_id, {})
+        for dim in self.expertise_dimensions:
+            available_influence[dim] = capacity.get(dim, 0.0) - allocated_influence.get(dim, 0.0)
 
-            current_endorsements = self.market.get_source_endorsements(self.source_id)
-            current_investments = defaultdict(lambda: defaultdict(float))
-            for endo in current_endorsements:
-                if not current_investments[endo['agent_id']]['dimension']:
-                    current_investments[endo['agent_id']][endo['dimension']] = 0.0
-                current_investments[endo['agent_id']][endo['dimension']] += endo['influence_amount']
+        current_endorsements = self.market.get_source_endorsements(self.source_id)
+        current_investments = defaultdict(lambda: defaultdict(lambda: 0.0))
+        for endo in current_endorsements:
+            if not current_investments[endo['agent_id']]['dimension']:
+                current_investments[endo['agent_id']][endo['dimension']] = 0.0
+            current_investments[endo['agent_id']][endo['dimension']] += endo['influence_amount']
 
-            market_scores = { # Fetch scores for agents we have conversations for
-                agent_id: self.market.get_agent_trust(agent_id)
-                for agent_id in self.agent_conversations.keys() # Use agents we observed
-                if self.market.get_agent_trust(agent_id) # Check agent exists in market
-            }
+        market_scores = { # Fetch scores for agents we have conversations for
+            agent_id: self.market.get_agent_trust(agent_id)
+            for agent_id in self.agent_conversations.keys() # Use agents we observed
+            if self.market.get_agent_trust(agent_id) # Check agent exists in market
+        }
+    
+        # Calculate total and median current investments per dimension
+        total_current_investment = {dim: 0.0 for dim in self.expertise_dimensions}
+        median_current_investment = {}
 
-            total_current_investment = {dim: sum(current_investments[aid][dim] for aid in current_investments) for dim in self.expertise_dimensions}
-            median_current_investment = {dim: np.median([current_investments[aid][dim] for aid in current_investments]) for dim in self.expertise_dimensions}
-        except Exception as e:
-            print(f"Error fetching market state for UserRep {self.source_id}: {e}")
-            return []
+        for dim in self.expertise_dimensions:
+            # Extract all non-zero investment amounts for this dimension
+            amounts = [current_investments[agent_id].get(dim, 0.0) for agent_id in current_investments]
+            
+            # Calculate total
+            total_current_investment[dim] = sum(amounts)
+            
+            # Calculate median of non-zero values
+            non_zero_amounts = [a for a in amounts if a > 0]
+            median_current_investment[dim] = np.median(non_zero_amounts) if non_zero_amounts else 0.0
+        # ipdb.set_trace()
+        # except Exception as e:
+        #     print(f"Error fetching market state for UserRep {self.source_id}: {e}")
+        #     return []
 
         # --- Evaluate Agents using Holistic Method ---
         own_evaluations = {}
@@ -369,12 +411,13 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         print(f"UserRep {self.source_id} evaluating {len(agents_to_evaluate)} agents holistically...")
         for agent_id in agents_to_evaluate:
-             if agent_id not in market_scores: continue # Skip if agent not in market
-             if len(self.agent_conversations[agent_id]) < 3: continue # Skip if no conversations
-             eval_result = self.evaluate_agent(agent_id, self.expertise_dimensions, evaluation_round)
-             if eval_result:
-                 own_evaluations[agent_id] = eval_result
-
+            if agent_id not in market_scores: continue # Skip if agent not in market
+            if len(self.agent_conversations[agent_id]) < 2: continue # Skip if no conversations
+            eval_result = self.evaluate_agent(agent_id, self.expertise_dimensions, evaluation_round)
+            if eval_result:
+                own_evaluations[agent_id] = eval_result
+            # ipdb.set_trace()
+        # ipdb.set_trace()
         if len(own_evaluations) <= 1:
             print(f"UserRep {self.source_id}: No agents successfully evaluated.")
             return []
@@ -429,6 +472,11 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                         'dimension_importance': segment_weight,
                         'current_investment': current_investments.get(agent_id, {}).get(dimension, 0.0)
                     })
+                # ipdb.set_trace()
+                # print things to debug
+                print(f"UserRep {self.source_id} found opportunity for agent {agent_id} in dimension {dimension}")
+                print(investment_opportunities[dimension][-1]) # Print last opportunity added
+
 
         # --- Prepare Investment Actions ---
         self._calculate_investment_strategy(investment_opportunities, total_current_investment)
@@ -444,17 +492,46 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     # Make sure they reference self.config, self.invest_multiplier, self.divest_multiplier correctly.
 
     def _get_relative_positions(self, evaluations):
-        """Calculates relative position (0-1) based on score ranking."""
-        # (Same implementation as in Auditor)
-        if not evaluations or len(evaluations) <= 1:
-             return {agent_id: 0.5 for agent_id in evaluations}
-        sorted_agents = sorted(evaluations.keys(), key=lambda aid: evaluations[aid], reverse=True)
-        positions = {}
-        num_agents = len(sorted_agents)
-        for i, agent_id in enumerate(sorted_agents):
-             positions[agent_id] = (num_agents - 1 - i) / (num_agents - 1) if num_agents > 1 else 0.5
-        return positions
+        """
+        Calculates relative position (0-1) based on ranking OR Min-Max scaling.
+        Assumes valid numeric inputs in evaluations.
+        """
+        # --- Control Flag ---
+        use_min_max_scaling = True # <<< MODIFY MANUALLY TO SWITCH
+        # --------------------
 
+        if not evaluations: return {}
+        num_agents = len(evaluations)
+        if num_agents == 1: return {agent_id: 0.5 for agent_id in evaluations}
+
+        agent_ids = list(evaluations.keys())
+
+        if use_min_max_scaling:
+            # --- Min-Max Scaling Logic (No Error Checks) ---
+            scores = [evaluations[aid] for aid in agent_ids] # Assumes scores are numeric
+            min_score, max_score = min(scores), max(scores)
+            score_range = max_score - min_score
+
+            if score_range == 0: # All scores are identical
+                return {aid: 0.5 for aid in agent_ids}
+            else:
+                # Normalize scores to 0-1
+                return {
+                    aid: (evaluations[aid] - min_score) / score_range
+                    for aid in agent_ids
+                }
+        else:
+            # --- Original Ranking Logic (No Error Checks) ---
+            # Sort agent IDs by score, highest first (assumes comparable scores)
+            sorted_agent_ids = sorted(agent_ids, key=lambda aid: evaluations[aid], reverse=True)
+
+            denominator = num_agents - 1
+            # Calculate rank-based position (0 to 1, higher score closer to 1)
+            return {
+                agent_id: (denominator - i) / denominator
+                for i, agent_id in enumerate(sorted_agent_ids)
+            }
+    
     def _calculate_investment_strategy(self, investment_opportunities, total_current_investments):
         """Calculates normalized investment signals."""
         # (Same implementation as in Auditor)
