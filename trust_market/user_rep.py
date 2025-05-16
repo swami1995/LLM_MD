@@ -472,10 +472,12 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                         'dimension_importance': segment_weight,
                         'current_investment': current_investments.get(agent_id, {}).get(dimension, 0.0)
                     })
-                # ipdb.set_trace()
-                # print things to debug
-                print(f"UserRep {self.source_id} found opportunity for agent {agent_id} in dimension {dimension}")
-                print(investment_opportunities[dimension][-1]) # Print last opportunity added
+                    # ipdb.set_trace()
+                    # print things to debug
+                    print(f"UserRep {self.source_id} found opportunity for agent {agent_id} in dimension {dimension}")
+                    print(investment_opportunities[dimension][-1]) # Print last opportunity added
+                else: 
+                    print("DEBUG: No significant disagreement between agent {agent_id} position and market state in dimension {dimension}.") # DEBUG DISAGREE
 
 
         # --- Prepare Investment Actions ---

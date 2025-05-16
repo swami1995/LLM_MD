@@ -672,7 +672,10 @@ Customer (you):
                     chat = self.chat_sessions[session_key]
                     
                     # Get the most recent agent message
-                    agent_message = history[-1].get('agent', 'What else can I help you with?')
+                    try:
+                        agent_message = history[-1].get('agent', 'What else can I help you with?')
+                    except:
+                        ipdb.set_trace()
                     
                     # Send the agent's message to get the user's response
                     chat_response = chat.send_message(f"""Customer Service Agent: 
@@ -767,6 +770,15 @@ Customer (you):
 
         if self.llm_source == "api":
             if parallel_api_calls:
+                current_batch_pairs = []
+                if conversation_ids is not None and conversation_histories is not None: # Ensure lists are valid
+                    current_batch_pairs = [(user_ids[i], conversation_ids[i]) for i in range(len(user_ids))]
+                    from collections import Counter
+                    pair_counts = Counter(current_batch_pairs)
+                    duplicates = {pair: count for pair, count in pair_counts.items() if count > 1}
+                    if duplicates:
+                        print(f"DEBUG: Duplicate (user_id, conversation_id) pairs in current batch: {duplicates}")
+
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor:
                     if use_chat_api and conversation_ids is not None and conversation_histories is not None:
                         future_results = executor.map(
@@ -1317,11 +1329,19 @@ class CustomerSupportModel:
             else:
                 # Sample users with replacement, then pick a conv for each
                 sampled_user_ids = random.choices(valid_users, k=batch_size)
+                # get unique sampled user IDs and make a dict out of it where user ID is key and the value is an empty list
+                sampled_conv_ids_unique = {} # Will hold conversation IDs for each sampled user
                 for u_id in sampled_user_ids:
+                    if u_id not in sampled_conv_ids_unique:
+                        sampled_conv_ids_unique[u_id] = []
                     if self.user_conversations[u_id]: # Check if list is not empty
-                         sampled_conv_ids.append(random.choice(self.user_conversations[u_id]))
+                        conv_id = random.choice(self.user_conversations[u_id])
+                        while conv_id in sampled_conv_ids_unique[u_id]:
+                            conv_id = random.choice(self.user_conversations[u_id])
+                        sampled_conv_ids_unique[u_id].append(conv_id)
+                        sampled_conv_ids.append(conv_id)
                     else:
-                         sampled_conv_ids.append(None) # Fallback if somehow list is empty
+                        sampled_conv_ids.append(None) # Fallback if somehow list is empty
 
         # If no prompts, just sample random users
         else:

@@ -26,7 +26,7 @@ class TrustMarket:
         # Agent scores: agent_id -> dimension -> score (0.0 to 1.0)
         self.agent_trust_scores = defaultdict(lambda: {dim: 0.5 for dim in self.dimensions})
         # Source investments: source_id -> agent_id -> dimension -> amount
-        self.source_investments = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+        self.source_investments = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: 0.0)))
         # Source capacity: source_id -> dimension -> total capacity
         self.source_influence_capacity = defaultdict(lambda: {dim: 0.0 for dim in self.dimensions}) # Start at 0, updated by add_source
         # Source available: source_id -> dimension -> available capacity
@@ -102,7 +102,6 @@ class TrustMarket:
 
             # Only update if capacity is positive to avoid zeroing out existing
             if capacity > 0:
-                self.source_influence_capacity[source_id][dimension] = capacity
                 # Assume initially all capacity is available, none allocated
                 self.source_available_capacity[source_id][dimension] = capacity
                 self.allocated_influence[source_id][dimension] = 0.0 # Reset allocation on add/update
@@ -132,12 +131,16 @@ class TrustMarket:
         affected_agents_dimensions = set() # Track (agent_id, dimension) pairs needing recalc
 
         print(f"  Processing {len(investments)} investments from source {source_id}...")
-        old_agent_trust_scores = {dimension: {} for dimension in self.dimensions}
-        for dimension in self.dimensions:
-            if dimension not in self.source_influence_capacity[source_id]:
-                continue
-            old_agent_trust_scores[dimension] = {agent_id: sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments]) for agent_id in self.source_investments[source_id]}
-        ipdb.set_trace()
+        
+        old_agent_trust_scores = {dimension: {agent_id: self.agent_trust_scores[agent_id][dimension] for agent_id in self.agent_trust_scores} for dimension in self.dimensions}
+
+        # old_agent_trust_scores = {dimension: {} for dimension in self.dimensions}
+        # for dimension in self.dimensions:
+        #     if dimension not in self.source_influence_capacity[source_id]:
+        #         continue
+        #     old_agent_trust_scores[dimension] = {agent_id: sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments]) for agent_id in self.source_investments[source_id]}
+            
+        # ipdb.set_trace()
         for agent_id, dimension, amount, confidence in investments:
             if dimension not in self.dimensions:
                 # print(f"    Warning: Invalid dimension '{dimension}' for agent {agent_id}. Skipping.")
@@ -190,7 +193,7 @@ class TrustMarket:
                     for other_agent_id in self.source_investments[source_id]:
                         if self.source_investments[source_id][other_agent_id][dimension] > 0:
                             # Redistribute invested influence to other agents
-                            ipdb.set_trace()
+                            # ipdb.set_trace()
                             self.source_investments[source_id][other_agent_id][dimension] = (self.source_investments[source_id][other_agent_id][dimension]) * new_agent_trust_score / old_agent_trust_scores[dimension][agent_id]
 
                     new_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension]

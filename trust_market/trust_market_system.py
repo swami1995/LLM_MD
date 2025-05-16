@@ -266,7 +266,7 @@ class TrustMarketSystem:
         # 3. Run Information Source Evaluations
         print("  Running information source evaluations...")
         self._run_source_evaluations()
-        ipdb.set_trace()  # Debugging breakpoint
+        # ipdb.set_trace()  # Debugging breakpoint
         # 4. Display Scores for the Round
         self.display_current_scores()
         print(f"--- Finished Evaluation Round {self.evaluation_round} ---")

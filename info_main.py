@@ -19,6 +19,7 @@ import ipdb
 # For Gemini API, genai client is initialized within agent classes if needed
 # max dialog rounds = 3
 # user rep frequency = 3
+# user rep min conversations = 3 -> 1
 
 ## main function
 if __name__ == "__main__":
@@ -57,8 +58,9 @@ if __name__ == "__main__":
              print("Warning: GEMINI_API_KEY environment variable not set. Using hardcoded key (for testing ONLY).")
 
     if args.llm_source == 'api':
-        # args.api_model_name = "gemini-2.5-pro-preview-05-06"
-        args.api_model_name = "gemini-2.5-flash-preview-04-17" 
+        args.api_model_name = "gemini-2.5-pro-preview-05-06"
+        # args.api_model_name = "gemini-2.5-flash-preview-04-17" 
+        # args.api_model_name = "gemini-2.0-flash-lite"
         # args.api_model_name = "gemini-2.0-flash"
 
     # Validate chat API usage
@@ -88,8 +90,8 @@ if __name__ == "__main__":
         }
 
     # --- Load Profiles & Prompts ---
-    agent_profiles_all, user_profiles_all = load_profiles("saved_profiles") if os.path.exists("saved_profiles/agent_profiles.json") else ([], [])
-    conversation_prompts = load_prompts("generated_prompts.json") if os.path.exists("generated_prompts.json") else []
+    agent_profiles_all, user_profiles_all = load_profiles("saved_profiles") if os.path.exists("saved_profiles/agent_profiles_fixed.json") else ([], [])
+    conversation_prompts = load_prompts("generated_prompts_fixed.json") if os.path.exists("generated_prompts_fixed.json") else []
 
     # Default profiles if none loaded
     if not agent_profiles_all:
