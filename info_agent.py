@@ -7,7 +7,7 @@ from collections import defaultdict
 import concurrent.futures
 from google import genai
 from google.genai import types
-from transformers import AutoModelForCausalLM, AutoTokenizer
+# from transformers import AutoModelForCausalLM, AutoTokenizer
 import ipdb
 
 parallel_api_calls = True

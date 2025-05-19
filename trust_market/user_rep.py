@@ -460,6 +460,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 opportunity_strength = disagreement_magnitude * confidence * segment_weight
 
                 min_disagreement_threshold = 0.05
+                # ipdb.set_trace() # DEBUG DISAGREE
                 if disagreement_magnitude >= min_disagreement_threshold:
                     investment_opportunities[dimension].append({
                         'agent_id': agent_id, 'dimension': dimension,
@@ -477,7 +478,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                     print(f"UserRep {self.source_id} found opportunity for agent {agent_id} in dimension {dimension}")
                     print(investment_opportunities[dimension][-1]) # Print last opportunity added
                 else: 
-                    print("DEBUG: No significant disagreement between agent {agent_id} position and market state in dimension {dimension}.") # DEBUG DISAGREE
+                    print(f"DEBUG: No significant disagreement between agent {agent_id} position and market state in dimension {dimension}.") # DEBUG DISAGREE
 
 
         # --- Prepare Investment Actions ---
@@ -540,9 +541,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         for dimension, opportunities in investment_opportunities.items():
             if not opportunities: continue
             positive_opps = [opp for opp in opportunities if opp['direction'] > 0]
-            total_pos_strength = sum(opp['strength'] for opp in positive_opps) or 1.0
+            total_pos_strength = sum(opp['strength'] for opp in positive_opps)# or 1.0
             # Need total current investment *in this dimension* across all agents we invested in
-            total_current_dim = total_current_investments.get(dimension, 0.0) or 1.0
+            total_current_dim = total_current_investments.get(dimension, 0.0)# or 1.0
 
             for opp in opportunities:
                 target_allocation = 0.0
@@ -574,7 +575,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                         if amount_to_divest > 0.01:
                             divestments.append((agent_id, dimension, -amount_to_divest, None))
                             total_available_after_divest[dimension] = total_available_after_divest.get(dimension, 0.0) + amount_to_divest
-
+        
         # Investments
         for dimension, opportunities in investment_opportunities.items():
             if dimension not in self.expertise_dimensions: continue
@@ -592,5 +593,5 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 amount_to_invest = available_for_dim * proportion * self.config.get('invest_multiplier', 0.2)
                 if amount_to_invest > 0.01:
                     investments.append((opp['agent_id'], dimension, amount_to_invest, opp['confidence']))
-
+        ipdb.set_trace() # DEBUG INVESTMENTS
         return divestments + investments

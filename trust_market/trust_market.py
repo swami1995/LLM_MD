@@ -102,6 +102,7 @@ class TrustMarket:
 
             # Only update if capacity is positive to avoid zeroing out existing
             if capacity > 0:
+                self.source_influence_capacity[source_id][dimension] = capacity
                 # Assume initially all capacity is available, none allocated
                 self.source_available_capacity[source_id][dimension] = capacity
                 self.allocated_influence[source_id][dimension] = 0.0 # Reset allocation on add/update
@@ -165,6 +166,7 @@ class TrustMarket:
 
                 if actual_divestment > 0.001: # Threshold to avoid tiny changes
                     # print(f"    Divested {-change_amount:.3f} from Agent {agent_id} on {dimension}")
+                    # There are also market scores that we need to account for. not just investments. 
                     
                     old_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension] 
                     self.source_investments[source_id][agent_id][dimension] -= actual_divestment
@@ -187,8 +189,10 @@ class TrustMarket:
                 actual_investment = min(amount, available_cap)
 
                 if actual_investment > 0.001: # Threshold
+                    old_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension]
                     self.source_investments[source_id][agent_id][dimension] += actual_investment
                     new_agent_trust_score = sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments])
+                    ipdb.set_trace()
 
                     for other_agent_id in self.source_investments[source_id]:
                         if self.source_investments[source_id][other_agent_id][dimension] > 0:
@@ -573,7 +577,7 @@ class TrustMarket:
                         })
         return endorsements
 
-    def summarize_market_state(self):
+    def summarize_market_state(self, information_sources):
         """Get a summary of the current market state."""
         # Keep existing logic, ensure calculations handle missing agents/dims gracefully
         agent_scores_summary = {}
@@ -597,7 +601,7 @@ class TrustMarket:
         all_source_ids = list(self.source_influence_capacity.keys())
         for source_id in all_source_ids:
             source_influence_summary[source_id] = {
-                "type": next((s.source_type for s_id, s in self.information_sources.items() if s_id == source_id), "Unknown"), # Need access to system's info sources
+                "type": next((s.source_type for s_id, s in information_sources.items() if s_id == source_id), "Unknown"), # Need access to system's info sources
                 "capacity": dict(self.source_influence_capacity.get(source_id, {})),
                 "allocated": dict(self.allocated_influence.get(source_id, {})),
                 "available": dict(self.source_available_capacity.get(source_id, {}))

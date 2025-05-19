@@ -446,7 +446,7 @@ class TrustMarketSystem:
 
     def summarize_market_state(self):
         """Get a summary of the current market state (delegated to market)."""
-        summary = self.trust_market.summarize_market_state()
+        summary = self.trust_market.summarize_market_state(self.information_sources)
         # Add system-level info
         summary['system_evaluation_round'] = self.evaluation_round
         summary['num_registered_info_sources'] = len(self.information_sources)
