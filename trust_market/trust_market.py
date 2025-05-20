@@ -45,6 +45,30 @@ class TrustMarket:
         self.max_trust = config.get('max_trust', 1.0) # Maximum trust score
         self.min_trust = config.get('min_trust', 0.0) # Minimum trust score
 
+        self.agent_amm_params = defaultdict(lambda: {'R': 0.0, 'T': 0.0, 'K': 0.0, 'total_supply': 0.0})
+        # For simplicity, we won't track individual share ownership here, but assume sellers sell back to the AMM.
+        self.amm_transactions_log = []
+
+        # --- Oracle Configuration for AMM ---
+        # Mechanism: 'adjust_treasury', 'adjust_reserve', 'oracle_trades' (oracle_trades not fully implemented here)
+        self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_reserve'), 'regulator': config.get('regulator_amm', 'adjust_reserve')}
+        self.oracle_config = config.get('oracle_config', {
+            'trust_threshold_low_treasury': 0.3,
+            'trust_threshold_high_treasury': 0.7,
+            'adjustment_amount_T_shares': 10.0, # Number of shares to mint/burn
+            'trust_threshold_low_reserve': 0.3,
+            'trust_threshold_high_reserve': 0.7,
+            'adjustment_percentage_R': 0.05, # 5% change in R
+            'min_R_after_adj': 1.0, # Minimum reserve after negative adjustment
+            'min_T_after_adj': 1.0  # Minimum treasury shares after negative adjustment
+        })
+        # The way to do it would be : Trust score = Price = R/T
+        # Thus, investments add to R and subtract from T using the following rule :
+        # \text{cost}(q) = R_1 - R_0 = \frac{R_0\,T_0}{T_0-q} - R_0 = \frac{R_0\,q}{T_0 - q}}.
+        # Likewise, divestments subtract from R and add to T using the following rule : 
+        # \text{payout}(q) = R_0 - \frac{R_0\,T_0}{T_0+q} = \frac{R_0\,q}{T_0 + q}}.
+        # 
+
         # --- Performance & History ---
         self.agent_performance = defaultdict(lambda: defaultdict(list)) # For external perf metrics
         self.temporal_db = {
