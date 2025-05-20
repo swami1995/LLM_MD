@@ -63,11 +63,19 @@ class TrustMarket:
             'min_T_after_adj': 1.0  # Minimum treasury shares after negative adjustment
         })
         # The way to do it would be : Trust score = Price = R/T
+        # The AMM is a simple constant product market maker (CPMM) model.
+        # The AMM uses a constant product formula: R * T = K, where K is a constant.
+        # R is the reserve (liquidity) and T is the treasury (shares).
         # Thus, investments add to R and subtract from T using the following rule :
         # \text{cost}(q) = R_1 - R_0 = \frac{R_0\,T_0}{T_0-q} - R_0 = \frac{R_0\,q}{T_0 - q}}.
         # Likewise, divestments subtract from R and add to T using the following rule : 
         # \text{payout}(q) = R_0 - \frac{R_0\,T_0}{T_0+q} = \frac{R_0\,q}{T_0 + q}}.
-        # 
+        # where q is the amount of shares bought/sold by an investor.
+        # Furthermore, the oracles, i.e, the user ratings and the regulator provide comparative feedback. 
+        # The AMM model uses the feedback to adjust the trust scores of the agents depending on the oracle_influence_mechanisms. 
+        # 'adjust_treasury' means that the AMM will adjust the treasury shares based on the feedback.
+        # 'adjust_reserve' means that the AMM will adjust the reserve based on the feedback.
+        
 
         # --- Performance & History ---
         self.agent_performance = defaultdict(lambda: defaultdict(list)) # For external perf metrics
