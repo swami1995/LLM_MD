@@ -7,6 +7,23 @@ import matplotlib.pyplot as plt
 import seaborn as sns # Optional for visualization
 import ipdb # Optional for debugging
 
+# Trust markets are a way to combine curation, recommendation and scoring systems in a reputation system.
+# They are used to track the trustworthiness of agents based on various inputs, such as user feedback, regulator ratings, and comparative feedback.
+# The trust market uses an automated market maker (AMM) model to adjust the trust scores of agents based on the investments made by sources.
+# The AMM is a simple constant product market maker (CPMM) model.
+# The AMM model uses a constant product formula: R * T = K, where K is a constant.
+# R is the reserve (liquidity) and T is the treasury (shares). 
+# Trust score = Price = R/T
+# Thus, investments add to R and subtract from T using the following rule :
+# \text{cost}(q) = R_1 - R_0 = \frac{R_0\,T_0}{T_0-q} - R_0 = \frac{R_0\,q}{T_0 - q}}.
+# Likewise, divestments subtract from R and add to T using the following rule : 
+# \text{payout}(q) = R_0 - \frac{R_0\,T_0}{T_0+q} = \frac{R_0\,q}{T_0 + q}}.
+# where q is the amount of shares bought/sold by an investor.
+# Furthermore, the oracles, i.e, the user ratings and the regulator provide comparative feedback. 
+# The AMM model uses the feedback to adjust the trust scores of the agents depending on the oracle_influence_mechanisms. 
+# 'adjust_treasury' means that the AMM will adjust the treasury shares based on the feedback.
+# 'adjust_reserve' means that the AMM will adjust the reserve based on the feedback.
+
 class TrustMarket:
     """
     Core market system for tracking agent trust scores based on diverse inputs
@@ -39,43 +56,19 @@ class TrustMarket:
         self.primary_source_weight = config.get('primary_source_weight', 1.5) # Weight for primary source investments
         self.secondary_source_weight = config.get('secondary_source_weight', 1.0) # Weight for others
         self.rating_scale = config.get('rating_scale', 5) # Scale used in user feedback (e.g., 1-5)
-        self.user_feedback_strength = config.get('user_feedback_strength', 0.05) # Impact of one rating
-        self.comparative_feedback_strength = config.get('comparative_feedback_strength', 0.02) # Impact of one win/loss
+        self.user_feedback_strength = config.get('user_feedback_strength', 0.02) # Impact of one rating
+        self.comparative_feedback_strength = config.get('comparative_feedback_strength', 0.01) # Impact of one win/loss
         self.trust_decay_rate = config.get('trust_decay_rate', 0.99) # Rate per round towards neutral
         self.max_trust = config.get('max_trust', 1.0) # Maximum trust score
         self.min_trust = config.get('min_trust', 0.0) # Minimum trust score
 
-        self.agent_amm_params = defaultdict(lambda: {'R': 0.0, 'T': 0.0, 'K': 0.0, 'total_supply': 0.0})
+        self.agent_amm_params = defaultdict(lambda: {dim:{'R': 0.0, 'T': 0.0, 'K': 0.0, 'total_supply': 0.0} for dim in self.dimensions})
         # For simplicity, we won't track individual share ownership here, but assume sellers sell back to the AMM.
         self.amm_transactions_log = []
 
         # --- Oracle Configuration for AMM ---
-        # Mechanism: 'adjust_treasury', 'adjust_reserve', 'oracle_trades' (oracle_trades not fully implemented here)
+        # Mechanism: 'adjust_treasury', 'adjust_reserve', 'oracle_trades' # defaulting to 'adjust_reserve' for now. Others are not implemented yet.
         self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_reserve'), 'regulator': config.get('regulator_amm', 'adjust_reserve')}
-        self.oracle_config = config.get('oracle_config', {
-            'trust_threshold_low_treasury': 0.3,
-            'trust_threshold_high_treasury': 0.7,
-            'adjustment_amount_T_shares': 10.0, # Number of shares to mint/burn
-            'trust_threshold_low_reserve': 0.3,
-            'trust_threshold_high_reserve': 0.7,
-            'adjustment_percentage_R': 0.05, # 5% change in R
-            'min_R_after_adj': 1.0, # Minimum reserve after negative adjustment
-            'min_T_after_adj': 1.0  # Minimum treasury shares after negative adjustment
-        })
-        # The way to do it would be : Trust score = Price = R/T
-        # The AMM is a simple constant product market maker (CPMM) model.
-        # The AMM uses a constant product formula: R * T = K, where K is a constant.
-        # R is the reserve (liquidity) and T is the treasury (shares).
-        # Thus, investments add to R and subtract from T using the following rule :
-        # \text{cost}(q) = R_1 - R_0 = \frac{R_0\,T_0}{T_0-q} - R_0 = \frac{R_0\,q}{T_0 - q}}.
-        # Likewise, divestments subtract from R and add to T using the following rule : 
-        # \text{payout}(q) = R_0 - \frac{R_0\,T_0}{T_0+q} = \frac{R_0\,q}{T_0 + q}}.
-        # where q is the amount of shares bought/sold by an investor.
-        # Furthermore, the oracles, i.e, the user ratings and the regulator provide comparative feedback. 
-        # The AMM model uses the feedback to adjust the trust scores of the agents depending on the oracle_influence_mechanisms. 
-        # 'adjust_treasury' means that the AMM will adjust the treasury shares based on the feedback.
-        # 'adjust_reserve' means that the AMM will adjust the reserve based on the feedback.
-        
 
         # --- Performance & History ---
         self.agent_performance = defaultdict(lambda: defaultdict(list)) # For external perf metrics
@@ -123,7 +116,7 @@ class TrustMarket:
         Add a new information source to the market with initial influence capacity.
         """
         print(f"  Adding source {source_id} (Type: {source_type}, Primary: {is_primary})")
-        if source_id in self.source_influence_capacity:
+        if source_id in self.source_available_capacity:
             print(f"  Warning: Source {source_id} already exists. Updating capacity.")
 
         # Initialize/Update influence for valid dimensions
@@ -144,6 +137,20 @@ class TrustMarket:
         if is_primary or source_type in self.primary_sources:
             self.primary_sources.add(source_id)
             print(f"    - Source {source_id} marked as primary.")
+        
+    def ensure_agent_dimension_initialized_in_amm(self, agent_id: str, dimension: str) -> None:
+        """
+        Ensure the agent and dimension are initialized in the AMM.
+        This is important for AMM operations to work correctly.
+        """
+        if agent_id not in self.agent_amm_params or (self.agent_amm_params[agent_id][dimension]['R'] == 0 and self.agent_amm_params[agent_id][dimension]['T'] == 0):
+            # Initialize AMM parameters for this agent and dimension
+            self.agent_amm_params[agent_id][dimension]['R'] = self.config.get('initial_R_oracle', 10.0)
+            self.agent_amm_params[agent_id][dimension]['T'] = self.config.get('initial_T_oracle', 20.0)
+            self.agent_amm_params[agent_id][dimension]['K'] = self.agent_amm_params[agent_id][dimension]['R'] * self.agent_amm_params[agent_id][dimension]['T']
+            self.agent_amm_params[agent_id][dimension]['total_supply'] = self.agent_amm_params[agent_id][dimension]['T']
+            # Initialize trust score from AMM price
+            self.agent_trust_scores[agent_id][dimension] = self.agent_amm_params[agent_id][dimension]['R'] / self.agent_amm_params[agent_id][dimension]['T']
 
 
     def process_investments(self, source_id: str, investments: List[Tuple]) -> None:
@@ -157,36 +164,29 @@ class TrustMarket:
                     Amount > 0 is investment, Amount < 0 is divestment.
                     Confidence is currently logged but not used in core calculation.
         """
-        if source_id not in self.source_influence_capacity:
+        if source_id not in self.source_available_capacity:
             print(f"Warning: Source {source_id} not registered. Ignoring investments.")
             return
 
-        affected_agents_dimensions = set() # Track (agent_id, dimension) pairs needing recalc
+        affected_agents_dimensions = defaultdict(list) # Track (agent_id, dimension) pairs needing recalc
 
         print(f"  Processing {len(investments)} investments from source {source_id}...")
         
         old_agent_trust_scores = {dimension: {agent_id: self.agent_trust_scores[agent_id][dimension] for agent_id in self.agent_trust_scores} for dimension in self.dimensions}
 
-        # old_agent_trust_scores = {dimension: {} for dimension in self.dimensions}
-        # for dimension in self.dimensions:
-        #     if dimension not in self.source_influence_capacity[source_id]:
-        #         continue
-        #     old_agent_trust_scores[dimension] = {agent_id: sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments]) for agent_id in self.source_investments[source_id]}
-            
         # ipdb.set_trace()
         for agent_id, dimension, amount, confidence in investments:
+            # ipdb.set_trace()
             if dimension not in self.dimensions:
                 # print(f"    Warning: Invalid dimension '{dimension}' for agent {agent_id}. Skipping.")
                 continue
-            if dimension not in self.source_influence_capacity[source_id]:
+            if dimension not in self.source_available_capacity[source_id]:
                 print(f"    Warning: Source {source_id} has no capacity for dimension '{dimension}'. Skipping.")
                 continue
 
             current_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
             available_cap = self.source_available_capacity[source_id].get(dimension, 0.0)
             allocated_cap = self.allocated_influence[source_id].get(dimension, 0.0)
-            # Total capacity should remain constant unless explicitly changed
-            # total_cap = self.source_influence_capacity[source_id].get(dimension, 0.0)
 
             change_amount = 0.0
 
@@ -197,21 +197,30 @@ class TrustMarket:
                 actual_divestment = min(divest_request, current_investment)
 
                 if actual_divestment > 0.001: # Threshold to avoid tiny changes
-                    # print(f"    Divested {-change_amount:.3f} from Agent {agent_id} on {dimension}")
-                    # There are also market scores that we need to account for. not just investments. 
+                    y = actual_divestment
                     
-                    old_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension] 
-                    self.source_investments[source_id][agent_id][dimension] -= actual_divestment
-                    new_agent_trust_scores = sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments])
-                    for other_agent_id in self.source_investments[source_id]:
-                        if self.source_investments[source_id][other_agent_id][dimension] > 0:
-                            # Redistribute divested influence to other agents
-                            self.source_investments[source_id][other_agent_id][dimension] = (self.source_investments[source_id][other_agent_id][dimension]) * new_agent_trust_scores / old_agent_trust_scores[dimension][agent_id]
-                    new_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension]
-                    eventual_reduction_amount = (old_agent_id_trust_score - new_agent_id_trust_score)
-                    self.allocated_influence[source_id][dimension] -= eventual_reduction_amount
+                    agent_amm_params = self.agent_amm_params[agent_id][dimension]
+                    T, K = agent_amm_params['T'], agent_amm_params['K']
+                    R = K/T
+                    old_price = R/T
+                    num_shares_to_divest = y*T/(R - y)
+                    T_new = T + num_shares_to_divest
+                    R_new = R*T/T_new #= R- y  # = R*T/(T + num_shares_to_divest) = R*T/(T + y*T/(R - y)) = R*T*(R-y)/(R*T) = R - y
+                    new_price = R_new/T_new
+
+                    self.agent_amm_params[agent_id][dimension]['R'] = R_new
+                    self.agent_amm_params[agent_id][dimension]['T'] = T_new
+
+                    # Update investments
+                    old_source_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
+                    self.source_investments[source_id][agent_id][dimension] -= num_shares_to_divest
+                    for s_id in self.source_investments:
+                        if self.source_investments[s_id][agent_id][dimension] > 0 and s_id != source_id:
+                            self.allocated_influence[s_id][dimension] -= self.source_investments[s_id][agent_id][dimension]*(new_price - old_price)
+                    self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investment*old_price
                     self.source_available_capacity[source_id][dimension] += actual_divestment
-                    affected_agents_dimensions.add((agent_id, dimension))
+                    self.agent_trust_scores[agent_id][dimension] = new_price
+                    affected_agents_dimensions[agent_id].append(agent_id, dimension)
                     
                 # else: print(f"    Divestment for Agent {agent_id} on {dimension} too small or none possible.")
 
@@ -219,27 +228,30 @@ class TrustMarket:
             else:
                 # Amount to invest is capped by available capacity
                 actual_investment = min(amount, available_cap)
-
                 if actual_investment > 0.001: # Threshold
-                    old_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension]
-                    self.source_investments[source_id][agent_id][dimension] += actual_investment
-                    new_agent_trust_score = sum([self.source_investments[s][agent_id][dimension] for s in self.source_investments])
-                    ipdb.set_trace()
+                    x = actual_investment
+                    agent_amm_params = self.agent_amm_params[agent_id][dimension]
+                    T, K = agent_amm_params['T'], agent_amm_params['K']
+                    R = K/T
+                    old_price = R/T
+                    num_shares_to_invest = x*T/(R + x)
+                    T_new = T - num_shares_to_invest
+                    R_new = K/T_new #= R + x  # = R*T/(T - num_shares_to_invest) = R*T/(T - x*T/(R + x)) = R*T*(R+x)/(R*T) = R + x
+                    new_price = R_new/T_new
 
-                    for other_agent_id in self.source_investments[source_id]:
-                        if self.source_investments[source_id][other_agent_id][dimension] > 0:
-                            # Redistribute invested influence to other agents
-                            # ipdb.set_trace()
-                            self.source_investments[source_id][other_agent_id][dimension] = (self.source_investments[source_id][other_agent_id][dimension]) * new_agent_trust_score / old_agent_trust_scores[dimension][agent_id]
+                    self.agent_amm_params[agent_id][dimension]['R'] = R_new
+                    self.agent_amm_params[agent_id][dimension]['T'] = T_new
 
-                    new_agent_id_trust_score = self.source_investments[source_id][agent_id][dimension]
-                    eventual_allocation_amount = (new_agent_id_trust_score - old_agent_id_trust_score)
-                    self.allocated_influence[source_id][dimension] += eventual_allocation_amount
+                    # Update investments
+                    old_source_investments = self.source_investments[source_id][agent_id].get(dimension, 0.0)
+                    self.source_investments[source_id][agent_id][dimension] += num_shares_to_invest
+                    for s_id in self.source_investments:
+                        if self.source_investments[s_id][agent_id][dimension] > 0 and s_id != source_id:
+                            self.allocated_influence[s_id][dimension] +=  self.source_investments[s_id][agent_id][dimension]*(new_price - old_price)
+                    self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investments*old_price
                     self.source_available_capacity[source_id][dimension] -= actual_investment
-                    
-                    # print(f"    Invested {change_amount:.3f} in Agent {agent_id} on {dimension}")
-                    affected_agents_dimensions.add((agent_id, dimension))
-                # else: print(f"    Investment for Agent {agent_id} on {dimension} too small or no capacity.")
+                    self.agent_trust_scores[agent_id][dimension] = new_price
+                    affected_agents_dimensions[agent_id].append(dimension)
 
             # Log the actual change (investment or divestment)
             if abs(change_amount) > 0.001:
@@ -250,39 +262,19 @@ class TrustMarket:
                     'confidence': confidence,
                     'type': 'investment' if change_amount > 0 else 'divestment'
                 })
-
-            # Sanity check: available + allocated should ideally equal total capacity
-            # current_total_check = self.source_available_capacity[source_id][dimension] + self.allocated_influence[source_id][dimension]
-            # if abs(current_total_check - total_cap) > 0.01:
-            #      print(f"    Capacity mismatch warning for {source_id}, {dimension}: Available={self.source_available_capacity[source_id][dimension]:.2f} + Allocated={self.allocated_influence[source_id][dimension]:.2f} != Total={total_cap:.2f}")
-            self.source_influence_capacity[source_id][dimension] = self.allocated_influence[source_id][dimension] + self.source_available_capacity[source_id][dimension]
-
-
-        # --- Recalculate trust scores for affected agent/dimension pairs ---
-        if affected_agents_dimensions:
-            print(f"  Recalculating trust for {len(affected_agents_dimensions)} agent/dimension pairs...")
-            affected_agents = set(ag_id for ag_id, dim in affected_agents_dimensions)
-            for agent_id in affected_agents:
-                changed_in_recalc = set()
-                for dimension in self.dimensions:
-                    if (agent_id, dimension) in affected_agents_dimensions:
-                        new_score = sum([self.source_investments[source_id][agent_id].get(dimension, 0.0) for source_id in self.source_investments]) #self._recalculate_agent_trust_dimension(agent_id, dimension)
-                        old_score = self.agent_trust_scores[agent_id][dimension]
-                        if abs(new_score - old_score) > 0.001:
-                            self.agent_trust_scores[agent_id][dimension] = new_score
-                            changed_in_recalc.add(dimension)
-                            # Log score change due to investment
-                            self.temporal_db['trust_scores'].append({
+                self.temporal_db['trust_scores'].append({
                                 'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
                                 'agent_id': agent_id, 'dimension': dimension,
-                                'old_score': old_score, 'new_score': new_score,
+                                'old_score': old_price, 'new_score': new_price,
                                 'change_source': 'investment', 'source_id': None # Aggregate effect
                             })
 
-                # Apply correlations if enabled and scores actually changed
-                if self.use_dimension_correlations and changed_in_recalc:
-                    # print(f"    Applying correlations for Agent {agent_id} due to changes in: {changed_in_recalc}")
-                    self.apply_dimension_correlations(agent_id, list(changed_in_recalc))
+        # Apply correlations if enabled and scores actually changed
+        if self.use_dimension_correlations:
+            for agent_id in affected_agents_dimensions:
+                recalc_dims = set(affected_agents_dimensions[agent_id])
+                # print(f"    Applying correlations for Agent {agent_id} due to changes in dimensions : {recalc_dims}")
+                self.apply_dimension_correlations(agent_id, list(recalc_dims))
 
 
     def _recalculate_agent_trust_dimension(self, agent_id, dimension) -> float:
@@ -299,7 +291,7 @@ class TrustMarket:
             investment_amount = agent_investments.get(agent_id, {}).get(dimension, 0.0)
 
             if investment_amount > 0.001: # Only consider sources actively investing
-                source_capacity = self.source_influence_capacity.get(source_id, {}).get(dimension, 0.0)
+                source_capacity = self.source_available_capacity[source_id].get(dimension, 0.0) + self.allocated_influence[source_id].get(dimension, 0.0)
                 if source_capacity > 0: # Ensure source has capacity in this dimension
                     # Apply weighting based on primary status
                     weight = self.primary_source_weight if source_id in self.primary_sources else self.secondary_source_weight
@@ -350,8 +342,8 @@ class TrustMarket:
         if not ratings: return
 
         # print(f"  Recording user feedback from {user_id} for agent {agent_id}...")
-        neutral_rating = (self.rating_scale + 1) / 2.0
-        max_deviation = self.rating_scale - neutral_rating
+        neutral_rating = (self.rating_scale + 1) / 2.0   # Neutral rating for scale 1-5 is 3.0
+        max_deviation = self.rating_scale - neutral_rating  # e.g., 5 - 3 = 2.0 for scale 1-5
         if max_deviation <= 0:
             print(f"  Warning: Invalid rating scale {self.rating_scale}. Cannot process feedback.")
             return
@@ -365,7 +357,7 @@ class TrustMarket:
                 rating_val = max(1, min(self.rating_scale, int(rating)))
 
                 # Normalize change to -1 to +1 range
-                normalized_score_change = (rating_val - neutral_rating) / max_deviation
+                normalized_score_change = (rating_val - neutral_rating) / max_deviation     # [-1, 1]
 
                 # Calculate adjustment based on strength config
                 adjustment = normalized_score_change * confidence * self.user_feedback_strength
@@ -395,72 +387,148 @@ class TrustMarket:
             self.apply_dimension_correlations(agent_id, list(affected_dimensions))
 
 
-    def record_comparative_feedback(self, agent_a_id: int, agent_b_id: int,
-                                winners: Dict[str, str]) -> None:
+    # Method for oracles to adjust R directly
+    def oracle_adjust_reserve_direct(self, agent_id: str, dimension: str, delta_R: float):
         """
-        Records comparative user feedback and updates agent trust scores.
-
-        Parameters:
-        - agent_a_id: ID of the first agent compared
-        - agent_b_id: ID of the second agent compared
-        - winners: Dict mapping dimension -> 'A', 'B', or 'Tie'
+        Oracle directly adjusts the reserve for an agent in a dimension.
+        This action *changes K* and is not a trade along the curve.
+        T remains constant for this operation.
         """
-        if not winners: return
+        if agent_id not in self.agent_amm_params:
+            # Initialize if new, or handle error
+            # For simplicity, let's assume agent must exist / be initialized via another mechanism
+            print(f"Warning: Agent {agent_id} not found in AMM params for oracle_adjust_reserve_direct.")
+            # A common initialization: R=initial_R, T=initial_T (e.g., R=50, T=100 for P=0.5)
+            # self.agent_amm_params[agent_id][dimension] = {'R': 50.0, 'T': 100.0, 'K': 5000.0, 'total_supply': 100.0} # Example
+            # For now, let's assume it's initialized with some values
+            if self.agent_amm_params[agent_id][dimension]['R'] == 0 and self.agent_amm_params[agent_id][dimension]['T'] == 0:
+                self.agent_amm_params[agent_id][dimension]['R'] = self.config.get('initial_R_oracle', 10.0) # Small initial R
+                self.agent_amm_params[agent_id][dimension]['T'] = self.config.get('initial_T_oracle', 20.0) # Ensures P=0.5
+                self.agent_amm_params[agent_id][dimension]['K'] = self.agent_amm_params[agent_id][dimension]['R'] * self.agent_amm_params[agent_id][dimension]['T']
+                # total_supply for AMM might track shares *held by investors* + shares *in treasury*.
+                # Here, T is treasury shares. Let's assume total_supply is just T initially for AMM internal tracking.
+                self.agent_amm_params[agent_id][dimension]['total_supply'] = self.agent_amm_params[agent_id][dimension]['T']
 
-        # print(f"  Recording comparative feedback for agents {agent_a_id} vs {agent_b_id}...")
-        adjustment = self.comparative_feedback_strength # Use configured strength
-        affected_dimensions_a = set()
-        affected_dimensions_b = set()
-        
-        for dimension, winner in winners.items():
+
+        params = self.agent_amm_params[agent_id][dimension]
+        old_R = params['R']
+        new_R = old_R + delta_R
+
+        # Safeguard: R should not be negative (or below a minimum)
+        min_R = self.config.get('min_R_oracle_adj', 0.01)             # TODO: Set the min_R carefully
+        new_R = max(min_R, new_R)
+        actual_delta_R = new_R - old_R
+
+        params['R'] = new_R
+        # T remains unchanged by this direct oracle action
+        # K changes: params['K'] = new_R * params['T']
+        # Update K after R has changed and T is stable
+        params['K'] = params['R'] * params['T']
+
+        # The price (trust score) changesconfidence
+        old_price = old_R / params['T'] if params['T'] > 0 else 0
+        new_price = params['R'] / params['T'] if params['T'] > 0 else 0
+        self.agent_trust_scores[agent_id][dimension] = new_price
+
+        self.agent_amm_params[agent_id][dimension] = params
+
+        for source_id in self.allocated_influence:
+            if self.allocated_influence[source_id][dimension] > 0 and (self.source_investments[source_id][agent_id][dimension] > 0):
+                self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*(new_price - old_price)
+
+        self.amm_transactions_log.append({
+            'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
+            'agent_id': agent_id, 'dimension': dimension, 'type': 'oracle_R_adjustment',
+            'delta_R': actual_delta_R, 'new_R': params['R'], 'T_unchanged': params['T'],
+            'old_price': old_price, 'new_price': new_price, 'source_id': 'oracle_system' # Or specific oracle
+        })
+        # print(f"Oracle adjusted R for A{agent_id} Dim {dimension}: R {old_R:.2f}->{new_R:.2f}, P {old_price:.3f}->{new_price:.3f}")
+
+
+    # In your `record_user_feedback` or `record_comparative_feedback`
+    # This would replace the direct manipulation of `self.agent_trust_scores`
+
+    def record_comparative_feedback(self, agent_a_id: str, agent_b_id: str,
+                                    winners: Dict): # feedback_strength S
+        """
+        Records comparative user feedback and updates agent AMM params via oracle_adjust_reserve_direct.
+        winners: Dict mapping dimension -> 'A', 'B', or 'Tie'
+        feedback_strength: Overall strength of this feedback batch (e.g., based on num users)
+        """
+        base_price_adj_factor = self.comparative_feedback_strength # Beta
+
+        for dimension, winner_code_conf in winners.items():
             if dimension not in self.dimensions: continue
 
-            score_a = self.agent_trust_scores[agent_a_id].get(dimension, 0.5)
-            score_b = self.agent_trust_scores[agent_b_id].get(dimension, 0.5)
-            new_a, new_b = score_a, score_b # Start with current scores
+            winner_code, confidence = winner_code_conf
 
-            if winner == 'A':
-                new_a = min(self.max_trust, score_a + adjustment)
-                new_b = max(self.min_trust, score_b - adjustment)
-                # print('A wins')
-                print(f"    Dim '{dimension}': A wins ({score_a:.3f}->{new_a:.3f}, {score_b:.3f}->{new_b:.3f})")
-            elif winner == 'B':
-                new_a = max(self.min_trust, score_a - adjustment)
-                new_b = min(self.max_trust, score_b + adjustment)
-                # print('B wins')
-                print(f"    Dim '{dimension}': B wins ({score_a:.3f}->{new_a:.3f}, {score_b:.3f}->{new_b:.3f})")
-            # Else (Tie): new_a, new_b remain unchanged
-            else:
-                print(f"    Dim '{dimension}': Tie (no change)")
+            params_A = self.agent_amm_params[agent_a_id][dimension]
+            params_B = self.agent_amm_params[agent_b_id][dimension]
 
-            # Update if changed significantly
-            if abs(new_a - score_a) > 0.001:
-                self.agent_trust_scores[agent_a_id][dimension] = new_a
-                affected_dimensions_a.add(dimension)
-                self.temporal_db['trust_scores'].append({
-                    'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
-                    'agent_id': agent_a_id, 'dimension': dimension,
-                    'old_score': score_a, 'new_score': new_a,
-                    'change_source': 'comparative_feedback', 'source_id': f"vs_{agent_b_id}"
-                })
-            if abs(new_b - score_b) > 0.001:
-                self.agent_trust_scores[agent_b_id][dimension] = new_b
-                affected_dimensions_b.add(dimension)
-                self.temporal_db['trust_scores'].append({
-                    'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
-                    'agent_id': agent_b_id, 'dimension': dimension,
-                    'old_score': score_b, 'new_score': new_b,
-                    'change_source': 'comparative_feedback', 'source_id': f"vs_{agent_a_id}"
-                })
+            # Ensure agents are initialized in AMM (important!)
+            # This logic should ideally be in a separate `ensure_agent_in_amm` method
+            for aid in [agent_a_id, agent_b_id]:
+                if self.agent_amm_params[aid][dimension]['R'] == 0 and self.agent_amm_params[aid][dimension]['T'] == 0:
+                    self.agent_amm_params[aid][dimension]['R'] = self.config.get('initial_R_oracle', 10.0)
+                    self.agent_amm_params[aid][dimension]['T'] = self.config.get('initial_T_oracle', 20.0)
+                    self.agent_amm_params[aid][dimension]['K'] = self.agent_amm_params[aid][dimension]['R'] * self.agent_amm_params[aid][dimension]['T']
+                    self.agent_amm_params[aid][dimension]['total_supply'] = self.agent_amm_params[aid][dimension]['T']
+                    # Initialize trust score from AMM price
+                    self.agent_trust_scores[aid][dimension] = self.agent_amm_params[aid][dimension]['R'] / self.agent_amm_params[aid][dimension]['T']
+
+            P_A_current = params_A['R'] / params_A['T'] if params_A['T'] > 0 else 0.5 # Default if T is 0
+            P_B_current = params_B['R'] / params_B['T'] if params_B['T'] > 0 else 0.5
+
+            delta_P_A = 0.0
+            delta_P_B = 0.0
+
+            if winner_code == 'A':
+                delta_P_A = confidence * base_price_adj_factor # Absolute adjustment
+                delta_P_B = -confidence * base_price_adj_factor
+            elif winner_code == 'B':
+                delta_P_A = -confidence * base_price_adj_factor
+                delta_P_B = confidence * base_price_adj_factor
+            # If 'Tie', delta_P_A and delta_P_B remain 0.0
+
+            # Ensure target price is within valid bounds (e.g., 0 to 1)
+            # Let P_target = P_current + delta_P. Clamp P_target. Then actual_delta_P = P_target_clamped - P_current.
+            max_score = self.config.get('max_trust_score_oracle', 1.0)
+            min_score = self.config.get('min_trust_score_oracle', 0.0)
+
+            P_A_target_unclamped = P_A_current + delta_P_A
+            P_A_target_clamped = max(min_score, min(max_score, P_A_target_unclamped))  # TODO: set the min and max scores carefully
+            actual_delta_P_A = P_A_target_clamped - P_A_current
+
+            P_B_target_unclamped = P_B_current + delta_P_B
+            P_B_target_clamped = max(min_score, min(max_score, P_B_target_unclamped))
+            actual_delta_P_B = P_B_target_clamped - P_B_current
+
+            if abs(actual_delta_P_A) > 0.0001: # Threshold for action
+                delta_R_A = actual_delta_P_A * params_A['T']
+                self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
+
+            if abs(actual_delta_P_B) > 0.0001: # Threshold for action
+                delta_R_B = actual_delta_P_B * params_B['T']
+                self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
+
+    # For trust decay
+    def apply_trust_decay(self):
+        decay_rate = self.config.get('trust_decay_rate_oracle', 0.001) # e.g., 0.1% per period
+        if decay_rate <= 0: return
+
+        print(f"Applying trust decay (rate: {decay_rate}) to all agents...")
+        for agent_id in list(self.agent_amm_params.keys()): # Iterate over copy of keys
+            for dimension in self.dimensions:
+                params = self.agent_amm_params[agent_id][dimension]
+                if params['T'] == 0: continue # Avoid division by zero if T is 0 (should not happen with safeguards)
+
+                # R_new = R_current * (1 - decay_rate)
+                # So, delta_R = -R_current * decay_rate
+                delta_R_decay = -params['R'] * decay_rate
                 
-        # Apply correlations if enabled
-        if self.use_dimension_correlations:
-            if affected_dimensions_a:
-                # print(f"    Applying correlations for Agent {agent_a_id} due to comparison.")
-                self.apply_dimension_correlations(agent_a_id, list(affected_dimensions_a))
-            if affected_dimensions_b:
-                # print(f"    Applying correlations for Agent {agent_b_id} due to comparison.")
-                self.apply_dimension_correlations(agent_b_id, list(affected_dimensions_b))
+                # Only apply if R is positive
+                if params['R'] > self.config.get('min_R_oracle_adj', 0.01) and delta_R_decay < -0.00001: # Ensure meaningful negative change
+                    self.oracle_adjust_reserve_direct(agent_id, dimension, delta_R_decay)
 
 
     def apply_dimension_correlations(self, agent_id: int, changed_dimensions: List[str]) -> None:
@@ -608,6 +676,17 @@ class TrustMarket:
                             'influence_amount': amount
                         })
         return endorsements
+    
+    def _recompute_source_influence_capacity(self, source_id: str) -> None:
+        """
+        Recompute the influence capacity of a source based on current investments.
+        This is a placeholder for any complex logic needed to adjust capacity dynamically.
+        """
+        # Keep existing logic, ensure it uses self.source_influence_capacity
+        if source_id in self.source_available_capacity:
+            for dimension in self.dimensions:
+                # Example: Adjust capacity based on total investments in this dimension
+                self.source_influence_capacity[source_id][dimension] = self.source_available_capacity[source_id][dimension] + self.allocated_influence[source_id][dimension]
 
     def summarize_market_state(self, information_sources):
         """Get a summary of the current market state."""
@@ -630,8 +709,9 @@ class TrustMarket:
         }
 
         source_influence_summary = {}
-        all_source_ids = list(self.source_influence_capacity.keys())
+        all_source_ids = list(self.source_available_capacity.keys())
         for source_id in all_source_ids:
+            self._recompute_source_influence_capacity(source_id) # Ensure capacity is up-to-date
             source_influence_summary[source_id] = {
                 "type": next((s.source_type for s_id, s in information_sources.items() if s_id == source_id), "Unknown"), # Need access to system's info sources
                 "capacity": dict(self.source_influence_capacity.get(source_id, {})),

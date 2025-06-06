@@ -121,52 +121,6 @@ class UserRepresentative(InformationSource):
         return results
 
 
-    def decide_investments(self, evaluation_round=None):
-        """
-        Decides investments based on aggregated user feedback analysis.
-        (Simple strategy for base UserRepresentative).
-        """
-        investments = []
-        if not self.market:
-            print(f"Warning (UserRep {self.source_id}): No market access.")
-            return []
-
-        # Get available capacity
-        available_influence = {
-            dim: self.market.source_influence_capacity.get(self.source_id, {}).get(dim, 0.0) -
-                 self.market.allocated_influence.get(self.source_id, {}).get(dim, 0.0)
-            for dim in self.expertise_dimensions
-        }
-
-        agents_with_feedback = list(self.direct_feedback.keys())
-        print(f"UserRep {self.source_id} evaluating {len(agents_with_feedback)} agents based on direct feedback for round {evaluation_round}.")
-
-        for agent_id in agents_with_feedback:
-             eval_results = self.evaluate_agent(agent_id, self.expertise_dimensions)
-             if not eval_results: continue
-
-             investment_factor = 0.15 # User reps might invest slightly more aggressively
-
-             for dimension, (rating_0_1, confidence) in eval_results.items():
-                  if rating_0_1 >= 0.55: # Invest if score is above neutral
-                       available = available_influence.get(dimension, 0.0)
-                       if available <= 0: continue
-
-                       segment_weight = self.segment_weights.get(self.user_segment, {}).get(dimension, 0.5)
-                       # Amount based on score deviation, confidence, segment importance
-                       amount = available * investment_factor * (rating_0_1 - 0.5) * 2 * confidence * segment_weight
-
-                       if amount > 0.01:
-                           investments.append((agent_id, dimension, amount, confidence))
-
-        # Clear feedback after processing for the round
-        self.direct_feedback.clear()
-        self.comparison_feedback.clear()
-
-        print(f"UserRep {self.source_id} decided on {len(investments)} investment actions.")
-        return investments
-
-
 # --- Holistic User Rep using LLM Batch Evaluation ---
 class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     """
@@ -208,7 +162,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         return set(self.agent_conversations.keys())
 
     # Override evaluate_agent to use the holistic comparison method
-    def evaluate_agent(self, agent_id, dimensions=None, evaluation_round=None):
+    def evaluate_agent(self, agent_id, dimensions=None, evaluation_round=None, use_comparative=True):
         """
         Evaluates an agent using holistic comparison against peers.
 
@@ -351,247 +305,473 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         print(f"--- UserRep {self.source_id} finished evaluating Agent {agent_id}. Final Scores: {final_eval_scores} ---") # DEBUG END
         return final_eval_scores
 
-
-    # Override decide_investments to use the holistic evaluation
-    def decide_investments(self, evaluation_round=None):
-        """Makes investment decisions based on holistic comparative evaluation.
-        TODO: Median investment computation might not handle zero investments correctly. Not sure if it's a problem.
+    def _get_target_price_from_rank_mapping(self, agent_id, dimension, own_evaluations, market_prices, confidence_in_own_eval):
         """
-        print(f"UserRep {self.source_id} deciding investments for round {evaluation_round}.")
-        investments = []
-        if not self.market: return []
+        Calculates a target price for agent_id in a given dimension using rank-order mapping.
+        own_evaluations: {agent_id: {dim: (pseudo_score, confidence)}}
+        market_prices: {agent_id: {dim: P_current}}
+        confidence_in_own_eval: The investor's confidence in its pseudo_score for this agent-dim.
+        """
+        
+        # 1. Collect scores for the current dimension for all evaluated agents
+        eval_scores_for_dim = {} # {agent_id: pseudo_score}
+        market_p_for_dim = {}     # {agent_id: P_current}
 
-        # --- Fetch Market State ---
-        # try:
-        # ipdb.set_trace()
-        available_influence = {}
-        allocated_influence = self.market.allocated_influence.get(self.source_id, {})
-        capacity = self.market.source_influence_capacity.get(self.source_id, {})
-        for dim in self.expertise_dimensions:
-            available_influence[dim] = capacity.get(dim, 0.0) - allocated_influence.get(dim, 0.0)
+        for aid, eval_data in own_evaluations.items():
+            if dimension in eval_data:
+                eval_scores_for_dim[aid] = eval_data[dimension][0] # pseudo_score
+                if aid in market_prices and dimension in market_prices[aid]:
+                    market_p_for_dim[aid] = market_prices[aid][dimension]
+                # else:
+                    # Agent might be new or not priced yet; handle as needed (e.g., skip or use default)
 
-        current_endorsements = self.market.get_source_endorsements(self.source_id)
-        current_investments = defaultdict(lambda: defaultdict(lambda: 0.0))
-        for endo in current_endorsements:
-            if not current_investments[endo['agent_id']]['dimension']:
-                current_investments[endo['agent_id']][endo['dimension']] = 0.0
-            current_investments[endo['agent_id']][endo['dimension']] += endo['influence_amount']
+        if agent_id not in eval_scores_for_dim or agent_id not in market_p_for_dim:
+            # If current agent doesn't have a score/price for this dim, can't determine target
+            return market_p_for_dim.get(agent_id, 0.5) # Fallback to current market price or neutral
 
-        market_scores = { # Fetch scores for agents we have conversations for
-            agent_id: self.market.get_agent_trust(agent_id)
-            for agent_id in self.agent_conversations.keys() # Use agents we observed
-            if self.market.get_agent_trust(agent_id) # Check agent exists in market
+        if len(eval_scores_for_dim) < 2 or len(market_p_for_dim) < 2:
+            # Not enough agents to establish meaningful ranks for comparison
+            return market_p_for_dim[agent_id] # Fallback to current market price
+
+        # 2. Rank agents based on eval scores and market prices
+        # Higher score/price = better rank (e.g., rank 0 is best)
+        sorted_by_eval = sorted(eval_scores_for_dim.items(), key=lambda item: item[1], reverse=True)
+        eval_ranks = {aid: i for i, (aid, score) in enumerate(sorted_by_eval)}
+
+        sorted_by_market = sorted(market_p_for_dim.items(), key=lambda item: item[1], reverse=True)
+        market_ranks = {aid: i for i, (aid, price) in enumerate(sorted_by_market)}
+
+        current_eval_rank = eval_ranks.get(agent_id)
+        current_market_price = market_p_for_dim[agent_id]
+
+        if current_eval_rank is None:
+            return current_market_price # Should not happen if checks above are done
+
+        # 3. Determine the market price of the agent currently at the investor's target rank
+        # Example: If investor ranks agent_X as 0th (best), find the agent that is currently 0th in market_ranks
+        # and use its price as a reference.
+        target_rank_price_reference = current_market_price # Default to current price
+        
+        # Find the agent_id that is currently at the 'current_eval_rank' in the *market's* ranking
+        agent_at_target_rank_in_market = None
+        for m_aid, m_rank in market_ranks.items():
+            if m_rank == current_eval_rank:
+                agent_at_target_rank_in_market = m_aid
+                break
+        
+        if agent_at_target_rank_in_market and agent_at_target_rank_in_market in market_p_for_dim:
+            target_rank_price_reference = market_p_for_dim[agent_at_target_rank_in_market]
+        # else:
+            # If no agent is at that exact rank (e.g., fewer agents in market ranking due to missing prices),
+            # we might interpolate or use closest rank. For simplicity, we use current_market_price as fallback.
+            # Or, if eval ranks it Nth, but market only has M < N agents, this is an edge case.
+            # Could also use the price of the Nth agent in the investor's own price-sorted list as a self-consistent target.
+            # Let's use the price of the agent that *the market ranks* at the position *the investor thinks our agent should be*.
+
+        # 4. The raw P_target is this reference price.
+        p_target_raw_from_rank = target_rank_price_reference
+        
+        # Nudge towards this raw target based on confidence in *this specific evaluation*
+        # The `confidence_in_own_eval` is the `conf` part from `(pseudo_score, conf)`
+        # p_target_nudged = current_market_price + (p_target_raw_from_rank - current_market_price) * confidence_in_own_eval
+
+        # Alternative: If investor is very confident agent X is #1, and market's #1 is priced at P_high,
+        # and agent X is currently P_low, target P_high for agent X.
+        # If investor is less confident, target somewhere between P_low and P_high.
+        # The scaling here determines how aggressively the investor tries to correct the market rank.
+        rank_correction_strength = self.config.get('rank_correction_strength', 0.5) # How much to move towards the target rank's price
+        p_target_nudged = current_market_price + \
+                          (p_target_raw_from_rank - current_market_price) * \
+                          confidence_in_own_eval * rank_correction_strength
+
+        return p_target_nudged
+
+# In auditor.py or user_rep.py
+# Inside the relevant InformationSource class (e.g., AuditorWithProfileAnalysis or UserRepresentativeWithHolisticEvaluation)
+
+    def _calculate_total_portfolio_value_potential(self):
+        """
+        Calculates the sum of the current market value of all shares held by this source
+        PLUS all available (uninvested) cash capacity of this source.
+        This represents the total value this source could theoretically manage.
+        """
+        total_value_of_holdings = defaultdict(lambda : 0.0) # {dimension: total_value}
+        # Sum market value of current share holdings
+        # source_investments structure: self.source_investments[source_id][agent_id][dimension] = shares
+        if self.source_id in self.market.source_investments:
+            for agent_id, dims_data in self.market.source_investments[self.source_id].items():
+                for dimension, shares_held in dims_data.items():
+                    # if shares_held > 1e-5:
+                    self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dimension) # Ensure AMM params exist
+                    amm_params = self.market.agent_amm_params[agent_id][dimension]
+                    if amm_params['T'] > 1e-6: # Avoid division by zero if T is tiny
+                        price = amm_params['R'] / amm_params['T']
+                        total_value_of_holdings[dimension] += shares_held * price
+                        # else: if T is zero, price is undefined/infinite, value of shares is complex.
+                        # For simplicity, if T is zero, those shares are currently "unpriceable" by this AMM.
+
+        # Sum available cash from all dimensions for this source
+        # source_available_capacity structure: self.source_available_capacity[source_id][dimension] = cash
+        total_available_cash = self.market.source_available_capacity.get(self.source_id, {})
+
+        total_potential = {dim: total_value_of_holdings[dim] + total_available_cash[dim] for dim in self.market.source_available_capacity[self.source_id]}
+        print(total_potential)
+        # Ensure a minimum potential to avoid issues if source starts with no cash/shares
+        # return max(total_potential, self.config.get('min_portfolio_value_potential', 100.0))
+        return total_potential
+
+    def _project_steady_state_prices(self, own_evaluations, market_prices, dimension):
+        """
+        Project what market prices will be at steady state based on:
+        1. Expected total capital deployment
+        2. Quality-based distribution of that capital
+        """
+        
+        # Step 1: Estimate total capital at steady state
+        # Consider all potential investors and their capacity
+        total_potential_capital = 0
+        for source_id, _ in self.market.source_available_capacity.items():
+            # Each source's total capacity across all dimensions
+            source_capacity = self.market.source_available_capacity[source_id].get(dimension, 0)
+            total_potential_capital += source_capacity
+        
+        # Add expected growth factor (new investors, increased allocations)
+        growth_factor = self.config.get('market_growth_factor', 1.5)
+        steady_state_capital = total_potential_capital * growth_factor
+        
+        # Step 2: Current total capital in market
+        current_total_market_capital = 0
+        for agent_id in market_prices:
+            if dimension in self.market.agent_amm_params[agent_id]:
+                # Total capital locked in AMM = R (reserves)
+                current_total_market_capital += self.market.agent_amm_params[agent_id][dimension]['R']
+        
+        steady_state_capital += current_total_market_capital # Include current capital in the market
+        # Step 3: Project capital distribution based on quality scores
+        # Use own evaluations as best estimate of true quality
+        quality_scores = {
+            agent_id: eval_data[dimension][0]
+            for agent_id, eval_data in own_evaluations.items()
+            if dimension in eval_data
         }
-    
-        # Calculate total and median current investments per dimension
-        total_current_investment = {dim: 0.0 for dim in self.expertise_dimensions}
-        median_current_investment = {}
+        
+        # Convert quality to expected capital share
+        # Higher quality agents should attract disproportionately more capital
+        concentration_power = self.config.get('quality_concentration_power', 2.0)
+        
+        quality_powered = {
+            aid: q ** concentration_power 
+            for aid, q in quality_scores.items()
+        }
+        total_quality_powered = sum(quality_powered.values())
+        
+        # Expected share of steady-state capital for each agent
+        expected_capital_shares = {
+            aid: qp / total_quality_powered 
+            for aid, qp in quality_powered.items()
+        }
+        
+        # Step 4: Project steady-state prices
+        projected_prices = {}
+        
+        for agent_id in expected_capital_shares:
+            # Expected capital for this agent at steady state
+            expected_capital = steady_state_capital * expected_capital_shares[agent_id]
+            
+            # Project price based on AMM dynamics
+            # At steady state, if R_ss is the reserve, need to estimate T_ss
+            # Assume T remains relatively stable (or decreases slowly as investors buy)
+            current_T = self.market.agent_amm_params[agent_id][dimension]['T']
+            
+            # Estimate T at steady state (some shares bought from treasury)
+            treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
+            projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
+            
+            # Projected price = R_ss / T_ss
+            projected_price = expected_capital / projected_T if projected_T > 0 else 0
+            projected_prices[agent_id] = projected_price
+        
+        return projected_prices, steady_state_capital / current_total_market_capital
 
+    def check_market_capacity(self, own_evaluations, market_prices):
+        """
+        Checks if the source has enough capacity to invest based on its evaluations and market prices.
+        If not, it will print a warning and return False.
+        """
+        capacity_flags = {} # Collect ratios for all dimensions
+        projected_prices = {} # {agent_id: projected_price}
         for dim in self.expertise_dimensions:
-            # Extract all non-zero investment amounts for this dimension
-            amounts = [current_investments[agent_id].get(dim, 0.0) for agent_id in current_investments]
-            
-            # Calculate total
-            total_current_investment[dim] = sum(amounts)
-            
-            # Calculate median of non-zero values
-            non_zero_amounts = [a for a in amounts if a > 0]
-            median_current_investment[dim] = np.median(non_zero_amounts) if non_zero_amounts else 0.0
-        # ipdb.set_trace()
-        # except Exception as e:
-        #     print(f"Error fetching market state for UserRep {self.source_id}: {e}")
-        #     return []
+            projected_prices_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, dimension=dim)
+            capacity_flags[dim] = steady_state_ratio>1.2 # Collect ratios for all dimensions
+            projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
 
-        # --- Evaluate Agents using Holistic Method ---
-        own_evaluations = {}
-        agents_to_evaluate = list(self.agent_conversations.keys())
-        if not agents_to_evaluate:
-             print(f"UserRep {self.source_id}: No conversations observed, cannot make investments.")
-             return []
+        return projected_prices, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
 
-        print(f"UserRep {self.source_id} evaluating {len(agents_to_evaluate)} agents holistically...")
-        for agent_id in agents_to_evaluate:
-            if agent_id not in market_scores: continue # Skip if agent not in market
-            if len(self.agent_conversations[agent_id]) < 2: continue # Skip if no conversations
-            eval_result = self.evaluate_agent(agent_id, self.expertise_dimensions, evaluation_round)
-            if eval_result:
-                own_evaluations[agent_id] = eval_result
-            # ipdb.set_trace()
-        # ipdb.set_trace()
-        if len(own_evaluations) <= 1:
-            print(f"UserRep {self.source_id}: No agents successfully evaluated.")
+    def decide_investments(self, evaluation_round=None, use_comparative=True):
+        desirability_method = self.config.get('desirability_method', 'percentage_change') # 'percentage_change' or 'log_ratio'
+        print(f"\n=== DEBUG: {self.source_type.capitalize()} {self.source_id} deciding investments for round {evaluation_round} ===")
+        print(f"DEBUG: Desirability method: {desirability_method}")
+        print(f"DEBUG: Config values: {self.config}")
+        
+        investments_to_propose_cash_value = [] # List of (agent_id, dimension, cash_amount_to_trade, confidence)
+
+        if not self.market: 
+            print(f"Warning ({self.source_id}): No market access.")
             return []
 
-        # --- Calculate Investment Opportunities (Disagreement with Market) ---
-        investment_opportunities = defaultdict(list)
-        own_relative_positions = {}
-        market_relative_positions = {}
+        # DEBUG: Check available capacity
+        available_capacity = self.market.source_available_capacity.get(self.source_id, {})
+        print(f"DEBUG: Available capacity: {available_capacity}")
 
-        # Calculate relative positions only if enough agents evaluated
-        if len(own_evaluations) >= 2:
-            for dimension in self.expertise_dimensions:
-                evals_for_dim = {aid: res[dimension][0] for aid, res in own_evaluations.items() if dimension in res}
-                market_for_dim = {aid: scores.get(dimension, 0.5) for aid, scores in market_scores.items() if aid in evals_for_dim}
-
-                if len(evals_for_dim) >= 2:
-                    own_rel = self._get_relative_positions(evals_for_dim) # Removed dimension arg
-                    market_rel = self._get_relative_positions(market_for_dim) # Removed dimension arg
-                    for agent_id in evals_for_dim:
-                        if agent_id not in own_relative_positions: own_relative_positions[agent_id] = {}
-                        if agent_id not in market_relative_positions: market_relative_positions[agent_id] = {}
-                        own_relative_positions[agent_id][dimension] = own_rel.get(agent_id, 0.5)
-                        market_relative_positions[agent_id][dimension] = market_rel.get(agent_id, 0.5)
-
-        # Identify opportunities
-        for agent_id, eval_data in own_evaluations.items():
-            market_agent_scores = market_scores.get(agent_id, {})
-            for dimension, (rating, confidence) in eval_data.items():
-                if dimension not in self.expertise_dimensions: continue # Only invest in expertise areas
-
-                own_position = own_relative_positions[agent_id][dimension]
-                market_position = market_relative_positions[agent_id][dimension]
-                
-                # Calculate disagreement based on relative positions
-                relative_disagreement = own_position - market_position
-                opportunity_direction = 1 if relative_disagreement > 0 else -1
-                disagreement_magnitude = abs(relative_disagreement)
-
-                segment_weight = self.segment_weights.get(self.user_segment, {}).get(dimension, 0.5)
-                opportunity_strength = disagreement_magnitude * confidence * segment_weight
-
-                min_disagreement_threshold = 0.05
-                # ipdb.set_trace() # DEBUG DISAGREE
-                if disagreement_magnitude >= min_disagreement_threshold:
-                    investment_opportunities[dimension].append({
-                        'agent_id': agent_id, 'dimension': dimension,
-                        'rating': rating, 'confidence': confidence,
-                        'disagreement': relative_disagreement,
-                        'direction': opportunity_direction,
-                        'own_position': own_position,
-                        'market_position': market_position,
-                        'strength': opportunity_strength,
-                        'dimension_importance': segment_weight,
-                        'current_investment': current_investments.get(agent_id, {}).get(dimension, 0.0)
-                    })
-                    # ipdb.set_trace()
-                    # print things to debug
-                    print(f"UserRep {self.source_id} found opportunity for agent {agent_id} in dimension {dimension}")
-                    print(investment_opportunities[dimension][-1]) # Print last opportunity added
-                else: 
-                    print(f"DEBUG: No significant disagreement between agent {agent_id} position and market state in dimension {dimension}.") # DEBUG DISAGREE
-
-
-        # --- Prepare Investment Actions ---
-        self._calculate_investment_strategy(investment_opportunities, total_current_investment)
-        prepared_actions = self._prepare_investment_actions(investment_opportunities, available_influence, median_current_investment)
-
-        print(f"UserRep {self.source_id} prepared {len(prepared_actions)} actions based on holistic eval.")
-        # Clear conversation buffer for next round? Or keep a rolling window?
-        # self.agent_conversations.clear() # Option: Clear all convos after evaluation
-        return prepared_actions
-
-    # --- Helper methods _get_relative_positions, _calculate_investment_strategy, _prepare_investment_actions ---
-    # These can be reused directly from the AuditorWithProfileAnalysis implementation
-    # Make sure they reference self.config, self.invest_multiplier, self.divest_multiplier correctly.
-
-    def _get_relative_positions(self, evaluations):
-        """
-        Calculates relative position (0-1) based on ranking OR Min-Max scaling.
-        Assumes valid numeric inputs in evaluations.
-        """
-        # --- Control Flag ---
-        use_min_max_scaling = True # <<< MODIFY MANUALLY TO SWITCH
-        # --------------------
-
-        if not evaluations: return {}
-        num_agents = len(evaluations)
-        if num_agents == 1: return {agent_id: 0.5 for agent_id in evaluations}
-
-        agent_ids = list(evaluations.keys())
-
-        if use_min_max_scaling:
-            # --- Min-Max Scaling Logic (No Error Checks) ---
-            scores = [evaluations[aid] for aid in agent_ids] # Assumes scores are numeric
-            min_score, max_score = min(scores), max(scores)
-            score_range = max_score - min_score
-
-            if score_range == 0: # All scores are identical
-                return {aid: 0.5 for aid in agent_ids}
-            else:
-                # Normalize scores to 0-1
-                return {
-                    aid: (evaluations[aid] - min_score) / score_range
-                    for aid in agent_ids
-                }
-        else:
-            # --- Original Ranking Logic (No Error Checks) ---
-            # Sort agent IDs by score, highest first (assumes comparable scores)
-            sorted_agent_ids = sorted(agent_ids, key=lambda aid: evaluations[aid], reverse=True)
-
-            denominator = num_agents - 1
-            # Calculate rank-based position (0 to 1, higher score closer to 1)
-            return {
-                agent_id: (denominator - i) / denominator
-                for i, agent_id in enumerate(sorted_agent_ids)
-            }
-    
-    def _calculate_investment_strategy(self, investment_opportunities, total_current_investments):
-        """Calculates normalized investment signals."""
-        # (Same implementation as in Auditor)
-        for dimension, opportunities in investment_opportunities.items():
-            if not opportunities: continue
-            positive_opps = [opp for opp in opportunities if opp['direction'] > 0]
-            total_pos_strength = sum(opp['strength'] for opp in positive_opps)# or 1.0
-            # Need total current investment *in this dimension* across all agents we invested in
-            total_current_dim = total_current_investments.get(dimension, 0.0)# or 1.0
-
-            for opp in opportunities:
-                target_allocation = 0.0
-                if opp['direction'] > 0:
-                    target_allocation = opp['strength'] / total_pos_strength if total_pos_strength > 0 else 0.0
-                else:
-                    target_allocation = -opp['strength'] / total_pos_strength if total_pos_strength > 0 else 1.0/len(opportunities) # Equal share if no strength
-
-                current_allocation_norm = opp['current_investment'] / total_current_dim if total_current_dim > 0 else 0.0
-                opp['invest_divest_normalized'] = target_allocation - current_allocation_norm
-
-
-    def _prepare_investment_actions(self, investment_opportunities, available_influence, median_current_investment):
-        """Prepares investment/divestment actions."""
-        # (Same implementation as in Auditor)
-        divestments = []
-        investments = []
-        total_available_after_divest = dict(available_influence)
-
-        # Divestments
-        for dimension, opportunities in investment_opportunities.items():
-            if dimension not in self.expertise_dimensions: continue # Only act on expertise dims
-            for opp in opportunities:
-                if opp['invest_divest_normalized'] < 0:
-                    agent_id = opp['agent_id']
-                    current = opp['current_investment']
-                    if current > 0:
-                        amount_to_divest = min(current, abs(opp['invest_divest_normalized']) * median_current_investment * self.config.get('divest_multiplier', 0.15) * 5)
-                        if amount_to_divest > 0.01:
-                            divestments.append((agent_id, dimension, -amount_to_divest, None))
-                            total_available_after_divest[dimension] = total_available_after_divest.get(dimension, 0.0) + amount_to_divest
+        # --- 1. Evaluations & Price Targets ---
+        own_evaluations = {} # {agent_id: {dimension: (pseudo_score, confidence_in_eval)}}
+        market_prices = {}   # {agent_id: {dimension: P_current}}
         
-        # Investments
-        for dimension, opportunities in investment_opportunities.items():
-            if dimension not in self.expertise_dimensions: continue
-            invest_opps = [opp for opp in opportunities if opp['invest_divest_normalized'] > 0]
-            if not invest_opps: continue
+        # Determine which agents this source will evaluate
+        candidate_agent_ids = []
+        if self.source_type == 'auditor':
+            candidate_agent_ids = list(self.agent_profiles.keys())
+        elif self.source_type == 'user_representative': # Assuming UserRep uses this structure
+            candidate_agent_ids = list(self.agent_conversations.keys()) 
+        else: # Fallback for other types if they use this method
+            # This might need adjustment based on how other source types store their candidates
+            candidate_agent_ids = list(self.market.agent_amm_params.keys())
 
-            available_for_dim = total_available_after_divest.get(dimension, 0.0)
-            if available_for_dim <= 0: continue
+        print(f"DEBUG: Found {len(candidate_agent_ids)} candidate agents: {candidate_agent_ids}")
 
-            total_pos_signal = sum(opp['invest_divest_normalized'] for opp in invest_opps)
-            if total_pos_signal <= 0: continue
+        if not candidate_agent_ids: 
+            print(f"DEBUG: No candidate agents to evaluate - returning empty list")
+            return []
 
-            for opp in invest_opps:
-                proportion = opp['invest_divest_normalized'] / total_pos_signal
-                amount_to_invest = available_for_dim * proportion * self.config.get('invest_multiplier', 0.2)
-                if amount_to_invest > 0.01:
-                    investments.append((opp['agent_id'], dimension, amount_to_invest, opp['confidence']))
-        ipdb.set_trace() # DEBUG INVESTMENTS
-        return divestments + investments
+        for agent_id in candidate_agent_ids:
+            market_prices[agent_id] = {} # Initialize for the agent
+            # Ensure AMM is initialized and fetch current prices for all expertise dimensions
+            for dim_to_eval in self.expertise_dimensions:
+                self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
+                amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
+                price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
+                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5) # Fallback if T is 0
+                market_prices[agent_id][dim_to_eval] = price
+                print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
+            
+            # Perform evaluation for this agent
+            print(f"DEBUG: Evaluating agent {agent_id}...")
+            eval_result = self.evaluate_agent( # This is the method within Auditor or UserRep
+                agent_id, 
+                dimensions=self.expertise_dimensions, 
+                evaluation_round=evaluation_round, 
+                use_comparative=use_comparative 
+            )
+            if eval_result:
+                own_evaluations[agent_id] = eval_result
+                print(f"DEBUG: Agent {agent_id} evaluation results: {eval_result}")
+            else:
+                print(f"DEBUG: Agent {agent_id} evaluation returned empty/None")
+        
+        print(f"DEBUG: Total agents successfully evaluated: {len(own_evaluations)}")
+        if not own_evaluations: 
+            print(f"DEBUG: No agents successfully evaluated - returning empty list")
+            return []
+
+        #####################
+        # Okay. I think this is good. but just thinking through how I would go about it :
+
+        # 1) projected capital deployment based on own_evals or extrapolated current market value. the other strategy is perhaps to consider yourself as another agent with 0 expected returns... the problem is we can't get evaluated scores here. actually maybe we can... we'll just get 0.5-0.5 likelihood of winning... 
+
+        # 2) use that to make investments when 'far away' in terms of total invested capital. 
+
+        # 3) otherwise, use the rankings based methods we developed to make investments. (rankings are again great when dealing with large number of agents but bad when dealing with very few agents)... 
+
+        # 4) We still need to figure out calibration in both cases.. 
+
+        # 5) Need to likewise find a mechanism when the capital will likely be pulled out by a large fraction of the market because the market broadly is loosing trust for some reason.
+
+        projected_prices, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
+
+        # --- 2. Determine "Target Value Holding" & "Attractiveness" ---
+        attractiveness_scores = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): attractiveness_score}
+        target_value_holding_ideal = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): ideal_cash_value_to_hold}
+
+        # Filter evaluations to only those agents for whom we also have market prices
+        # This ensures fair comparison for rank mapping and attractiveness calculation
+        valid_agent_ids_for_ranking = [aid for aid in own_evaluations.keys() if aid in market_prices and \
+                                       all(dim in market_prices[aid] for dim in self.expertise_dimensions)]
+        
+        print(f"DEBUG: Valid agents for ranking: {len(valid_agent_ids_for_ranking)} out of {len(own_evaluations)}")
+        print(f"DEBUG: Valid agent IDs: {valid_agent_ids_for_ranking}")
+        
+        relevant_own_evals_for_ranking = {aid: own_evaluations[aid] for aid in valid_agent_ids_for_ranking}
+        relevant_market_prices_for_ranking = {aid: market_prices[aid] for aid in valid_agent_ids_for_ranking}
+
+        for agent_id, agent_eval_data in own_evaluations.items(): # Iterate all evaluated agents
+            print(f"DEBUG: Processing attractiveness for agent {agent_id}")
+            for dimension, (pseudo_score, confidence_in_eval) in agent_eval_data.items():
+                if dimension not in self.expertise_dimensions: 
+                    print(f"DEBUG: Skipping dimension {dimension} (not in expertise)")
+                    continue # Should not happen if eval_agent is correct
+
+                key = (agent_id, dimension)
+                p_current = market_prices.get(agent_id, {}).get(dimension, 0.5) # Use fetched market price
+                print(f"DEBUG: Agent {agent_id}, Dim {dimension}: pseudo_score={pseudo_score:.4f}, confidence={confidence_in_eval:.4f}, p_current={p_current:.4f}")
+
+                if capacity_flags.get(dimension, False):
+                    p_target_effective_est = projected_prices.get(dimension, {}).get(agent_id, p_current) # Use projected price if capacity is sufficient
+                    print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_raw_from_projected_prices={p_target_effective_est:.4f}")
+                else:
+                    p_target_effective_est = p_current # Default if agent not in ranking pool
+                    if agent_id in relevant_own_evals_for_ranking: # Only calculate rank target if agent is in the valid pool
+                        p_target_effective_est = self._get_target_price_from_rank_mapping(
+                            agent_id, dimension, 
+                            relevant_own_evals_for_ranking, # Use filtered evals for ranking
+                            relevant_market_prices_for_ranking, # Use filtered prices for ranking
+                            confidence_in_eval
+                        )
+                        print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_raw_from_rank={p_target_effective_est:.4f}")
+                
+                p_target_effective = p_current + (p_target_effective_est - p_current) * confidence_in_eval
+                min_op_p = self.config.get('min_operational_price', 0.01)
+                max_op_p = self.config.get('max_operational_price', 0.99)
+                p_target_effective = max(min_op_p, min(max_op_p, p_target_effective))
+                print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_effective={p_target_effective:.4f} (clamped between {min_op_p}-{max_op_p})")
+
+                attractiveness = 0.0
+                if desirability_method == 'percentage_change':
+                    if p_current > 1e-6:
+                        attractiveness = (p_target_effective - p_current) / p_current
+                elif desirability_method == 'log_ratio':
+                    if p_current > 1e-6 and p_target_effective > 1e-6:
+                        attractiveness = np.log(p_target_effective / p_current)
+                    elif p_target_effective > p_current: # Handle cases where p_current is near zero
+                        attractiveness = 1.0 # Arbitrary large positive for strong buy signal
+                    elif p_target_effective < p_current:
+                        attractiveness = -1.0 # Arbitrary large negative
+                else: # Default to percentage change
+                     if p_current > 1e-6:
+                        attractiveness = (p_target_effective - p_current) / p_current
+                
+                final_attractiveness = attractiveness * confidence_in_eval # Scale by confidence
+                attractiveness_scores[dimension][agent_id] = final_attractiveness
+                print(f"DEBUG: Agent {agent_id}, Dim {dimension}: raw_attractiveness={attractiveness:.4f}, final_attractiveness={final_attractiveness:.4f}")
+
+        # Normalize positive attractiveness scores for portfolio weighting
+        target_portfolio_weights = defaultdict(lambda : defaultdict(float)) # {dimension: {agent_id: weight}}
+        buy_threshold = self.config.get('attractiveness_buy_threshold', 0.01)
+        print(f"DEBUG: Attractiveness buy threshold: {buy_threshold}")
+        
+        positive_attractiveness = {dim : {k: v for k,v in dim_scores.items() if v > buy_threshold} for dim, dim_scores in attractiveness_scores.items()}
+        sum_positive_attractiveness = {dim : sum(dim_scores.values()) for dim, dim_scores in positive_attractiveness.items()}
+        
+        print(f"DEBUG: Positive attractiveness scores: {dict(positive_attractiveness)}")
+        print(f"DEBUG: Sum of positive attractiveness by dimension: {dict(sum_positive_attractiveness)}")
+
+        for dim, dim_scores in positive_attractiveness.items():
+            if sum_positive_attractiveness[dim] > 1e-6:
+                for agent_id, attr_score in positive_attractiveness[dim].items():
+                    weight = attr_score / sum_positive_attractiveness[dim]
+                    target_portfolio_weights[dim][agent_id] = weight
+                    print(f"DEBUG: Portfolio weight - Dim {dim}, Agent {agent_id}: {weight:.4f}")
+        
+        # Calculate total potential value this source can manage
+        total_portfolio_value_potential = self._calculate_total_portfolio_value_potential()
+        print(f"DEBUG: Total portfolio value potential: {total_portfolio_value_potential}")
+
+        # Determine ideal cash value to hold for each positively attractive asset
+        # ipdb.set_trace()
+        min_holding_value = self.config.get('min_value_holding_per_asset', 0.0)
+        print(f"DEBUG: Minimum holding value per asset: {min_holding_value}")
+        
+        for dim in attractiveness_scores.keys():
+            for agent_id in attractiveness_scores[dim].keys():
+                if dim not in target_portfolio_weights or agent_id not in target_portfolio_weights[dim]:
+                    target_value_holding_ideal[dim][agent_id] = min_holding_value # Default to minimum holding value
+                    print(f"DEBUG: Target ideal holding - Dim {dim}, Agent {agent_id}: {min_holding_value} (minimum)")
+                else:
+                    weight = target_portfolio_weights[dim][agent_id]
+                    ideal_value = weight * total_portfolio_value_potential[dim]
+                    target_value_holding_ideal[dim][agent_id] = ideal_value
+                    print(f"DEBUG: Target ideal holding - Dim {dim}, Agent {agent_id}: {ideal_value:.4f} (weight={weight:.4f} * potential={total_portfolio_value_potential[dim]:.4f})")
+
+        # --- 3. Calculate Current Value of Holdings ---
+        current_value_holding = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): current_cash_value_of_shares}
+        print(f"DEBUG: Calculating current value of holdings...")
+        
+        for agent_id_cvh, agent_market_prices_cvh in market_prices.items(): # Iterate through agents with market prices
+            for dimension_cvh, p_curr_cvh in agent_market_prices_cvh.items():
+                shares_held = self.market.source_investments[self.source_id].get(agent_id_cvh, {}).get(dimension_cvh, 0.0)
+                current_value = shares_held * p_curr_cvh
+                current_value_holding[dimension_cvh][agent_id_cvh] = current_value
+                if shares_held > 0 or current_value > 0:
+                    print(f"DEBUG: Current holding - Dim {dimension_cvh}, Agent {agent_id_cvh}: {shares_held:.4f} shares * {p_curr_cvh:.4f} price = {current_value:.4f}")
+
+        # --- 4. Calculate Target Change in Value (Delta_Value_Target) ---
+        delta_value_target_map = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): cash_amount_to_trade}
+        rebalance_aggressiveness = self.config.get('portfolio_rebalance_aggressiveness', 0.5)
+        print(f"DEBUG: Portfolio rebalance aggressiveness: {rebalance_aggressiveness}")
+
+        # Iterate over all keys for which we have an attractiveness score (implicitly all evaluated assets)
+        for dim in attractiveness_scores.keys():
+            for agent_id in attractiveness_scores[dim].keys():
+                ideal_val = target_value_holding_ideal[dim][agent_id]
+                current_val = current_value_holding[dim].get(agent_id, 0.0) # Default to 0 if not held
+                
+                delta_v = (ideal_val - current_val) * rebalance_aggressiveness
+                print(f"DEBUG: Delta calculation - Dim {dim}, Agent {agent_id}: ideal={ideal_val:.4f}, current={current_val:.4f}, delta_raw={(ideal_val - current_val):.4f}, delta_scaled={delta_v:.4f}")
+                
+                # Apply a threshold to delta_v to avoid tiny trades
+                min_trade_threshold = self.config.get('min_delta_value_trade_threshold', 0.1)
+                if abs(delta_v) > min_trade_threshold: # e.g., trade if value change > $0.1
+                    delta_value_target_map[dim][agent_id] = delta_v
+                    print(f"DEBUG: Delta above threshold ({min_trade_threshold}) - Including in trade map: {delta_v:.4f}")
+                else:
+                    print(f"DEBUG: Delta below threshold ({min_trade_threshold}) - Skipping: {delta_v:.4f}")
+
+        print(f"DEBUG: Delta value target map: {dict(delta_value_target_map)}")
+
+        # --- 5. Calculate delta_value_target_scale based on portfolio size and confidence ---
+        uninvested_capacity = self.market.source_available_capacity[self.source_id]
+        total_portfolio_value_potential = total_portfolio_value_potential
+        total_proposed_investments = {dim : sum(max(v,0.0) for v in delta_value_target_map[dim].values()) for dim in delta_value_target_map.keys()}
+        
+        print(f"DEBUG: Uninvested capacity: {uninvested_capacity}")
+        print(f"DEBUG: Total proposed investments by dimension: {dict(total_proposed_investments)}")
+        
+        for dim in delta_value_target_map.keys():
+            if total_proposed_investments[dim] > 0:
+                investment_scale = self.config.get('investment_scale', 0.2) # Scale factor for investment aggressiveness
+                investment_scale_pot = min(total_portfolio_value_potential[dim]*investment_scale / total_proposed_investments[dim], 1.0)
+                investment_scale_cap = min(uninvested_capacity[dim]/(total_proposed_investments[dim]*investment_scale_pot), 1.0)
+                final_investment_scale = investment_scale_pot * investment_scale_cap
+                
+                print(f"DEBUG: Scaling for dim {dim}: base_scale={investment_scale}, scale_pot={investment_scale_pot:.4f}, scale_cap={investment_scale_cap:.4f}, final_scale={final_investment_scale:.4f}")
+                
+                for agent_id, cash_amount in delta_value_target_map[dim].items():
+                    scaled_cash_amount = cash_amount * final_investment_scale
+                    delta_value_target_map[dim][agent_id] = scaled_cash_amount
+                    print(f"DEBUG: Final scaling - Dim {dim}, Agent {agent_id}: {cash_amount:.4f} -> {scaled_cash_amount:.4f}")
+
+        # --- 6. Prepare list of (agent_id, dimension, cash_amount_to_trade, confidence) ---
+        # The TrustMarket.process_investments will convert this cash_amount to shares
+        # and handle actual cash availability for buys.
+        print(f"DEBUG: Preparing final investment list...")
+        
+        for dim in delta_value_target_map.keys():
+            for agent_id, cash_amount in delta_value_target_map[dim].items():
+                confidence = 0.5 # Default confidence
+                if agent_id in own_evaluations and dim in own_evaluations[agent_id]:
+                    confidence = own_evaluations[agent_id][dim][1]
+                
+                print(f"DEBUG: Adding investment - Agent {agent_id}, Dim {dim}: cash_amount={cash_amount:.4f}, confidence={confidence:.4f}")
+                investments_to_propose_cash_value.append(
+                    (agent_id, dim, cash_amount, confidence)
+                )
+        
+        print(f"DEBUG: Final investments list length: {len(investments_to_propose_cash_value)}")
+        if investments_to_propose_cash_value:
+            print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} prepared {len(investments_to_propose_cash_value)} cash-value based actions.")
+            for i, (aid, dim, amount, conf) in enumerate(investments_to_propose_cash_value):
+                print(f"DEBUG: Investment {i+1}: Agent {aid}, Dim {dim}, Amount {amount:.4f}, Confidence {conf:.4f}")
+        else:
+            print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} found no cash-value actions to take.")
+            
+        print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
+        return investments_to_propose_cash_value

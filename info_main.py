@@ -21,6 +21,12 @@ import ipdb
 # user rep frequency = 3
 # user rep min conversations = 3 -> 1
 
+# Values to check 
+# user feedback strength (feedback_strength) - 
+# confidences and how they are handled and how each quantity is scaled (for user feedback, user rep/auditor)
+# investor initialization
+# investor walk through step by step on how the investment goes
+
 ## main function
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Customer Support Simulation with Trust Market Oversight.")
@@ -59,8 +65,8 @@ if __name__ == "__main__":
 
     if args.llm_source == 'api':
         # args.api_model_name = "gemini-2.5-pro-preview-05-06"
-        # args.api_model_name = "gemini-2.5-flash-preview-04-17" 
-        args.api_model_name = "gemini-2.0-flash-lite"
+        args.api_model_name = "gemini-2.5-flash-preview-05-20" 
+        # args.api_model_name = "gemini-2.0-flash-lite"
         # args.api_model_name = "gemini-2.0-flash"
 
     # Validate chat API usage
@@ -203,8 +209,8 @@ if __name__ == "__main__":
             ],
         'trust_decay_rate': args.trust_decay_rate,
         'rating_scale': args.rating_scale, # Pass rating scale to market system for normalization
-        'user_feedback_strength': 0.05, # Example: How much direct user ratings impact score
-        'comparative_feedback_strength': 0.02, # Example: How much comparative wins impact score
+        'user_feedback_strength': 0.1, # Example: How much direct user ratings impact score
+        'comparative_feedback_strength': 0.05, # Example: How much comparative wins impact score
          # Add other market config if needed (e.g., primary_sources)
     }
     trust_market_system = TrustMarketSystem(config=trust_market_config)

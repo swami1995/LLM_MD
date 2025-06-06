@@ -107,11 +107,11 @@ class TrustMarketSystem:
         if initial_influence is None:
             # Default initial influence based on source type (example)
             if source.source_type == 'regulator':
-                influence_value = 200.0
-            elif source.source_type == 'auditor':
-                influence_value = 150.0
-            else:
                 influence_value = 100.0
+            elif source.source_type == 'auditor':
+                influence_value = 60.0
+            else:
+                influence_value = 40.0
             initial_influence = {dim: influence_value for dim in source.expertise_dimensions}
 
         self.trust_market.add_information_source(
@@ -230,7 +230,7 @@ class TrustMarketSystem:
         agent_a_id = comparison_data['agent_a_id']
         agent_b_id = comparison_data['agent_b_id']
         user_id = comparison_data['user_id']
-        winners = comparison_data['winners'] # {dim: 'A'/'B'/'Tie'}
+        winners = comparison_data['winners'] # {dim: ('A'/'B'/'Tie', 1-5)}
         print(f"  Processing Comparative Feedback: User {user_id} compared A={agent_a_id}, B={agent_b_id}") # Add winner details?
 
         # Send comparison results to the market for score updates
