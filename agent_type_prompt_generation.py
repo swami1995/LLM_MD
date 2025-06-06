@@ -550,7 +550,7 @@ if not api_key:
 agent_constraints = load_constraints("profile_constraints/agent_constraints.json")
 user_constraints = load_constraints("profile_constraints/user_constraints.json")
 # api_model_name = "gemini-2.0-flash"#5-pro-preview-03-25"  # or "gemini-2.0"
-api_model_name = "gemini-2.5-pro-preview-05-06" 
+api_model_name = "gemini-2.5-pro-preview-06-05" 
 profile_generator = ProfileGenerator(api_key, agent_constraints, user_constraints, api_model_name=api_model_name)
 
 save_profiles(20, 100, "saved_profiles", profile_generator)

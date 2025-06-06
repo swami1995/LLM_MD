@@ -611,7 +611,7 @@ Here are some guidelines for generating the agent knowledge:
         return prompts
 # --- Example Usage ---
 api_key = os.environ.get("GEMINI_API_KEY")
-api_model_name = 'gemini-2.5-pro-preview-05-06'
+api_model_name = 'gemini-2.5-pro-preview-06-05'
 generator = PromptGenerator(api_key, api_model_name)
 
 agent_profiles, user_profiles = load_profiles("saved_profiles")
