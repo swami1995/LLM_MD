@@ -256,13 +256,15 @@ class AuditorWithProfileAnalysis(InformationSource):
             'divestment_threshold': 0.45, # Max score to consider divestment
             'invest_multiplier': 0.2, # Aggressiveness of investment
             'divest_multiplier': 0.15, # Aggressiveness of divestment
+            'base_score_persistence': 0.2, # Factor for persisting base scores during updates
+            'derived_score_update_weight': 0.3, # Weight for new scores when updating derived scores from a single comparison
         }
         self.compared_pairs = set() # Track compared pairs within a round
         self.derived_agent_scores = {} # Store scores derived from comparisons
 
         # --- NEW: mirror user_rep tracking for confidences & cache ---
         self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
-        self.comparison_results_cache = {}       # {(aid1,aid2,round): (derived_scores, confidences)}
+        self.comparison_results_cache = {}       # {(aid1,aid2,round): (derived_scores_dict, comparison_confidences_dict)}
         self.agent_comparison_counts = defaultdict(int)
 
     def add_agent_profile(self, agent_id: int, profile: Dict):
@@ -272,20 +274,21 @@ class AuditorWithProfileAnalysis(InformationSource):
 
     def _invalidate_cache(self, agent_id=None):
         """Invalidates cached evaluations."""
-        # (Same implementation as before)
         if agent_id:
             self.profile_evaluation_cache.pop(agent_id, None)
             self.conversation_audit_cache.pop(agent_id, None)
-            self.comparison_evaluation_cache.pop(agent_id, None)
             self.hybrid_evaluation_cache.pop(agent_id, None)
+            # Specific agent's derived scores might be affected, but full clear happens on round change.
         else: # Invalidate all
             self.profile_evaluation_cache.clear()
             self.conversation_audit_cache.clear()
             self.comparison_evaluation_cache.clear()
             self.hybrid_evaluation_cache.clear()
-            self.derived_agent_scores.clear() # Clear derived scores too
+            self.derived_agent_scores.clear() 
+            self.derived_agent_confidences.clear()
             self.compared_pairs.clear()
-
+            self.comparison_results_cache.clear()
+            self.agent_comparison_counts.clear()
 
     def get_agent_conversations(self, agent_id, max_count=10):
         """Gets recent conversations for an agent."""
@@ -334,33 +337,39 @@ class AuditorWithProfileAnalysis(InformationSource):
         return filtered_results
 
     def perform_comparative_audit(self, agent_id, dimensions=None, evaluation_round=None):
-        """Performs comparative audit using BatchEvaluator.
-        TODOs: Comparisons : What if you saw the pair when evaluating another agent in the same evaluation round? Need to account for that."""
-        # (Implementation remains largely the same as the provided code)
-        # Key change: Use self.batch_evaluator instead of self.evaluator
-
+        """Performs comparative audit using BatchEvaluator, with improved caching and confidence handling."""
         dimensions = dimensions or self.expertise_dimensions
-        cache_key = ("comp", agent_id, tuple(sorted(dimensions)), evaluation_round)
-        if cache_key in self.comparison_evaluation_cache:
-            return self.comparison_evaluation_cache[cache_key]
+        # Cache key for the final evaluation result of this specific agent_id, dimensions, and round
+        final_eval_cache_key = ("comp", agent_id, tuple(sorted(dimensions)), evaluation_round)
+        if evaluation_round == self.last_evaluation_round and final_eval_cache_key in self.comparison_evaluation_cache:
+            return self.comparison_evaluation_cache[final_eval_cache_key]
 
-        # --- NEW: reset derived scores/comparisons on new round ---
-        if evaluation_round and evaluation_round != self.last_evaluation_round:
-            self.derived_agent_scores.clear()
-            self.compared_pairs.clear()
-            self.comparison_results_cache.clear()
-            self.last_evaluation_round = evaluation_round
+        # Reset derived scores/comparisons on new round
+        if evaluation_round is not None and evaluation_round != self.last_evaluation_round:
+            # This state is cleared more broadly in evaluate_agent if round changes.
+            # However, if perform_comparative_audit is called directly with a new round,
+            # we ensure per-round state is fresh for the logic within this function.
+            self.compared_pairs.clear() # Tracks (agent_id, other_id) for direct comparisons made for *this* agent_id's eval
+            self.last_evaluation_round = evaluation_round # Local track for this function's scope if needed
 
-        base_scores = self.derived_agent_scores.get(agent_id, {})
-        base_scores_with_conf = {dim: (score, 0.5) for dim, score in base_scores.items() if dim in dimensions}
-        if not base_scores: # Initialize if first time
-            base_scores_with_conf = {dim: (0.5, 0.3) for dim in dimensions}
+        # Base scores for the target agent_id from potentially prior comparisons in the same round
+        base_scores_0_1 = self.derived_agent_scores.get(agent_id, {})
+        base_confidences = self._calculate_derived_confidence(agent_id, dimensions) # Uses self.derived_agent_confidences
 
+        base_scores_with_conf = {
+            dim: (base_scores_0_1.get(dim, 0.5), base_confidences.get(dim, 0.3))
+            for dim in dimensions
+        }
+        
         agent_conversations = self.get_agent_conversations(agent_id)
         agent_profile = self.agent_profiles.get(agent_id)
 
         min_convs = self.config.get('min_conversations_required', 3)
-        if len(agent_conversations) < min_convs and not agent_profile:
+        # Condition for returning base scores if agent data is insufficient
+        can_compare_profile = agent_profile is not None
+        can_compare_convs = len(agent_conversations) >= min_convs
+
+        if not can_compare_profile and not can_compare_convs:
             return {dim: (score, min(conf, 0.3)) for dim, (score, conf) in base_scores_with_conf.items()}
 
         other_agent_ids = self.observed_agents()
@@ -368,91 +377,135 @@ class AuditorWithProfileAnalysis(InformationSource):
 
         valid_comparison_agents = []
         for other_id in other_agent_ids:
-            other_convs = self.get_agent_conversations(other_id)
             other_profile = self.agent_profiles.get(other_id)
-            if (len(other_convs) >= min_convs or other_profile is not None):
+            other_convs = self.get_agent_conversations(other_id)
+            if (other_profile is not None) or (len(other_convs) >= min_convs):
                 valid_comparison_agents.append((other_id, other_convs, other_profile))
 
-        if not valid_comparison_agents: return base_scores_with_conf
+        if not valid_comparison_agents:
+            return base_scores_with_conf
 
-        # --- Agent Selection Logic (same as before) ---
         import random
         num_to_compare = self.config.get('comparison_agents_per_target', 3)
-        if len(valid_comparison_agents) > num_to_compare:
-            # Randomly select comparison agents
-            comparison_agents = random.sample(valid_comparison_agents, num_to_compare)
-            # new_comparisons = [(oid, c, p) for oid, c, p in valid_comparison_agents if (agent_id, oid) not in self.compared_pairs]
-            # if len(new_comparisons) >= num_to_compare:
-            #     comparison_agents = random.sample(new_comparisons, num_to_compare)
-            # else:
-            #     previously_compared = [(oid, c, p) for oid, c, p in valid_comparison_agents if (agent_id, oid) in self.compared_pairs]
-            #     needed = num_to_compare - len(new_comparisons)
-            #     comparison_agents = new_comparisons + random.sample(previously_compared, min(needed, len(previously_compared)))
+        
+        # Prioritize agents not yet compared with agent_id in this round via comparison_results_cache
+        new_comparison_candidates = [
+            (oid, o_convs, o_profile) for oid, o_convs, o_profile in valid_comparison_agents
+            if (min(agent_id, oid), max(agent_id, oid), evaluation_round) not in self.comparison_results_cache
+        ]
+        
+        comparison_agents_selected = []
+        if len(new_comparison_candidates) >= num_to_compare:
+            comparison_agents_selected = random.sample(new_comparison_candidates, num_to_compare)
         else:
-            comparison_agents = valid_comparison_agents
+            comparison_agents_selected.extend(new_comparison_candidates)
+            remaining_needed = num_to_compare - len(comparison_agents_selected)
+            if remaining_needed > 0:
+                existing_candidates = [
+                    (oid, o_convs, o_profile) for oid, o_convs, o_profile in valid_comparison_agents
+                    if (oid, o_convs, o_profile) not in new_comparison_candidates # Ensure no duplicates
+                ]
+                if existing_candidates:
+                    comparison_agents_selected.extend(
+                        random.sample(existing_candidates, min(remaining_needed, len(existing_candidates)))
+                    )
+        if not comparison_agents_selected and valid_comparison_agents: # Fallback if selection logic yields empty
+             comparison_agents_selected = random.sample(valid_comparison_agents, min(num_to_compare, len(valid_comparison_agents)))
 
-        # --- Perform Comparisons ---
-        accumulated_scores = defaultdict(list)
-        accumulated_confs  = defaultdict(list)
-        comparison_count = 0
-        for other_id, other_convs, other_profile in comparison_agents:
-            # if (agent_id, other_id) in self.compared_pairs: continue # Avoid re-comparing within same round
+        accumulated_scores_for_target = defaultdict(list)
+        accumulated_confs_for_target = defaultdict(list)
+        
+        for other_id, other_convs, other_profile in comparison_agents_selected:
+            comparison_cache_key = (min(agent_id, other_id), max(agent_id, other_id), evaluation_round)
+            
+            derived_scores_from_evaluator = None
+            comparison_confidences = None
 
-            # self.compared_pairs.add((agent_id, other_id))
-            # self.compared_pairs.add((other_id, agent_id))
+            if comparison_cache_key in self.comparison_results_cache:
+                derived_scores_from_evaluator, comparison_confidences = self.comparison_results_cache[comparison_cache_key]
+            else:
+                comparison_call_results = None
+                # Determine comparison type
+                # Profile vs Profile
+                if agent_profile and other_profile:
+                    comparison_call_results = self.batch_evaluator.compare_agent_profiles(
+                        agent_profile, agent_id, other_profile, other_id, dimensions
+                    )
+                # Conversations vs Conversations
+                elif can_compare_convs and (len(other_convs) >= min_convs):
+                    comparison_call_results = self.batch_evaluator.compare_agent_batches(
+                        agent_conversations, agent_id, other_convs, other_id, dimensions
+                    )
+                # Mixed or insufficient for one type - this case should be handled by agent selection or skipped
+                # For now, if one has profile and other has convs, we can't directly compare with current methods.
+                # This logic implies we prefer profile-profile or conv-conv.
+                else:
+                    continue # Skip if no valid comparison method
 
-            has_agent_convs = len(agent_conversations) >= min_convs
-            has_other_convs = len(other_convs) >= min_convs
-            has_agent_profile = agent_profile is not None
-            has_other_profile = other_profile is not None
+                if comparison_call_results:
+                    derived_scores_from_evaluator = self.batch_evaluator.get_agent_scores(comparison_call_results, agent_id, other_id)
+                    comparison_confidences = self._extract_comparison_confidences(comparison_call_results, agent_id, other_id)
+                    
+                    self.comparison_results_cache[comparison_cache_key] = (derived_scores_from_evaluator, comparison_confidences)
 
-            comparison_results = None
-            if has_agent_profile and has_other_profile:
-                comparison_results = self.batch_evaluator.compare_agent_profiles(
-                    agent_profile, agent_id, other_profile, other_id, dimensions
-                )
-            elif has_agent_convs and has_other_convs:
-                comparison_results = self.batch_evaluator.compare_agent_batches(
-                    agent_conversations, agent_id, other_convs, other_id, dimensions
-                )
-            else: continue # Skip if no comparable data
+                    # Update derived scores and confidences for BOTH agents
+                    self._update_agent_derived_scores(agent_id, derived_scores_from_evaluator.get(agent_id, {}), dimensions, comparison_confidences.get(agent_id, {}))
+                    self._update_agent_confidences(agent_id, comparison_confidences.get(agent_id, {}), dimensions)
+                    
+                    self._update_agent_derived_scores(other_id, derived_scores_from_evaluator.get(other_id, {}), dimensions, comparison_confidences.get(other_id, {}))
+                    self._update_agent_confidences(other_id, comparison_confidences.get(other_id, {}), dimensions)
+                    
+                    self.agent_comparison_counts[agent_id] += 1
+                    self.agent_comparison_counts[other_id] += 1 # Count for both
 
-            if comparison_results:
-                # Use BatchEvaluator's method to get scores
-                derived_scores = self.batch_evaluator.get_agent_scores(comparison_results, agent_id, other_id)
-                confs = self._extract_comparison_confidences(comparison_results, agent_id, other_id)
+            if derived_scores_from_evaluator and comparison_confidences:
+                # Accumulate for the target agent_id
+                agent_scores_from_this_comp = derived_scores_from_evaluator.get(agent_id, {})
+                agent_confs_from_this_comp = comparison_confidences.get(agent_id, {})
                 for dim in dimensions:
-                    if dim in derived_scores.get(agent_id, {}):
-                        accumulated_scores[dim].append(derived_scores[agent_id][dim])
-                        accumulated_confs[dim].append(confs[agent_id][dim])
-                comparison_count += 1
-
-        # --- NEW: confidence‐weighted averaging ---
+                    if dim in agent_scores_from_this_comp:
+                        accumulated_scores_for_target[dim].append(agent_scores_from_this_comp[dim])
+                        accumulated_confs_for_target[dim].append(agent_confs_from_this_comp.get(dim, 0.3))
+        
         final_scores = {}
-        weight_new = self.config.get('new_evaluation_weight', 0.7)
+        
         for dim in dimensions:
             base_score, base_conf = base_scores_with_conf.get(dim, (0.5, 0.3))
-            new_scores = accumulated_scores.get(dim, [])
-            new_confs  = accumulated_confs.get(dim, [])
+            new_scores = accumulated_scores_for_target.get(dim, [])
+            new_confs = accumulated_confs_for_target.get(dim, [])
+            
             if new_scores:
-                # score = simple avg or conf‐weighted avg
-                if sum(new_confs) > 0:
-                    score = sum(s*c for s,c in zip(new_scores,new_confs)) / sum(new_confs)
-                else:
-                    score = sum(new_scores)/len(new_scores)
-                # combine old/new
-                final_score = weight_new*score + (1-weight_new)*base_score
-                # aggregate confidence properly
-                final_conf  = self._aggregate_confidences(new_confs, base_conf, weight_new)
+                avg_new_score = 0.0
+                avg_new_confidence = 0.3 # Default if no confs
+                if sum(new_confs) > 1e-6:
+                    avg_new_score = sum(s*c for s,c in zip(new_scores, new_confs)) / sum(new_confs)
+                    avg_new_confidence = sum(new_confs) / len(new_confs)
+                elif new_scores: # Fallback if all confidences are zero
+                    avg_new_score = sum(new_scores) / len(new_scores)
+
+                # Determine effective weight for new information based on relative confidences
+                total_confidence_metric = base_conf + avg_new_confidence
+                effective_weight_new = avg_new_confidence / total_confidence_metric if total_confidence_metric > 1e-6 else 0.5
+                
+                persistence_factor = self.config.get('base_score_persistence', 0.2)
+                # Adjust effective_weight_new to account for persistence
+                # If persistence is 0.2, new info can take up to 0.8 of the update influence, scaled by its relative confidence
+                final_weight_new = effective_weight_new * (1 - persistence_factor)
+
+                current_score_for_update = self.derived_agent_scores.get(agent_id, {}).get(dim, 0.5) # Get latest derived score
+
+                final_score = (final_weight_new * avg_new_score) + ((1 - final_weight_new) * current_score_for_update)
+                final_confidence = self._aggregate_confidences(new_confs, base_conf, final_weight_new) # Aggregate all new confs vs base
             else:
-                final_score, final_conf = base_score, base_conf*0.9
+                final_score, final_confidence = base_score, base_conf * 0.9 # Slightly decay confidence if no new info
 
-            final_scores[dim] = (final_score, final_conf)
+            final_scores[dim] = (final_score, final_confidence)
+            # Update the main derived_agent_scores cache for the target agent
+            if agent_id not in self.derived_agent_scores: self.derived_agent_scores[agent_id] = {}
+            self.derived_agent_scores[agent_id][dim] = final_score
 
-        # cache & return
-        self.comparison_evaluation_cache[cache_key] = final_scores
+        self.comparison_evaluation_cache[final_eval_cache_key] = final_scores
         return final_scores
-
 
     def perform_hybrid_audit(self, agent_id, conversations=None, detailed=False, dimensions=None,
                              evaluation_round=None, use_comparative=False):
@@ -509,18 +562,19 @@ class AuditorWithProfileAnalysis(InformationSource):
                        dimensions=None, evaluation_round=None,
                        use_comparative=False):
         """Evaluate agent using hybrid or comparative approach."""
-        # --- NEW: on new round, clear per‐round state ---
         if evaluation_round is not None and evaluation_round != self.last_evaluation_round:
-            self.derived_agent_scores.clear()
-            self.derived_agent_confidences.clear()
-            self.compared_pairs.clear()
-            self.comparison_results_cache.clear()
+            # Clear per-round state. This is critical.
+            self.compared_pairs.clear() # Specific to old logic, but good to clear
+            self.comparison_results_cache.clear() # Cache for (min_id, max_id, round) results
             self.agent_comparison_counts.clear()
-            # Optionally clear LLM‐audit caches for fresh prompts:
+            
+            # LLM-audit caches are for (type, agent_id, dims, round/len_convs)
+            # Clearing them ensures fresh LLM calls if underlying data might change or for a truly new round.
             self.profile_evaluation_cache.clear()
             self.conversation_audit_cache.clear()
-            self.comparison_evaluation_cache.clear()
+            self.comparison_evaluation_cache.clear() # Cache for final (agent_id, dims, round) results
             self.hybrid_evaluation_cache.clear()
+            
             self.last_evaluation_round = evaluation_round
 
         # Delegate to hybrid audit
@@ -736,7 +790,7 @@ class AuditorWithProfileAnalysis(InformationSource):
     def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
         """
         Extract confidence information from comparison results.
-        Maps the comparison confidence to confidence in the derived pseudo-scores.
+        Maps the comparison confidence (LLM 0-5) to derived pseudo-score confidence (0-1).
         """
         agent_confidences = {
             agent_a_id: {},
@@ -744,81 +798,155 @@ class AuditorWithProfileAnalysis(InformationSource):
         }
         
         for dimension, result in comparison_results.items():
-            raw_confidence = result.get("confidence", 2.5)  # 0-5 scale from LLM, default to middle
+            # Assuming result["confidence"] is the LLM's confidence (e.g., 0-5 magnitude)
+            raw_confidence_metric = result.get("confidence", 2.5) # Default to mid-range if missing
             winner = result.get("winner", "tie")
             
-            # Convert LLM confidence (0-5) to our confidence scale (0-1)
-            normalized_confidence = min(1.0, raw_confidence / 5.0)
+            # Normalize LLM confidence (0-5) to a 0-1 scale
+            normalized_llm_confidence = min(1.0, raw_confidence_metric / 5.0)
             
-            # Confidence in derived score depends on:
-            # 1. How confident the LLM was in the comparison
-            # 2. How decisive the comparison was (strong winner vs tie)
+            # Confidence in the derived score for each agent from this single comparison
+            # This confidence reflects how much this one comparison tells us about an agent's score.
+            derived_score_confidence = 0.0
             if winner == "tie":
-                # Moderate confidence for both agents when it's a tie - we're confident it's close
-                base_confidence = normalized_confidence * 0.6  # Ties still give us information
+                # If it's a tie, we are somewhat confident they are similar.
+                # The LLM's confidence in the "tie" itself (if available) or a general factor.
+                # For simplicity, let's use normalized_llm_confidence, but capped lower for ties.
+                derived_score_confidence = normalized_llm_confidence * 0.6 
             else:
-                # Higher confidence for clear winners, scaled by LLM confidence
-                base_confidence = normalized_confidence * 0.9
+                # If there's a winner, our confidence in the derived scores is proportional
+                # to how strong the win was (raw_confidence_metric) and LLM's certainty.
+                derived_score_confidence = normalized_llm_confidence * 0.9
             
-            # Both agents get the same base confidence from this comparison
-            agent_confidences[agent_a_id][dimension] = base_confidence
-            agent_confidences[agent_b_id][dimension] = base_confidence
+            # Both agents involved in the comparison get this confidence value for this dimension
+            # from this specific comparison event.
+            agent_confidences[agent_a_id][dimension] = derived_score_confidence
+            agent_confidences[agent_b_id][dimension] = derived_score_confidence
         
         return agent_confidences
 
+    def _update_agent_derived_scores(self, agent_id, new_scores_for_agent, dimensions_to_evaluate, new_confidences_for_agent):
+        """
+        Helper method to update derived scores for an agent based on new comparison data.
+        Uses confidence-weighted averaging between existing and new scores.
+        `new_scores_for_agent`: {dim: score} from the current comparison for this agent.
+        `new_confidences_for_agent`: {dim: conf} from the current comparison for this agent.
+        """
+        if agent_id not in self.derived_agent_scores:
+            self.derived_agent_scores[agent_id] = {}
+        
+        # Get current aggregated confidences for existing derived scores
+        # This uses _calculate_derived_confidence which looks at self.derived_agent_confidences list
+        existing_aggregated_confidences = self._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
+
+        for dim in dimensions_to_evaluate:
+            if dim in new_scores_for_agent:
+                existing_score = self.derived_agent_scores[agent_id].get(dim, 0.5)
+                new_score_from_comparison = new_scores_for_agent[dim]
+                
+                # Confidence for the new_score from this single comparison
+                conf_of_new_score_from_comparison = new_confidences_for_agent.get(dim, 0.3)
+                # Aggregated confidence for the existing_score
+                conf_of_existing_score_aggregated = existing_aggregated_confidences.get(dim, 0.3)
+                
+                # Inverse variance weighting principle (confidence as proxy for precision)
+                # Weight for new score = new_conf / (existing_conf + new_conf)
+                total_conf_metric = conf_of_existing_score_aggregated + conf_of_new_score_from_comparison
+                if total_conf_metric > 1e-6:
+                    weight_for_new_score = conf_of_new_score_from_comparison / total_conf_metric
+                else: # Fallback if both confidences are zero
+                    weight_for_new_score = 0.5 
+                
+                # Apply a general update weight to dampen rapid changes from single comparisons
+                # This is different from the 'new_evaluation_weight' used in final aggregation.
+                # This is about how much one comparison shifts the running derived score.
+                single_comparison_update_weight = self.config.get('derived_score_update_weight', 0.3)
+                effective_weight_for_new_score = weight_for_new_score * single_comparison_update_weight
+
+                updated_score = (1 - effective_weight_for_new_score) * existing_score + effective_weight_for_new_score * new_score_from_comparison
+                self.derived_agent_scores[agent_id][dim] = updated_score
+
+    def _update_agent_confidences(self, agent_id, new_confidences_for_agent, dimensions_to_evaluate):
+        """
+        Appends new confidence scores from a comparison to the agent's list of confidences for each dimension.
+        `new_confidences_for_agent`: {dim: conf} from the current comparison for this agent.
+        """
+        for dim in dimensions_to_evaluate:
+            if dim in new_confidences_for_agent:
+                self.derived_agent_confidences[agent_id][dim].append(new_confidences_for_agent[dim])
+
+                max_len = self.config.get('max_confidence_history', 10) # Default to 10 if not in config
+                conf_list = self.derived_agent_confidences[agent_id][dim]
+                if len(conf_list) > max_len:
+                    self.derived_agent_confidences[agent_id][dim] = conf_list[-max_len:]
+
     def _calculate_derived_confidence(self, agent_id, dimensions_to_evaluate):
         """
-        Calculate confidence in derived scores using proper statistical aggregation.
-        Treats each comparison as providing a noisy estimate of the true score.
+        Calculate aggregated confidence in derived scores for an agent.
+        Uses the list of confidences stored in `self.derived_agent_confidences`.
         """
-        confidences = {}
-        
+        aggregated_confidences = {}
         for dim in dimensions_to_evaluate:
-            # For auditor, confidence comes from profile analysis confidence
-            if agent_id in self.agent_profiles:
-                profile_results = self.perform_profile_audit(agent_id, [dim])
-                if dim in profile_results:
-                    confidences[dim] = profile_results[dim][1]
-                else:
-                    confidences[dim] = 0.5  # Default moderate confidence
+            conf_list_for_dim = self.derived_agent_confidences.get(agent_id, {}).get(dim, [])
+            
+            if not conf_list_for_dim:
+                aggregated_confidences[dim] = 0.3  # Default low confidence if no data
             else:
-                confidences[dim] = 0.3  # Default low confidence if no profile
-        
-        return confidences
+                # Convert confidences to precisions (confidence / (1 - confidence))
+                # Add a small epsilon to prevent division by zero if confidence is 1.0 or 0.0
+                precisions = [c / (1 - c + 1e-6) for c in conf_list_for_dim if 0 <= c < 1]
+                if not precisions: # if all confidences were 1.0 or invalid
+                    precisions = [100.0] * len([c for c in conf_list_for_dim if c >=1.0]) # treat conf 1.0 as high precision
+                    if not precisions: precisions = [0.3 / (1-0.3+1e-6)]
 
-    def _aggregate_confidences(self, new_confidences, base_confidence, weight_new):
+                # Sum of precisions
+                total_precision = sum(precisions)
+                
+                # Convert back to aggregated confidence (total_precision / (total_precision + 1))
+                if total_precision > 1e-6:
+                    combined_confidence = total_precision / (total_precision + 1)
+                else:
+                    combined_confidence = 0.3 # Fallback
+                
+                # Cap confidence
+                aggregated_confidences[dim] = min(0.95, combined_confidence)
+        return aggregated_confidences
+
+    def _aggregate_confidences(self, new_confidences_list, base_aggregated_confidence, weight_for_new_info_block):
         """
-        Properly aggregate confidence using statistical principles.
-        Treats confidence as inverse of variance for principled combination.
+        Aggregates a list of new confidences with a base aggregated confidence.
+        `new_confidences_list`: A list of confidence values from recent evaluations.
+        `base_aggregated_confidence`: The existing aggregated confidence in the base score.
+        `weight_for_new_info_block`: How much weight to give the block of new information.
         """
-        if not new_confidences:
-            return base_confidence
+        if not new_confidences_list:
+            return base_aggregated_confidence
         
-        # Convert confidences to precisions
-        base_precision = base_confidence / (1 - base_confidence + 1e-6)
+        # First, aggregate the new_confidences_list into a single representative confidence
+        # This is similar to _calculate_derived_confidence but for a list input
+        new_precisions = [c / (1 - c + 1e-6) for c in new_confidences_list if 0 <= c < 1]
+        if not new_precisions: # if all confidences were 1.0 or invalid
+            new_precisions = [100.0] * len([c for c in new_confidences_list if c >=1.0]) 
+            if not new_precisions: new_precisions = [0.3 / (1-0.3+1e-6)] # Default if list was empty or all invalid
+
+        aggregated_new_precision = sum(new_precisions)
+        # If new_confidences_list has multiple items, their aggregation represents the "new block"
+        # If it's just one item, aggregated_new_precision is just its precision.
+
+        # Precision of the base score
+        base_precision = base_aggregated_confidence / (1 - base_aggregated_confidence + 1e-6)
         
-        # For multiple new confidences, first aggregate them
-        if len(new_confidences) == 1:
-            new_precision = new_confidences[0] / (1 - new_confidences[0] + 1e-6)
-        else:
-            # Aggregate multiple new confidences first
-            new_precisions = [conf / (1 - conf + 1e-6) for conf in new_confidences]
-            new_precision = sum(new_precisions)
+        # Weighted combination of precisions
+        # The weight_for_new_info_block applies to the entire "new information" block's precision
+        combined_precision = (weight_for_new_info_block * aggregated_new_precision) + \
+                             ((1 - weight_for_new_info_block) * base_precision)
         
-        # Weight the precisions according to the weight_new parameter
-        # This allows us to discount either old or new information
-        effective_base_precision = base_precision * (1 - weight_new) / weight_new if weight_new > 1e-6 else base_precision
-        combined_precision = effective_base_precision + new_precision
-        
-        # Convert back to confidence
         if combined_precision > 1e-6:
-            combined_confidence = combined_precision / (combined_precision + 1)
-            combined_confidence = min(0.95, combined_confidence)
-        else:
-            combined_confidence = max(base_confidence, np.mean(new_confidences))
-        
-        return combined_confidence
+            final_aggregated_confidence = combined_precision / (combined_precision + 1)
+        else: # Fallback, e.g. if all inputs are zero confidence
+            final_aggregated_confidence = max(base_aggregated_confidence, np.mean(new_confidences_list) if new_confidences_list else 0.3)
 
+        return min(0.95, final_aggregated_confidence)
 
     def decide_investments(self, evaluation_round=None, use_comparative=True):
         desirability_method = self.config.get('desirability_method', 'percentage_change') # 'percentage_change' or 'log_ratio'

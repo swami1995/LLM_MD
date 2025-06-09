@@ -8,7 +8,7 @@ from trust_market.auditor import BatchEvaluator # Use BatchEvaluator for compari
 # Assuming google.genai for LLM calls
 from google import genai
 from google.genai import types
-import ipdb
+import logging
 
 # --- Base UserRepresentative (Simplified Logic) ---
 class UserRepresentative(InformationSource):
@@ -66,7 +66,6 @@ class UserRepresentative(InformationSource):
     def add_direct_feedback(self, user_id: Any, agent_id: int, ratings: Dict[str, int]):
         """Stores direct user ratings if the user is represented."""
         if user_id in self.represented_users:
-             # print(f"UserRep {self.source_id} received direct feedback for agent {agent_id} from user {user_id}")
              for dim, rating in ratings.items():
                   if dim in self.expertise_dimensions: # Only store relevant dimensions
                        self.direct_feedback[agent_id][dim].append(rating)
@@ -74,7 +73,6 @@ class UserRepresentative(InformationSource):
     def add_comparison_feedback(self, comparison_data: Dict):
         """Stores comparison results if the user is represented."""
         if comparison_data.get('user_id') in self.represented_users:
-             # print(f"UserRep {self.source_id} received comparison feedback from user {comparison_data.get('user_id')}")
              self.comparison_feedback.append(comparison_data)
 
     def evaluate_agent(self, agent_id, dimensions=None):
@@ -190,10 +188,6 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         # Reset comparison tracking if it's a new round
         if evaluation_round and evaluation_round != self.last_evaluation_round:
-            #  self.derived_agent_scores = {} # Reset derived scores each round
-            print(f"DEBUG: New evaluation round {evaluation_round}. Resetting derived scores and compared pairs.") # DEBUG ROUND RESET
-            # !!! IMPORTANT: Ensure this reset happens if needed. If you want scores to persist across rounds
-            #     in some way, the logic needs careful review. Let's assume reset per round for now.
             self.compared_pairs = set()
             self.comparison_results_cache = {}
             self.agent_comparison_counts = defaultdict(int)
@@ -220,8 +214,6 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         min_convs = self.config.get('min_conversations_required', 1)
 
         # if len(agent_conversations) < min_convs:
-        #     print(f"DEBUG: Agent {agent_id} has too few convs ({len(agent_conversations)}). Returning base scores with low conf.") # DEBUG LOW CONV
-        #     # print(f"Agent {agent_id} has too few conversations ({len(agent_conversations)} < {min_convs}) for holistic eval.")
         #     # Return base score with reduced confidence
         #     return {dim: (score, min(conf, 0.3)) for dim, (score, conf) in base_scores_with_conf.items()}
 
@@ -282,7 +274,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             
             if comparison_cache_key in self.comparison_results_cache:
                 print(f"DEBUG: Using cached comparison result for {agent_id} vs {other_id}")
-                derived_scores = self.comparison_results_cache[comparison_cache_key]
+                derived_scores, comparison_confidences = self.comparison_results_cache[comparison_cache_key]
             else:
                 print(f"DEBUG: Performing new comparison between {agent_id} vs {other_id}")
                 # Use the BatchEvaluator for conversation comparison
@@ -524,28 +516,10 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         for dim in dimensions_to_evaluate:
             if dim in new_confidences:
                 self.derived_agent_confidences[agent_id][dim].append(new_confidences[dim])
-
-    def _update_agent_derived_scores(self, agent_id, new_scores, dimensions_to_evaluate):
-        """
-        Helper method to update derived scores for an agent based on new comparison data.
-        Uses a weighted average between existing and new scores.
-        """
-        if agent_id not in self.derived_agent_scores:
-            self.derived_agent_scores[agent_id] = {}
-        
-        # Weight for new scores vs existing (could be configurable)
-        new_score_weight = self.config.get('derived_score_update_weight', 0.3)
-        
-        for dim in dimensions_to_evaluate:
-            if dim in new_scores:
-                existing_score = self.derived_agent_scores[agent_id].get(dim, 0.5)
-                new_score = new_scores[dim]
-                
-                # Weighted average: give less weight to new scores to avoid volatility
-                updated_score = (1 - new_score_weight) * existing_score + new_score_weight * new_score
-                self.derived_agent_scores[agent_id][dim] = updated_score
-                
-                print(f"DEBUG: Updated derived score for Agent {agent_id}, Dim {dim}: {existing_score:.3f} -> {updated_score:.3f} (new={new_score:.3f}, weight={new_score_weight})")
+                max_len = self.config.get('max_confidence_history', 20) # Default to 20 if not in config
+                conf_list = self.derived_agent_confidences[agent_id][dim]
+                if len(conf_list) > max_len:
+                    self.derived_agent_confidences[agent_id][dim] = conf_list[-max_len:]
 
     def get_all_agent_scores_for_round(self, evaluation_round, dimensions=None):
         """
@@ -890,9 +864,10 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 
                 p_target_effective = p_current + (p_target_effective_est - p_current) * confidence_in_eval
                 min_op_p = self.config.get('min_operational_price', 0.01)
-                max_op_p = self.config.get('max_operational_price', 0.99)
-                p_target_effective = max(min_op_p, min(max_op_p, p_target_effective))
-                print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_effective={p_target_effective:.4f} (clamped between {min_op_p}-{max_op_p})")
+                # max_op_p = self.config.get('max_operational_price', 0.99)
+                # p_target_effective = max(min_op_p, min(max_op_p, p_target_effective))
+                p_target_effective = max(min_op_p, p_target_effective)
+                print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_effective={p_target_effective:.4f} (clamped at {min_op_p})")#-{max_op_p})")
 
                 attractiveness = 0.0
                 if desirability_method == 'percentage_change':
