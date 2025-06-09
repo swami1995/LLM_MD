@@ -141,6 +141,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         self.last_evaluation_round = -1
         self.compared_pairs = set()
         self.derived_agent_scores = {} # Stores {agent_id: {dimension: score_0_1}}
+        self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
         
         # NEW: Track comparison results for efficient updates
         self.comparison_results_cache = {} # {(agent1_id, agent2_id, eval_round): {agent_id: {dim: score}}}
@@ -202,10 +203,11 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # --- Start Evaluation Logic ---
         # Get base scores (from previous comparisons in this round or neutral)
         base_scores_0_1 = self.derived_agent_scores.get(agent_id, {})
+        base_confidences = self._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
         print(f"DEBUG: Agent {agent_id} - Base derived scores for this round: {base_scores_0_1}")
 
         base_scores_with_conf = {
-            dim: (score, 0.5) # Assign moderate confidence to derived scores
+            dim: (score, base_confidences.get(dim, 0.3)) # Assign moderate confidence to derived scores
             for dim, score in base_scores_0_1.items()
             if dim in dimensions_to_evaluate
         }
@@ -269,6 +271,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         # --- Perform Comparisons and Update Both Agents ---
         accumulated_scores = defaultdict(list)
+        accumulated_confidences = defaultdict(list)
         comparison_count = 0
 
         for other_id, other_convs in comparison_agents_selected:
@@ -292,19 +295,25 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
                 # Get pseudo-absolute scores from comparison
                 derived_scores = self.evaluator.get_agent_scores(comparison_results, agent_id, other_id)
+                comparison_confidences = self._extract_comparison_confidences(comparison_results, agent_id, other_id)
                 
                 # Cache the comparison result for future use
-                self.comparison_results_cache[comparison_cache_key] = derived_scores
-                print(f"DEBUG: Cached comparison result: {derived_scores}")
+                self.comparison_results_cache[comparison_cache_key] = (derived_scores, comparison_confidences)
+                print(f"DEBUG: Cached comparison result: {derived_scores, comparison_confidences}")
                 
                 # Update derived scores for BOTH agents
-                self._update_agent_derived_scores(agent_id, derived_scores.get(agent_id, {}), dimensions_to_evaluate)
-                self._update_agent_derived_scores(other_id, derived_scores.get(other_id, {}), dimensions_to_evaluate)
+                self._update_agent_derived_scores(agent_id, derived_scores.get(agent_id, {}), dimensions_to_evaluate,
+                                                  {agent_id: comparison_confidences.get(agent_id, {})})
+                self._update_agent_derived_scores(other_id, derived_scores.get(other_id, {}), dimensions_to_evaluate,
+                                                  {agent_id: comparison_confidences.get(agent_id, {})})
+                self._update_agent_confidences(agent_id, comparison_confidences.get(agent_id, {}), dimensions_to_evaluate)
+                self._update_agent_confidences(other_id, comparison_confidences.get(other_id, {}), dimensions_to_evaluate)
 
             # Accumulate scores for the target agent_id
             for dim in dimensions_to_evaluate:
                 if dim in derived_scores.get(agent_id, {}):
                     accumulated_scores[dim].append(derived_scores[agent_id][dim])
+                    accumulated_confidences[dim].append(comparison_confidences.get(agent_id, {}).get(dim, 0.3))
                 else:
                     print(f"DEBUG WARNING: Agent {agent_id} not found in derived scores from comparison with {other_id}")
 
@@ -318,12 +327,35 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         for dim in dimensions_to_evaluate:
             base_score, base_conf = base_scores_with_conf.get(dim, (0.5, 0.3))
             if dim in accumulated_scores and accumulated_scores[dim]:
-                new_avg = sum(accumulated_scores[dim]) / len(accumulated_scores[dim])
-                final_score = (weight_new * new_avg) + ((1 - weight_new) * base_score)
-                # Confidence reflects number of comparisons and base confidence
-                confidence = min(0.9, 0.4 + (comparison_count * 0.05) + base_conf * 0.1)
-                final_eval_scores[dim] = (final_score, confidence)
-                print(f"DEBUG: Agent {agent_id} Dim {dim}: new_avg={new_avg:.3f}, base={base_score:.3f} -> final={final_score:.3f}, conf={confidence:.3f}")
+                new_scores = accumulated_scores[dim]
+                new_confidences = accumulated_confidences[dim]
+                
+                # Confidence-weighted average of new scores
+                if sum(new_confidences) > 1e-6:
+                    confidence_weighted_avg = sum(s * c for s, c in zip(new_scores, new_confidences)) / sum(new_confidences)
+                    avg_new_confidence = sum(new_confidences) / len(new_confidences)
+                else:
+                    confidence_weighted_avg = sum(new_scores) / len(new_scores)
+                    avg_new_confidence = 0.3
+                
+                # Determine optimal weighting based on relative confidence
+                total_confidence = base_conf + avg_new_confidence
+                if total_confidence > 1e-6:
+                    weight_new = avg_new_confidence / total_confidence
+                else:
+                    weight_new = 0.5  # Default equal weighting
+                
+                # Apply confidence-based weighting with some persistence of base scores
+                persistence_factor = self.config.get('base_score_persistence', 0.2)
+                effective_weight_new = weight_new * (1 - persistence_factor)
+                
+                final_score = (effective_weight_new * confidence_weighted_avg) + ((1 - effective_weight_new) * base_score)
+                final_confidence = self._aggregate_confidences(new_confidences, base_conf, effective_weight_new)
+                
+                final_eval_scores[dim] = (final_score, final_confidence)
+                print(f"DEBUG: Agent {agent_id} Dim {dim}: conf_weighted_avg={confidence_weighted_avg:.3f}, "
+                    f"base={base_score:.3f}, weight_new={effective_weight_new:.3f} -> "
+                    f"final={final_score:.3f}, conf={final_confidence:.3f}")
             else:
                 final_eval_scores[dim] = (base_score, base_conf * 0.9)
                 print(f"DEBUG: Agent {agent_id} Dim {dim}: No new data. Using base={base_score:.3f}, final_conf={base_conf * 0.9:.3f}")
@@ -341,6 +373,157 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         self.agent_evaluation_cache[cache_key] = final_eval_scores
         print(f"--- UserRep {self.source_id} finished evaluating Agent {agent_id}. Final Scores: {final_eval_scores} ---")
         return final_eval_scores
+    
+    def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
+        """
+        Extract confidence information from comparison results.
+        Maps the comparison confidence to confidence in the derived pseudo-scores.
+        """
+        agent_confidences = {
+            agent_a_id: {},
+            agent_b_id: {}
+        }
+        
+        for dimension, result in comparison_results.items():
+            raw_confidence = result.get("confidence", 2.5)  # 0-5 scale from LLM, default to middle
+            winner = result.get("winner", "tie")
+            
+            # Convert LLM confidence (0-5) to our confidence scale (0-1)
+            normalized_confidence = min(1.0, raw_confidence / 5.0)
+            
+            # Confidence in derived score depends on:
+            # 1. How confident the LLM was in the comparison
+            # 2. How decisive the comparison was (strong winner vs tie)
+            if winner == "tie":
+                # Moderate confidence for both agents when it's a tie - we're confident it's close
+                base_confidence = normalized_confidence * 0.6  # Ties still give us information
+            else:
+                # Higher confidence for clear winners, scaled by LLM confidence
+                base_confidence = normalized_confidence * 0.9  # As you suggested
+            
+            # Both agents get the same base confidence from this comparison
+            agent_confidences[agent_a_id][dimension] = base_confidence
+            agent_confidences[agent_b_id][dimension] = base_confidence
+        
+        return agent_confidences
+
+    def _update_agent_derived_scores(self, agent_id, new_scores, dimensions_to_evaluate, new_confidences=None):
+        """
+        Helper method to update derived scores for an agent based on new comparison data.
+        Uses confidence-weighted averaging between existing and new scores.
+        """
+        if agent_id not in self.derived_agent_scores:
+            self.derived_agent_scores[agent_id] = {}
+        
+        # Get current confidence estimates for existing scores
+        existing_confidences = self._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
+        
+        for dim in dimensions_to_evaluate:
+            if dim in new_scores:
+                existing_score = self.derived_agent_scores[agent_id].get(dim, 0.5)
+                new_score = new_scores[dim]
+                
+                # Get confidences
+                existing_conf = existing_confidences.get(dim, 0.3)
+                new_conf = new_confidences.get(dim, {}).get(dim, 0.5) if new_confidences else 0.5
+                
+                # Confidence-weighted update (inverse variance weighting principle)
+                if existing_conf + new_conf > 1e-6:  # Avoid division by zero
+                    weight_new = new_conf / (existing_conf + new_conf)
+                    updated_score = (1 - weight_new) * existing_score + weight_new * new_score
+                else:
+                    # Fallback to simple average if confidences are both near zero
+                    updated_score = 0.5 * (existing_score + new_score)
+                
+                self.derived_agent_scores[agent_id][dim] = updated_score
+                
+                print(f"DEBUG: Confidence-weighted update for Agent {agent_id}, Dim {dim}: "
+                    f"{existing_score:.3f}(conf={existing_conf:.3f}) + {new_score:.3f}(conf={new_conf:.3f}) "
+                    f"-> {updated_score:.3f} (weight_new={weight_new:.3f})")
+
+    def _calculate_derived_confidence(self, agent_id, dimensions_to_evaluate):
+        """
+        Calculate confidence in derived scores using proper statistical aggregation.
+        Treats each comparison as providing a noisy estimate of the true score.
+        """
+        confidences = {}
+        
+        for dim in dimensions_to_evaluate:
+            conf_list = self.derived_agent_confidences.get(agent_id, {}).get(dim, [])
+            
+            if not conf_list:
+                confidences[dim] = 0.3  # Default low confidence
+            else:
+                # Statistical confidence aggregation
+                # Each measurement has variance inversely proportional to confidence
+                # Combined variance = 1 / sum(1/individual_variances)
+                
+                # Convert confidences to precisions (inverse of variance)
+                # conf=1 -> precision=100, conf=0.1 -> precision=1
+                precisions = [(conf / (1 - conf + 1e-6)) for conf in conf_list]
+                
+                # Combined precision is sum of individual precisions
+                combined_precision = sum(precisions)
+                
+                # Convert back to confidence
+                if combined_precision > 1e-6:
+                    combined_confidence = combined_precision / (combined_precision + 1)
+                    # Cap at reasonable maximum
+                    combined_confidence = min(0.95, combined_confidence)
+                else:
+                    combined_confidence = 0.3
+                
+                # Apply sample size adjustment (more comparisons = more confidence)
+                sample_size_factor = 1 + 0.1 * np.log1p(len(conf_list))
+                combined_confidence = min(0.95, combined_confidence * sample_size_factor)
+                
+                confidences[dim] = combined_confidence
+                print(f"DEBUG: Derived confidence for Agent {agent_id}, Dim {dim}: "
+                    f"{len(conf_list)} comparisons -> {combined_confidence:.3f}")
+        
+        return confidences
+
+    def _aggregate_confidences(self, new_confidences, base_confidence, weight_new):
+        """
+        Properly aggregate confidence using statistical principles.
+        Treats confidence as inverse of variance for principled combination.
+        """
+        if not new_confidences:
+            return base_confidence
+        
+        # Convert confidences to precisions
+        base_precision = base_confidence / (1 - base_confidence + 1e-6)
+        
+        # For multiple new confidences, first aggregate them
+        if len(new_confidences) == 1:
+            new_precision = new_confidences[0] / (1 - new_confidences[0] + 1e-6)
+        else:
+            # Aggregate multiple new confidences first
+            new_precisions = [conf / (1 - conf + 1e-6) for conf in new_confidences]
+            new_precision = sum(new_precisions)
+        
+        # Weight the precisions according to the weight_new parameter
+        # This allows us to discount either old or new information
+        effective_base_precision = base_precision * (1 - weight_new) / weight_new if weight_new > 1e-6 else base_precision
+        combined_precision = effective_base_precision + new_precision
+        
+        # Convert back to confidence
+        if combined_precision > 1e-6:
+            combined_confidence = combined_precision / (combined_precision + 1)
+            combined_confidence = min(0.95, combined_confidence)
+        else:
+            combined_confidence = max(base_confidence, np.mean(new_confidences))
+        
+        return combined_confidence
+
+    def _update_agent_confidences(self, agent_id, new_confidences, dimensions_to_evaluate):
+        """Update confidence tracking for an agent."""
+        if not hasattr(self, 'derived_agent_confidences'):
+            self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
+        
+        for dim in dimensions_to_evaluate:
+            if dim in new_confidences:
+                self.derived_agent_confidences[agent_id][dim].append(new_confidences[dim])
 
     def _update_agent_derived_scores(self, agent_id, new_scores, dimensions_to_evaluate):
         """
