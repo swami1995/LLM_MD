@@ -260,6 +260,11 @@ class AuditorWithProfileAnalysis(InformationSource):
         self.compared_pairs = set() # Track compared pairs within a round
         self.derived_agent_scores = {} # Store scores derived from comparisons
 
+        # --- NEW: mirror user_rep tracking for confidences & cache ---
+        self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
+        self.comparison_results_cache = {}       # {(aid1,aid2,round): (derived_scores, confidences)}
+        self.agent_comparison_counts = defaultdict(int)
+
     def add_agent_profile(self, agent_id: int, profile: Dict):
         """Stores agent profile data."""
         self.agent_profiles[agent_id] = profile
@@ -336,14 +341,15 @@ class AuditorWithProfileAnalysis(InformationSource):
 
         dimensions = dimensions or self.expertise_dimensions
         cache_key = ("comp", agent_id, tuple(sorted(dimensions)), evaluation_round)
-        if cache_key in self.comparison_evaluation_cache: return self.comparison_evaluation_cache[cache_key]
+        if cache_key in self.comparison_evaluation_cache:
+            return self.comparison_evaluation_cache[cache_key]
 
-        # Update round tracking
+        # --- NEW: reset derived scores/comparisons on new round ---
         if evaluation_round and evaluation_round != self.last_evaluation_round:
-            #  self.derived_agent_scores = {} # Reset derived scores each round
-            #  self.compared_pairs = set()
+            self.derived_agent_scores.clear()
+            self.compared_pairs.clear()
+            self.comparison_results_cache.clear()
             self.last_evaluation_round = evaluation_round
-
 
         base_scores = self.derived_agent_scores.get(agent_id, {})
         base_scores_with_conf = {dim: (score, 0.5) for dim, score in base_scores.items() if dim in dimensions}
@@ -387,6 +393,7 @@ class AuditorWithProfileAnalysis(InformationSource):
 
         # --- Perform Comparisons ---
         accumulated_scores = defaultdict(list)
+        accumulated_confs  = defaultdict(list)
         comparison_count = 0
         for other_id, other_convs, other_profile in comparison_agents:
             # if (agent_id, other_id) in self.compared_pairs: continue # Avoid re-comparing within same round
@@ -413,28 +420,36 @@ class AuditorWithProfileAnalysis(InformationSource):
             if comparison_results:
                 # Use BatchEvaluator's method to get scores
                 derived_scores = self.batch_evaluator.get_agent_scores(comparison_results, agent_id, other_id)
+                confs = self._extract_comparison_confidences(comparison_results, agent_id, other_id)
                 for dim in dimensions:
                     if dim in derived_scores.get(agent_id, {}):
                         accumulated_scores[dim].append(derived_scores[agent_id][dim])
+                        accumulated_confs[dim].append(confs[agent_id][dim])
                 comparison_count += 1
 
-        # --- Calculate Final Scores ---
+        # --- NEW: confidence‐weighted averaging ---
         final_scores = {}
-        weight = self.config.get('new_evaluation_weight', 0.7)
+        weight_new = self.config.get('new_evaluation_weight', 0.7)
         for dim in dimensions:
             base_score, base_conf = base_scores_with_conf.get(dim, (0.5, 0.3))
-            if dim in accumulated_scores and accumulated_scores[dim]:
-                new_avg = sum(accumulated_scores[dim]) / len(accumulated_scores[dim])
-                final_score = (weight * new_avg) + ((1 - weight) * base_score)
-                confidence = min(0.9, 0.4 + (comparison_count * 0.05) + base_conf * 0.1) # Adjusted confidence calc
-                final_scores[dim] = (final_score, confidence)
-            else: # No new comparison data for this dim
-                final_scores[dim] = (base_score, base_conf * 0.9) # Slightly reduce conf
+            new_scores = accumulated_scores.get(dim, [])
+            new_confs  = accumulated_confs.get(dim, [])
+            if new_scores:
+                # score = simple avg or conf‐weighted avg
+                if sum(new_confs) > 0:
+                    score = sum(s*c for s,c in zip(new_scores,new_confs)) / sum(new_confs)
+                else:
+                    score = sum(new_scores)/len(new_scores)
+                # combine old/new
+                final_score = weight_new*score + (1-weight_new)*base_score
+                # aggregate confidence properly
+                final_conf  = self._aggregate_confidences(new_confs, base_conf, weight_new)
+            else:
+                final_score, final_conf = base_score, base_conf*0.9
 
-        # Update derived scores cache
-        if agent_id not in self.derived_agent_scores: self.derived_agent_scores[agent_id] = {}
-        for dim, (score, _) in final_scores.items(): self.derived_agent_scores[agent_id][dim] = score
+            final_scores[dim] = (final_score, final_conf)
 
+        # cache & return
         self.comparison_evaluation_cache[cache_key] = final_scores
         return final_scores
 
@@ -490,11 +505,32 @@ class AuditorWithProfileAnalysis(InformationSource):
         return combined_results
 
     # Override evaluate_agent to use the hybrid method
-    def evaluate_agent(self, agent_id, conversations=None, dimensions=None, evaluation_round=None, use_comparative=False):
-         """Evaluate agent using hybrid or comparative approach."""
-         # Note: 'conversations' parameter is optional here, hybrid audit can retrieve stored ones.
-         return self.perform_hybrid_audit(agent_id, conversations, False, dimensions, evaluation_round, use_comparative)
+    def evaluate_agent(self, agent_id, conversations=None,
+                       dimensions=None, evaluation_round=None,
+                       use_comparative=False):
+        """Evaluate agent using hybrid or comparative approach."""
+        # --- NEW: on new round, clear per‐round state ---
+        if evaluation_round is not None and evaluation_round != self.last_evaluation_round:
+            self.derived_agent_scores.clear()
+            self.derived_agent_confidences.clear()
+            self.compared_pairs.clear()
+            self.comparison_results_cache.clear()
+            self.agent_comparison_counts.clear()
+            # Optionally clear LLM‐audit caches for fresh prompts:
+            self.profile_evaluation_cache.clear()
+            self.conversation_audit_cache.clear()
+            self.comparison_evaluation_cache.clear()
+            self.hybrid_evaluation_cache.clear()
+            self.last_evaluation_round = evaluation_round
 
+        # Delegate to hybrid audit
+        result = self.perform_hybrid_audit(agent_id,
+                                           conversations,
+                                           detailed=False,
+                                           dimensions=dimensions,
+                                           evaluation_round=evaluation_round,
+                                           use_comparative=use_comparative)
+        return result
 
     def _get_target_price_from_rank_mapping(self, agent_id, dimension, own_evaluations, market_prices, confidence_in_own_eval):
         """
@@ -576,42 +612,6 @@ class AuditorWithProfileAnalysis(InformationSource):
                           confidence_in_own_eval * rank_correction_strength
 
         return p_target_nudged
-
-# In auditor.py or user_rep.py
-# Inside the relevant InformationSource class (e.g., AuditorWithProfileAnalysis or UserRepresentativeWithHolisticEvaluation)
-
-    def _calculate_total_portfolio_value_potential(self):
-        """
-        Calculates the sum of the current market value of all shares held by this source
-        PLUS all available (uninvested) cash capacity of this source.
-        This represents the total value this source could theoretically manage.
-        """
-        total_value_of_holdings = 0
-        # Sum market value of current share holdings
-        # source_investments structure: self.source_investments[source_id][agent_id][dimension] = shares
-        if self.source_id in self.market.source_investments:
-            for agent_id, dims_data in self.market.source_investments[self.source_id].items():
-                for dimension, shares_held in dims_data.items():
-                    if shares_held > 1e-5:
-                        self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dimension) # Ensure AMM params exist
-                        amm_params = self.market.agent_amm_params[agent_id][dimension]
-                        if amm_params['T'] > 1e-6: # Avoid division by zero if T is tiny
-                            price = amm_params['R'] / amm_params['T']
-                            total_value_of_holdings += shares_held * price
-                        # else: if T is zero, price is undefined/infinite, value of shares is complex.
-                        # For simplicity, if T is zero, those shares are currently "unpriceable" by this AMM.
-
-        # Sum available cash from all dimensions for this source
-        # source_available_capacity structure: self.source_available_capacity[source_id][dimension] = cash
-        total_available_cash = 0
-        if self.source_id in self.market.source_available_capacity:
-            total_available_cash = sum(self.market.source_available_capacity[self.source_id].values())
-
-        total_potential = total_value_of_holdings + total_available_cash
-        
-        # Ensure a minimum potential to avoid issues if source starts with no cash/shares
-        return max(total_potential, self.config.get('min_portfolio_value_potential', 100.0))
-
 
     def _calculate_total_portfolio_value_potential(self):
         """
@@ -706,10 +706,12 @@ class AuditorWithProfileAnalysis(InformationSource):
             # At steady state, if R_ss is the reserve, need to estimate T_ss
             # Assume T remains relatively stable (or decreases slowly as investors buy)
             current_T = self.market.agent_amm_params[agent_id][dimension]['T']
+            current_R = self.market.agent_amm_params[agent_id][dimension]['R']
             
             # Estimate T at steady state (some shares bought from treasury)
-            treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
-            projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
+            # treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
+            # projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
+            projected_T = current_T * current_R / expected_capital 
             
             # Projected price = R_ss / T_ss
             projected_price = expected_capital / projected_T if projected_T > 0 else 0
@@ -730,6 +732,93 @@ class AuditorWithProfileAnalysis(InformationSource):
             projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
 
         return projected_prices, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
+
+    def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
+        """
+        Extract confidence information from comparison results.
+        Maps the comparison confidence to confidence in the derived pseudo-scores.
+        """
+        agent_confidences = {
+            agent_a_id: {},
+            agent_b_id: {}
+        }
+        
+        for dimension, result in comparison_results.items():
+            raw_confidence = result.get("confidence", 2.5)  # 0-5 scale from LLM, default to middle
+            winner = result.get("winner", "tie")
+            
+            # Convert LLM confidence (0-5) to our confidence scale (0-1)
+            normalized_confidence = min(1.0, raw_confidence / 5.0)
+            
+            # Confidence in derived score depends on:
+            # 1. How confident the LLM was in the comparison
+            # 2. How decisive the comparison was (strong winner vs tie)
+            if winner == "tie":
+                # Moderate confidence for both agents when it's a tie - we're confident it's close
+                base_confidence = normalized_confidence * 0.6  # Ties still give us information
+            else:
+                # Higher confidence for clear winners, scaled by LLM confidence
+                base_confidence = normalized_confidence * 0.9
+            
+            # Both agents get the same base confidence from this comparison
+            agent_confidences[agent_a_id][dimension] = base_confidence
+            agent_confidences[agent_b_id][dimension] = base_confidence
+        
+        return agent_confidences
+
+    def _calculate_derived_confidence(self, agent_id, dimensions_to_evaluate):
+        """
+        Calculate confidence in derived scores using proper statistical aggregation.
+        Treats each comparison as providing a noisy estimate of the true score.
+        """
+        confidences = {}
+        
+        for dim in dimensions_to_evaluate:
+            # For auditor, confidence comes from profile analysis confidence
+            if agent_id in self.agent_profiles:
+                profile_results = self.perform_profile_audit(agent_id, [dim])
+                if dim in profile_results:
+                    confidences[dim] = profile_results[dim][1]
+                else:
+                    confidences[dim] = 0.5  # Default moderate confidence
+            else:
+                confidences[dim] = 0.3  # Default low confidence if no profile
+        
+        return confidences
+
+    def _aggregate_confidences(self, new_confidences, base_confidence, weight_new):
+        """
+        Properly aggregate confidence using statistical principles.
+        Treats confidence as inverse of variance for principled combination.
+        """
+        if not new_confidences:
+            return base_confidence
+        
+        # Convert confidences to precisions
+        base_precision = base_confidence / (1 - base_confidence + 1e-6)
+        
+        # For multiple new confidences, first aggregate them
+        if len(new_confidences) == 1:
+            new_precision = new_confidences[0] / (1 - new_confidences[0] + 1e-6)
+        else:
+            # Aggregate multiple new confidences first
+            new_precisions = [conf / (1 - conf + 1e-6) for conf in new_confidences]
+            new_precision = sum(new_precisions)
+        
+        # Weight the precisions according to the weight_new parameter
+        # This allows us to discount either old or new information
+        effective_base_precision = base_precision * (1 - weight_new) / weight_new if weight_new > 1e-6 else base_precision
+        combined_precision = effective_base_precision + new_precision
+        
+        # Convert back to confidence
+        if combined_precision > 1e-6:
+            combined_confidence = combined_precision / (combined_precision + 1)
+            combined_confidence = min(0.95, combined_confidence)
+        else:
+            combined_confidence = max(base_confidence, np.mean(new_confidences))
+        
+        return combined_confidence
+
 
     def decide_investments(self, evaluation_round=None, use_comparative=True):
         desirability_method = self.config.get('desirability_method', 'percentage_change') # 'percentage_change' or 'log_ratio'
