@@ -125,7 +125,7 @@ class UserRepresentative(InformationSource):
 class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     """
     User representative that evaluates agents holistically across batches of conversations using LLM.
-"""
+    """
 
     def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None, api_model_name='gemini-2.0-flash'): # Added api_key
         super().__init__(source_id, user_segment, representative_profile, market)
@@ -141,6 +141,10 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         self.last_evaluation_round = -1
         self.compared_pairs = set()
         self.derived_agent_scores = {} # Stores {agent_id: {dimension: score_0_1}}
+        
+        # NEW: Track comparison results for efficient updates
+        self.comparison_results_cache = {} # {(agent1_id, agent2_id, eval_round): {agent_id: {dim: score}}}
+        self.agent_comparison_counts = defaultdict(int) # {agent_id: count} - tracks how many comparisons each agent has
 
         # Configuration specific to this Rep's strategy
         self.config = {
@@ -165,18 +169,22 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     def evaluate_agent(self, agent_id, dimensions=None, evaluation_round=None, use_comparative=True):
         """
         Evaluates an agent using holistic comparison against peers.
+        Now efficiently updates scores for both agents in each comparison.
 
         Returns: Dict mapping dimensions to (rating_0_1, confidence) tuples.
         TODO : Make the compared pairs into a dictionary storing the corresponding scores for each agent pair within a round for caching purposes to avoid recomputing. 
         TODO : Need to be more careful about keeping/carrying forward derived scores across evaluation rounds.
+        TODO : Need to ensure that the scores of other agents are also updated in the derived_agent_scores cache...
+        TODO : Need to treat confidence more carefully and make sure things are somewhat calibrated.
+        TODO : Figure out what to do about confidence for derived scores. 
         """
-        print(f"\n--- UserRep {self.source_id} evaluating Agent {agent_id} for round {evaluation_round} ---") # DEBUG START
+        print(f"\n--- UserRep {self.source_id} evaluating Agent {agent_id} for round {evaluation_round} ---")
 
         dimensions_to_evaluate = dimensions or self.expertise_dimensions
         # Use cache if available and for the current round
         cache_key = (agent_id, tuple(sorted(dimensions_to_evaluate)), evaluation_round)
         if evaluation_round == self.last_evaluation_round and cache_key in self.agent_evaluation_cache:
-            print(f"DEBUG: Cache hit for UserRep eval agent {agent_id} round {evaluation_round}. Returning cached result.") # DEBUG CACHE
+            print(f"DEBUG: Cache hit for UserRep eval agent {agent_id} round {evaluation_round}. Returning cached result.")
             return self.agent_evaluation_cache[cache_key]
 
         # Reset comparison tracking if it's a new round
@@ -186,23 +194,25 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             # !!! IMPORTANT: Ensure this reset happens if needed. If you want scores to persist across rounds
             #     in some way, the logic needs careful review. Let's assume reset per round for now.
             self.compared_pairs = set()
+            self.comparison_results_cache = {}
+            self.agent_comparison_counts = defaultdict(int)
             self.last_evaluation_round = evaluation_round
             print(f"UserRep {self.source_id} starting new evaluation round {evaluation_round}")
 
         # --- Start Evaluation Logic ---
         # Get base scores (from previous comparisons in this round or neutral)
         base_scores_0_1 = self.derived_agent_scores.get(agent_id, {})
-        print(f"DEBUG: Agent {agent_id} - Base derived scores for this round: {base_scores_0_1}") # DEBUG BASE
+        print(f"DEBUG: Agent {agent_id} - Base derived scores for this round: {base_scores_0_1}")
 
         base_scores_with_conf = {
             dim: (score, 0.5) # Assign moderate confidence to derived scores
             for dim, score in base_scores_0_1.items()
             if dim in dimensions_to_evaluate
         }
-        if not base_scores_0_1: # Initialize if no prior derived score
+        if not base_scores_0_1:
             base_scores_with_conf = {dim: (0.5, 0.3) for dim in dimensions_to_evaluate}
 
-        print(f"DEBUG: Agent {agent_id} - Initial scores with confidence: {base_scores_with_conf}") # DEBUG BASE CONF
+        print(f"DEBUG: Agent {agent_id} - Initial scores with confidence: {base_scores_with_conf}")
 
         agent_conversations = self.get_agent_conversations(agent_id)
         min_convs = self.config.get('min_conversations_required', 1)
@@ -222,51 +232,74 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
              if len(other_convs) >= min_convs:
                  valid_comparison_agents.append((other_id, other_convs))
 
-        print(f"DEBUG: Agent {agent_id} - Found {len(valid_comparison_agents)} valid comparison agents.") # DEBUG PEERS
+        print(f"DEBUG: Agent {agent_id} - Found {len(valid_comparison_agents)} valid comparison agents.")
         if not valid_comparison_agents:
              print(f"No valid comparison agents found for agent {agent_id}.")
-             return base_scores_with_conf # Return base if no one to compare to
+             return base_scores_with_conf
 
-        # --- Select Comparison Subset ---
+        # --- Select Comparison Subset (prioritize new comparisons) ---
         import random
         num_to_compare = self.config.get('comparison_agents_per_target', 3)
         comparison_agents_selected = []
-        if len(valid_comparison_agents) > num_to_compare:
-            # Prioritize new comparisons
-            new_comps = [(oid, c) for oid, c in valid_comparison_agents if (agent_id, oid) not in self.compared_pairs]
-            if True: #len(new_comps) >= num_to_compare:
-                comparison_agents_selected = random.sample(new_comps, num_to_compare)
-            # else:
-            #     old_comps = [(oid, c) for oid, c in valid_comparison_agents if (agent_id, oid) in self.compared_pairs]
-            #     needed = num_to_compare - len(new_comps)
-            #     comparison_agents_selected = new_comps + random.sample(old_comps, min(needed, len(old_comps)))
+        
+        # Prioritize agents we haven't compared with yet in this round
+        new_comparison_candidates = [
+            (oid, c) for oid, c in valid_comparison_agents 
+            if (min(agent_id, oid), max(agent_id, oid), evaluation_round) not in self.comparison_results_cache
+        ]
+        
+        if len(new_comparison_candidates) >= num_to_compare:
+            comparison_agents_selected = random.sample(new_comparison_candidates, num_to_compare)
         else:
-            comparison_agents_selected = valid_comparison_agents
-        selected_ids = [oid for oid, _ in comparison_agents_selected]
-        print(f"DEBUG: Agent {agent_id} - Selected comparison agents: {selected_ids}") # DEBUG SELECTED PEERS
+            # Use all new candidates plus some existing ones if needed
+            comparison_agents_selected = new_comparison_candidates
+            remaining_needed = num_to_compare - len(new_comparison_candidates)
+            if remaining_needed > 0:
+                existing_candidates = [
+                    (oid, c) for oid, c in valid_comparison_agents 
+                    if (oid, c) not in new_comparison_candidates
+                ]
+                if existing_candidates:
+                    comparison_agents_selected.extend(
+                        random.sample(existing_candidates, min(remaining_needed, len(existing_candidates)))
+                    )
 
-        # --- Perform Comparisons ---
+        selected_ids = [oid for oid, _ in comparison_agents_selected]
+        print(f"DEBUG: Agent {agent_id} - Selected comparison agents: {selected_ids}")
+
+        # --- Perform Comparisons and Update Both Agents ---
         accumulated_scores = defaultdict(list)
         comparison_count = 0
-        # print(f"UserRep {self.source_id} comparing agent {agent_id} against {[oid for oid, _ in comparison_agents_selected]}")
 
         for other_id, other_convs in comparison_agents_selected:
-            print(f"DEBUG: --> Comparing {agent_id} vs {other_id}") # DEBUG COMPARISON PAIR
-            # if (agent_id, other_id) in self.compared_pairs: continue # Skip if already compared this round
+            print(f"DEBUG: --> Comparing {agent_id} vs {other_id}")
+            
+            # Check if we already have this comparison result cached
+            comparison_cache_key = (min(agent_id, other_id), max(agent_id, other_id), evaluation_round)
+            
+            if comparison_cache_key in self.comparison_results_cache:
+                print(f"DEBUG: Using cached comparison result for {agent_id} vs {other_id}")
+                derived_scores = self.comparison_results_cache[comparison_cache_key]
+            else:
+                print(f"DEBUG: Performing new comparison between {agent_id} vs {other_id}")
+                # Use the BatchEvaluator for conversation comparison
+                comparison_results = self.evaluator.compare_agent_batches(
+                    agent_conversations, agent_id,
+                    other_convs, other_id,
+                    dimensions_to_evaluate
+                )
+                print(f"DEBUG: Raw comparison result ({agent_id} vs {other_id}): {comparison_results}")
 
-            # self.compared_pairs.add((agent_id, other_id))
-            # self.compared_pairs.add((other_id, agent_id)) # Mark symmetric pair
-
-            # Use the BatchEvaluator for conversation comparison
-            comparison_results = self.evaluator.compare_agent_batches(
-                agent_conversations, agent_id,
-                other_convs, other_id,
-                dimensions_to_evaluate # Pass only relevant dimensions
-            )
-            print(f"DEBUG: Raw comparison result ({agent_id} vs {other_id}): {comparison_results}") # DEBUG LLM RAW
-
-            # Get pseudo-absolute scores from comparison
-            derived_scores = self.evaluator.get_agent_scores(comparison_results, agent_id, other_id)
+                # Get pseudo-absolute scores from comparison
+                derived_scores = self.evaluator.get_agent_scores(comparison_results, agent_id, other_id)
+                
+                # Cache the comparison result for future use
+                self.comparison_results_cache[comparison_cache_key] = derived_scores
+                print(f"DEBUG: Cached comparison result: {derived_scores}")
+                
+                # Update derived scores for BOTH agents
+                self._update_agent_derived_scores(agent_id, derived_scores.get(agent_id, {}), dimensions_to_evaluate)
+                self._update_agent_derived_scores(other_id, derived_scores.get(other_id, {}), dimensions_to_evaluate)
 
             # Accumulate scores for the target agent_id
             for dim in dimensions_to_evaluate:
@@ -275,10 +308,10 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 else:
                     print(f"DEBUG WARNING: Agent {agent_id} not found in derived scores from comparison with {other_id}")
 
-
             comparison_count += 1
 
-        print(f"DEBUG: Agent {agent_id} - Accumulated scores from {comparison_count} comparisons: {dict(accumulated_scores)}") # DEBUG ACCUMULATED
+        print(f"DEBUG: Agent {agent_id} - Accumulated scores from {comparison_count} comparisons: {dict(accumulated_scores)}")
+        
         # --- Calculate Final Scores ---
         final_eval_scores = {}
         weight_new = self.config.get('new_evaluation_weight', 0.7)
@@ -290,20 +323,62 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 # Confidence reflects number of comparisons and base confidence
                 confidence = min(0.9, 0.4 + (comparison_count * 0.05) + base_conf * 0.1)
                 final_eval_scores[dim] = (final_score, confidence)
-                print(f"DEBUG: Agent {agent_id} Dim {dim}: new_avg={new_avg:.3f}, base={base_score:.3f} -> final={final_score:.3f}, conf={confidence:.3f}") # DEBUG FINAL CALC
-            else: # No new comparison data for this dimension
-                final_eval_scores[dim] = (base_score, base_conf * 0.9) # Use base, reduce confidence slightly
-                print(f"DEBUG: Agent {agent_id} Dim {dim}: No new data. Using base={base_score:.3f}, final_conf={base_conf * 0.9:.3f}") # DEBUG FINAL BASE
+                print(f"DEBUG: Agent {agent_id} Dim {dim}: new_avg={new_avg:.3f}, base={base_score:.3f} -> final={final_score:.3f}, conf={confidence:.3f}")
+            else:
+                final_eval_scores[dim] = (base_score, base_conf * 0.9)
+                print(f"DEBUG: Agent {agent_id} Dim {dim}: No new data. Using base={base_score:.3f}, final_conf={base_conf * 0.9:.3f}")
 
-        # Update derived scores cache for potential use by other agents' evals this round
-        if agent_id not in self.derived_agent_scores: self.derived_agent_scores[agent_id] = {}
+        # Update derived scores cache for this agent
+        if agent_id not in self.derived_agent_scores: 
+            self.derived_agent_scores[agent_id] = {}
         for dim, (score, _) in final_eval_scores.items():
             self.derived_agent_scores[agent_id][dim] = score
 
-        print(f"DEBUG: Updated derived_agent_scores for round {evaluation_round}: {self.derived_agent_scores}") # DEBUG UPDATE DERIVED
-        self.agent_evaluation_cache[cache_key] = final_eval_scores # Cache the final result
-        print(f"--- UserRep {self.source_id} finished evaluating Agent {agent_id}. Final Scores: {final_eval_scores} ---") # DEBUG END
+        # Update comparison count for this agent
+        self.agent_comparison_counts[agent_id] += comparison_count
+
+        print(f"DEBUG: Updated derived_agent_scores for round {evaluation_round}: {self.derived_agent_scores}")
+        self.agent_evaluation_cache[cache_key] = final_eval_scores
+        print(f"--- UserRep {self.source_id} finished evaluating Agent {agent_id}. Final Scores: {final_eval_scores} ---")
         return final_eval_scores
+
+    def _update_agent_derived_scores(self, agent_id, new_scores, dimensions_to_evaluate):
+        """
+        Helper method to update derived scores for an agent based on new comparison data.
+        Uses a weighted average between existing and new scores.
+        """
+        if agent_id not in self.derived_agent_scores:
+            self.derived_agent_scores[agent_id] = {}
+        
+        # Weight for new scores vs existing (could be configurable)
+        new_score_weight = self.config.get('derived_score_update_weight', 0.3)
+        
+        for dim in dimensions_to_evaluate:
+            if dim in new_scores:
+                existing_score = self.derived_agent_scores[agent_id].get(dim, 0.5)
+                new_score = new_scores[dim]
+                
+                # Weighted average: give less weight to new scores to avoid volatility
+                updated_score = (1 - new_score_weight) * existing_score + new_score_weight * new_score
+                self.derived_agent_scores[agent_id][dim] = updated_score
+                
+                print(f"DEBUG: Updated derived score for Agent {agent_id}, Dim {dim}: {existing_score:.3f} -> {updated_score:.3f} (new={new_score:.3f}, weight={new_score_weight})")
+
+    def get_all_agent_scores_for_round(self, evaluation_round, dimensions=None):
+        """
+        Utility method to get current derived scores for all agents in this evaluation round.
+        Useful for debugging and ensuring all agents have been updated.
+        """
+        dimensions = dimensions or self.expertise_dimensions
+        result = {}
+        
+        for agent_id in self.derived_agent_scores:
+            result[agent_id] = {
+                dim: self.derived_agent_scores[agent_id].get(dim, 0.5)
+                for dim in dimensions
+            }
+        
+        return result
 
     def _get_target_price_from_rank_mapping(self, agent_id, dimension, own_evaluations, market_prices, confidence_in_own_eval):
         """
@@ -436,7 +511,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             total_potential_capital += source_capacity
         
         # Add expected growth factor (new investors, increased allocations)
-        growth_factor = self.config.get('market_growth_factor', 1.5)
+        growth_factor = self.config.get('market_growth_factor', 1.0)
         steady_state_capital = total_potential_capital * growth_factor
         
         # Step 2: Current total capital in market
@@ -482,10 +557,12 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             # At steady state, if R_ss is the reserve, need to estimate T_ss
             # Assume T remains relatively stable (or decreases slowly as investors buy)
             current_T = self.market.agent_amm_params[agent_id][dimension]['T']
+            current_R = self.market.agent_amm_params[agent_id][dimension]['R']
             
             # Estimate T at steady state (some shares bought from treasury)
-            treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
-            projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
+            # treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
+            # projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
+            projected_T = current_T * current_R / expected_capital 
             
             # Projected price = R_ss / T_ss
             projected_price = expected_capital / projected_T if projected_T > 0 else 0

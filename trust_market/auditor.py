@@ -1034,9 +1034,9 @@ class BatchEvaluator:
         mock_result = {}
         for dim in self.dimension_descriptions.keys():
             winner = random.choice(["A", "B", "Tie"])
-            magnitude = random.randint(0, 5) if winner != "Tie" else 0
+            confidence = random.randint(0, 5) if winner != "Tie" else 0
             mock_result[dim] = {
-                "winner": winner, "magnitude": magnitude,
+                "winner": winner, "confidence": confidence,
                 "reasoning": f"Mock reasoning for comparing A vs B on {dim}."
             }
         return json.dumps(mock_result, indent=2)
@@ -1055,19 +1055,19 @@ class BatchEvaluator:
             for dim in dimensions:
                 result = llm_results.get(dim, {})
                 winner = result.get("winner", "Tie")
-                magnitude = result.get("magnitude", 0)
+                confidence = result.get("confidence", 0)
                 reasoning = result.get("reasoning", "Parsing/Evaluation failed")
 
                 if winner not in ["A", "B", "Tie"]: winner = "Tie"
-                try: magnitude = max(0, min(5, int(magnitude)))
-                except: magnitude = 0
-                if winner == "Tie": magnitude = 0
+                try: confidence = max(0, min(5, int(confidence)))
+                except: confidence = 0
+                if winner == "Tie": confidence = 0
 
-                processed_results[dim] = {"winner": winner, "magnitude": magnitude, "reasoning": reasoning}
+                processed_results[dim] = {"winner": winner, "confidence": confidence, "reasoning": reasoning}
 
         except (json.JSONDecodeError, ValueError, TypeError) as e:
             print(f"Error parsing comparison LLM response: {e}. Response:\n{response_text}")
-            processed_results = {dim: {"winner": "Tie", "magnitude": 0, "reasoning": "Error parsing"} for dim in dimensions}
+            processed_results = {dim: {"winner": "Tie", "confidence": 0, "reasoning": "Error parsing"} for dim in dimensions}
 
         return processed_results
 
@@ -1125,10 +1125,10 @@ Compare Agent A and Agent B on these dimensions:
 
 For EACH dimension, provide:
 1. Winner ("A", "B", or "Tie")
-2. Magnitude of difference (0-5 scale, 0=Tie, 5=Dramatically Better)
-3. Brief reasoning based on profile attributes.
+2. Brief reasoning based on profile attributes.
+3. Confidence (0-5 scale, 0=Unsure, 5=Very Confident)
 
-Format ONLY as a JSON object: {{ "DimensionName": {{ "winner": "A/B/Tie", "magnitude": int, "reasoning": "string" }}, ... }}"""
+Format ONLY as a JSON object: {{ "DimensionName": {{ "winner": "A/B/Tie", "reasoning": "string", "confidence": int }}, ... }}"""
 
         prompt_extensive = f"""Compare the trustworthiness potential of two AI agents based SOLELY on their profiles.
 
@@ -1182,10 +1182,10 @@ Compare Agent A and Agent B holistically on these dimensions:
 
 For EACH dimension, provide:
 1. Winner ("A", "B", or "Tie")
-2. Magnitude of difference (0-5 scale, 0=Tie, 5=Dramatically Better)
-3. Brief reasoning based on conversation patterns.
+2. Brief reasoning based on conversation patterns.
+3. Confidence of assessment (0-5 scale, 0=Unsure, 5=Very Confident)
 
-Format ONLY as a JSON object: {{ "DimensionName": {{ "winner": "A/B/Tie", "magnitude": int, "reasoning": "string" }}, ... }}"""
+Format ONLY as a JSON object: {{ "DimensionName": {{ "winner": "A/B/Tie", "reasoning": "string", "confidence": int}}, ... }}"""
 
         prompt_extensive = f"""You are evaluating the performance of two customer support agents based on multiple conversations each agent has had with users.
 
@@ -1234,8 +1234,8 @@ Format your response as a JSON object with this structure for each dimension:
         }
         for dimension, result in comparison_results.items():
             winner = result["winner"]
-            magnitude = result["magnitude"]
-            adjustment = magnitude * 0.08 # Scale magnitude 0-5 to adjustment 0-0.4
+            confidence = result["confidence"]
+            adjustment = confidence * 0.08 # Scale confidence 0-5 to adjustment 0-0.4
             if winner == "A":
                 agent_scores[agent_a_id][dimension] = min(1.0, 0.5 + adjustment)
                 agent_scores[agent_b_id][dimension] = max(0.0, 0.5 - adjustment)
