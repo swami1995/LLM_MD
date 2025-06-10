@@ -1011,16 +1011,13 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                     (agent_id, dim, cash_amount, confidence)
                 )
         
-        if self.verbose:
-            print(f"DEBUG: Final investments list length: {len(investments_to_propose_cash_value)}")
+        print(f"DEBUG: Final investments list length: {len(investments_to_propose_cash_value)}")
         if investments_to_propose_cash_value:
-            if self.verbose:
-                print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} prepared {len(investments_to_propose_cash_value)} cash-value based actions.")
-                for i, (aid, dim, amount, conf) in enumerate(investments_to_propose_cash_value):
-                    print(f"DEBUG: Investment {i+1}: Agent {aid}, Dim {dim}, Amount {amount:.4f}, Confidence {conf:.4f}")
+            print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} prepared {len(investments_to_propose_cash_value)} cash-value based actions.")
+            for i, (aid, dim, amount, conf) in enumerate(investments_to_propose_cash_value):
+                print(f"DEBUG: Investment {i+1}: Agent {aid}, Dim {dim}, Amount {amount:.4f}, Confidence {conf:.4f}")
         else:
-            if self.verbose:
-                print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} found no cash-value actions to take.")
+            print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} found no cash-value actions to take.")
             
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
