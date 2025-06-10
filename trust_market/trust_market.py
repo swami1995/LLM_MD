@@ -210,6 +210,7 @@ class TrustMarket:
 
                     self.agent_amm_params[agent_id][dimension]['R'] = R_new
                     self.agent_amm_params[agent_id][dimension]['T'] = T_new
+                    self.agent_amm_params[agent_id][dimension]['K'] = R_new * T_new
 
                     # Update investments
                     old_source_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
@@ -220,7 +221,7 @@ class TrustMarket:
                     self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investment*old_price
                     self.source_available_capacity[source_id][dimension] += actual_divestment
                     self.agent_trust_scores[agent_id][dimension] = new_price
-                    affected_agents_dimensions[agent_id].append(agent_id, dimension)
+                    affected_agents_dimensions[agent_id].append(dimension)
                     
                 # else: print(f"    Divestment for Agent {agent_id} on {dimension} too small or none possible.")
 
@@ -241,6 +242,7 @@ class TrustMarket:
 
                     self.agent_amm_params[agent_id][dimension]['R'] = R_new
                     self.agent_amm_params[agent_id][dimension]['T'] = T_new
+                    self.agent_amm_params[agent_id][dimension]['K'] = R_new * T_new
 
                     # Update investments
                     old_source_investments = self.source_investments[source_id][agent_id].get(dimension, 0.0)

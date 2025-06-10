@@ -200,7 +200,7 @@ Format your response as a JSON object with this structure:
 class AuditorWithProfileAnalysis(InformationSource):
     """Enhanced auditor using profile analysis and conversation history."""
 
-    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.0-flash', verbose=False):
+    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.0-flash', verbose=True):
         expertise_dimensions = [
             "Factual_Correctness", "Process_Reliability", "Value_Alignment",
             "Communication_Quality", "Problem_Resolution", "Safety_Security",

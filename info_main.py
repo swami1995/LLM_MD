@@ -64,8 +64,8 @@ if __name__ == "__main__":
              print("Warning: GEMINI_API_KEY environment variable not set. Using hardcoded key (for testing ONLY).")
 
     if args.llm_source == 'api':
-        # args.api_model_name = "gemini-2.5-pro-preview-06-05"
-        args.api_model_name = "gemini-2.5-flash-preview-05-20" 
+        args.api_model_name = "gemini-2.5-pro-preview-06-05"
+        # args.api_model_name = "gemini-2.5-flash-preview-05-20" 
         # args.api_model_name = "gemini-2.0-flash-lite"
         # args.api_model_name = "gemini-2.0-flash"
 
