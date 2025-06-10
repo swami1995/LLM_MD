@@ -11,7 +11,6 @@ from google import genai
 from google.genai import types
 
 
-
 # --- LLM-Powered Analyzer Classes (ProfileAnalyzer, BatchEvaluator) ---
 class ProfileAnalyzer:
     """Analyzes agent profiles using LLM."""
@@ -258,6 +257,18 @@ class AuditorWithProfileAnalysis(InformationSource):
             'divest_multiplier': 0.15, # Aggressiveness of divestment
             'base_score_persistence': 0.2, # Factor for persisting base scores during updates
             'derived_score_update_weight': 0.3, # Weight for new scores when updating derived scores from a single comparison
+            
+            # Parameters for decide_investments that were using .get()
+            'desirability_method': 'percentage_change',
+            'min_operational_price': 0.01,
+            'max_operational_price': 0.99,
+            'attractiveness_buy_threshold': 0.01,
+            'min_value_holding_per_asset': 0.0,
+            'portfolio_rebalance_aggressiveness': 0.5,
+            'min_delta_value_trade_threshold': 0.1,
+            'investment_scale': 0.2,
+            'rank_correction_strength': 0.5,
+            'max_confidence_history': 10,
         }
         self.compared_pairs = set() # Track compared pairs within a round
         self.derived_agent_scores = {} # Store scores derived from comparisons
@@ -1058,9 +1069,10 @@ class AuditorWithProfileAnalysis(InformationSource):
                 
                 p_target_effective = p_current + (p_target_effective_est - p_current) * confidence_in_eval
                 min_op_p = self.config.get('min_operational_price', 0.01)
-                max_op_p = self.config.get('max_operational_price', 0.99)
-                p_target_effective = max(min_op_p, min(max_op_p, p_target_effective))
-                print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_effective={p_target_effective:.4f} (clamped between {min_op_p}-{max_op_p})")
+                # max_op_p = self.config.get('max_operational_price', 0.99)
+                # p_target_effective = max(min_op_p, min(max_op_p, p_target_effective))
+                p_target_effective = max(min_op_p, p_target_effective)
+                print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_effective={p_target_effective:.4f} (clamped between {min_op_p})")#-{max_op_p})")
 
                 attractiveness = 0.0
                 if desirability_method == 'percentage_change':
