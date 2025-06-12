@@ -10,6 +10,7 @@ from trust_market.trust_market_system import TrustMarketSystem
 from trust_market.trust_market import TrustMarket
 from trust_market.auditor import AuditorWithProfileAnalysis # Use the enhanced Auditor
 from trust_market.user_rep import UserRepresentativeWithHolisticEvaluation # Use the enhanced UserRep
+from trust_market.regulator import Regulator
 
 # Import CustomerSupportModel from info_agent
 from info_agent import CustomerSupportModel
@@ -64,6 +65,7 @@ if __name__ == "__main__":
              print("Warning: GEMINI_API_KEY environment variable not set. Using hardcoded key (for testing ONLY).")
 
     if args.llm_source == 'api':
+        args.largest_model = "gemini-2.5-pro-preview-06-05"
         args.api_model_name = "gemini-2.5-pro-preview-06-05"
         # args.api_model_name = "gemini-2.5-flash-preview-05-20" 
         # args.api_model_name = "gemini-2.0-flash-lite"
@@ -254,6 +256,18 @@ if __name__ == "__main__":
     trust_market_system.register_user_representative(user_rep, evaluation_frequency=args.user_rep_frequency)
     print(f"Registered User Representative: {user_rep.source_id} (Eval Freq: {args.user_rep_frequency})")
 
+    # Add Regulator
+    regulator = Regulator(
+        source_id="regulator_main",
+        market=trust_market_system.trust_market,
+        api_key=gemini_api_key if args.llm_source == "api" else None,
+        api_model_name=args.largest_model if args.llm_source == "api" else None,
+    )
+    for agent_id, profile in trust_market_system.agent_profiles.items():
+        regulator.add_agent_profile(agent_id, profile)
+    trust_market_system.register_regulator(regulator, evaluation_frequency=args.regulator_frequency)
+    print(f"Registered Regulator: {regulator.source_id} (Eval Freq: {args.regulator_frequency})")
+
     # --- 5. Run Simulation Rounds via Trust Market System ---
     print(f"\nStarting simulation orchestration for {args.num_steps} rounds...")
     trust_market_system.run_evaluation_rounds(args.num_steps)
@@ -299,3 +313,7 @@ if __name__ == "__main__":
              except (ValueError, KeyError, IndexError) as e:
                  print(f"Error displaying scores for agent {agent_id_str}: {e}")
                  print(f"  Raw Scores: {scores}")
+
+    trust_market_system.trust_market.visualize_trust_scores(show_investments=False)
+    #agents=list(sim_agent_profiles.keys()), dimensions=sorted_dims,
+    # show_investments=True, start_round=0, end_round=args.num_steps)

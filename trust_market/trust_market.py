@@ -6,6 +6,8 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import seaborn as sns # Optional for visualization
 import ipdb # Optional for debugging
+import math
+import os
 
 # Trust markets are a way to combine curation, recommendation and scoring systems in a reputation system.
 # They are used to track the trustworthiness of agents based on various inputs, such as user feedback, regulator ratings, and comparative feedback.
@@ -73,7 +75,8 @@ class TrustMarket:
         # --- Performance & History ---
         self.agent_performance = defaultdict(lambda: defaultdict(list)) # For external perf metrics
         self.temporal_db = {
-            'trust_scores': [], 'investments': [], 'source_performance': [], 'agent_performance': []
+            'trust_scores': [], 'investments': [], 
+            'source_states': [], 'agent_performance': []
         }
         self.evaluation_round = 0
 
@@ -164,7 +167,7 @@ class TrustMarket:
                     Amount > 0 is investment, Amount < 0 is divestment.
                     Confidence is currently logged but not used in core calculation.
         """
-        if source_id not in self.source_available_capacity:
+        if source_id not in self.source_available_capacity and source_id not in self.oracle_influence_mechanisms:
             print(f"Warning: Source {source_id} not registered. Ignoring investments.")
             return
 
@@ -172,7 +175,7 @@ class TrustMarket:
 
         print(f"  Processing {len(investments)} investments from source {source_id}...")
         
-        old_agent_trust_scores = {dimension: {agent_id: self.agent_trust_scores[agent_id][dimension] for agent_id in self.agent_trust_scores} for dimension in self.dimensions}
+        # old_agent_trust_scores = {dimension: {agent_id: self.agent_trust_scores[agent_id][dimension] for agent_id in self.agent_trust_scores} for dimension in self.dimensions}
 
         # ipdb.set_trace()
         for agent_id, dimension, amount, confidence in investments:
@@ -184,9 +187,9 @@ class TrustMarket:
                 print(f"    Warning: Source {source_id} has no capacity for dimension '{dimension}'. Skipping.")
                 continue
 
-            current_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
-            available_cap = self.source_available_capacity[source_id].get(dimension, 0.0)
-            allocated_cap = self.allocated_influence[source_id].get(dimension, 0.0)
+            if source_id not in self.oracle_influence_mechanisms:
+                current_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
+                available_cap = self.source_available_capacity[source_id].get(dimension, 0.0)
 
             change_amount = 0.0
 
@@ -194,15 +197,19 @@ class TrustMarket:
             if amount < 0:
                 # Amount to divest is the absolute value, capped by current investment
                 divest_request = abs(amount)
-                actual_divestment = min(divest_request, current_investment)
+                if source_id not in self.oracle_influence_mechanisms:
+                    actual_divestment = min(divest_request, current_investment)
+                else:
+                    actual_divestment = divest_request
 
                 if actual_divestment > 0.001: # Threshold to avoid tiny changes
+                    change_amount = -actual_divestment # Record the change
                     y = actual_divestment
-                    
                     agent_amm_params = self.agent_amm_params[agent_id][dimension]
                     T, K = agent_amm_params['T'], agent_amm_params['K']
                     R = K/T
                     old_price = R/T
+                    y = min(y, R) # Don't divest more than the reserve
                     num_shares_to_divest = y*T/(R - y)
                     T_new = T + num_shares_to_divest
                     R_new = R*T/T_new #= R- y  # = R*T/(T + num_shares_to_divest) = R*T/(T + y*T/(R - y)) = R*T*(R-y)/(R*T) = R - y
@@ -213,13 +220,14 @@ class TrustMarket:
                     self.agent_amm_params[agent_id][dimension]['K'] = R_new * T_new
 
                     # Update investments
-                    old_source_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
-                    self.source_investments[source_id][agent_id][dimension] -= num_shares_to_divest
+                    if source_id not in self.oracle_influence_mechanisms:
+                        old_source_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
+                        self.source_investments[source_id][agent_id][dimension] -= num_shares_to_divest
+                        self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investment*old_price
+                        self.source_available_capacity[source_id][dimension] += actual_divestment
                     for s_id in self.source_investments:
                         if self.source_investments[s_id][agent_id][dimension] > 0 and s_id != source_id:
                             self.allocated_influence[s_id][dimension] -= self.source_investments[s_id][agent_id][dimension]*(new_price - old_price)
-                    self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investment*old_price
-                    self.source_available_capacity[source_id][dimension] += actual_divestment
                     self.agent_trust_scores[agent_id][dimension] = new_price
                     affected_agents_dimensions[agent_id].append(dimension)
                     
@@ -228,8 +236,13 @@ class TrustMarket:
             # --- Handle Investment (amount > 0) ---
             else:
                 # Amount to invest is capped by available capacity
-                actual_investment = min(amount, available_cap)
+                if source_id not in self.oracle_influence_mechanisms:
+                    actual_investment = min(amount, available_cap)
+                else:
+                    actual_investment = amount
+
                 if actual_investment > 0.001: # Threshold
+                    change_amount = actual_investment # Record the change
                     x = actual_investment
                     agent_amm_params = self.agent_amm_params[agent_id][dimension]
                     T, K = agent_amm_params['T'], agent_amm_params['K']
@@ -245,13 +258,14 @@ class TrustMarket:
                     self.agent_amm_params[agent_id][dimension]['K'] = R_new * T_new
 
                     # Update investments
-                    old_source_investments = self.source_investments[source_id][agent_id].get(dimension, 0.0)
-                    self.source_investments[source_id][agent_id][dimension] += num_shares_to_invest
+                    if source_id not in self.oracle_influence_mechanisms:
+                        old_source_investments = self.source_investments[source_id][agent_id].get(dimension, 0.0)
+                        self.source_investments[source_id][agent_id][dimension] += num_shares_to_invest
+                        self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investments*old_price
+                        self.source_available_capacity[source_id][dimension] -= actual_investment
                     for s_id in self.source_investments:
                         if self.source_investments[s_id][agent_id][dimension] > 0 and s_id != source_id:
                             self.allocated_influence[s_id][dimension] +=  self.source_investments[s_id][agent_id][dimension]*(new_price - old_price)
-                    self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investments*old_price
-                    self.source_available_capacity[source_id][dimension] -= actual_investment
                     self.agent_trust_scores[agent_id][dimension] = new_price
                     affected_agents_dimensions[agent_id].append(dimension)
 
@@ -269,7 +283,26 @@ class TrustMarket:
                                 'agent_id': agent_id, 'dimension': dimension,
                                 'old_score': old_price, 'new_score': new_price,
                                 'change_source': 'investment', 'source_id': None # Aggregate effect
-                            })
+                })
+
+                # After any transaction, log the new state of the source for that dimension
+                if source_id not in self.oracle_influence_mechanisms:
+                    total_invested_value = 0
+                    for a_id, dims in self.source_investments[source_id].items():
+                        if dimension in dims:
+                            shares = dims[dimension]
+                            price = self.agent_trust_scores[a_id][dimension]
+                            total_invested_value += shares * price
+                    
+                    available_cash = self.source_available_capacity[source_id][dimension]
+                    
+                    self.temporal_db['source_states'].append({
+                        'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
+                        'source_id': source_id, 'dimension': dimension,
+                        'total_invested_value': total_invested_value,
+                        'available_cash': available_cash,
+                        'total_value': total_invested_value + available_cash
+                    })
 
         # Apply correlations if enabled and scores actually changed
         if self.use_dimension_correlations:
@@ -738,89 +771,271 @@ class TrustMarket:
         }
 
     # --- Visualization Methods ---
-    # Keep existing visualization logic. Add error handling for missing libraries.
+    def _plot_dimensions(self, ax, dims_to_plot, pivot, df_invest, source_color_map):
+        """
+        Helper function to draw all data for a list of dimensions onto a
+        provided matplotlib Axes object.
+        """
+        # Filter the pivot table to only include the dimensions for this plot
+        dim_cols = [col for col in pivot.columns if col[1] in dims_to_plot]
+        if not dim_cols:
+            return False  # Return False if there's no data to plot
+
+        pivot_dims = pivot[dim_cols]
+
+        # Plot score lines for each agent and dimension
+        for col in pivot_dims.columns:
+            agent_id, dim_name = col
+            # Modify label to be more descriptive if plotting multiple dims, else just agent ID
+            label = f"A{agent_id}-{dim_name[:4]}" if len(dims_to_plot) > 1 else f"Agent {agent_id}"
+            pivot_dims[col].plot(ax=ax, label=label, marker='.', linestyle='-', markersize=5)
+
+        # Plot investment markers on top of the score lines
+        if df_invest is not None and not df_invest.empty:
+            invest_dims = df_invest[df_invest['dimension'].isin(dims_to_plot)]
+            for _, investment in invest_dims.iterrows():
+                round_val = investment['evaluation_round']
+                agent_val = investment['agent_id']
+                dim_val = investment['dimension']
+                
+                # Check if there is a score value to plot on
+                if round_val in pivot_dims.index and (agent_val, dim_val) in pivot_dims.columns:
+                    score_val = pivot_dims.loc[round_val, (agent_val, dim_val)]
+                    if pd.isna(score_val):
+                        continue
+                    
+                    marker = '^' if investment['amount'] > 0 else 'v'
+                    color = source_color_map.get(investment['source_id'])
+                    size = min(375, max(40, abs(investment['amount']) * 1.5))
+
+                    ax.scatter(round_val, score_val, marker=marker, color=color, s=size, alpha=0.9, edgecolors='w', zorder=5)
+        
+        ax.set_xlabel('Evaluation Round')
+        ax.set_ylabel('Trust Score')
+        ax.grid(True, linestyle='--', alpha=0.6)
+        ax.set_ylim(0, 1.05)
+        return True # Return True indicating that plotting was successful
+
     def visualize_trust_scores(self, agents=None, dimensions=None,
-                            start_round=None, end_round=None):
-        """Visualize trust scores over time."""
+                            start_round=None, end_round=None, show_investments=True,
+                            save_path=None, experiment_name=None):
+        """
+        Visualize trust scores over time, with optional investment overlays.
+        This function orchestrates the plotting process, generating and saving a 
+        separate plot for each specified dimension.
+        """
         try:
             import matplotlib.pyplot as plt
+            from matplotlib.lines import Line2D
             import pandas as pd
+            import seaborn as sns
+            import os
         except ImportError:
-            print("Warning: matplotlib or pandas not installed. Cannot visualize trust scores.")
-            return None
+            print("Warning: matplotlib, pandas, or seaborn not installed. Cannot visualize scores.")
+            return
 
         if not self.temporal_db['trust_scores']:
             print("No trust score data available for visualization")
-            return None
+            return
 
-        df = pd.DataFrame(self.temporal_db['trust_scores'])
-        # (Keep filtering logic as before)
-        if agents: df = df[df['agent_id'].isin(agents)]
-        if dimensions: df = df[df['dimension'].isin(dimensions)]
-        if start_round is not None: df = df[df['evaluation_round'] >= start_round]
-        if end_round is not None: df = df[df['evaluation_round'] <= end_round]
+        # --- 1. Data Loading and Filtering ---
+        df_scores = pd.DataFrame(self.temporal_db['trust_scores'])
+        dims_to_iterate = dimensions or self.dimensions
+        
+        if agents: df_scores = df_scores[df_scores['agent_id'].isin(agents)]
+        df_scores = df_scores[df_scores['dimension'].isin(dims_to_iterate)]
+        if start_round is not None: df_scores = df_scores[df_scores['evaluation_round'] >= start_round]
+        if end_round is not None: df_scores = df_scores[df_scores['evaluation_round'] <= end_round]
 
-        if df.empty:
-            print("No data available with current filters for trust score visualization")
-            return None
+        if df_scores.empty:
+            print("No trust score data available with current filters for visualization")
+            return
 
-        df = df.sort_values(['evaluation_round', 'timestamp'])
-        pivot = df.pivot_table(index='evaluation_round', columns=['agent_id', 'dimension'], values='new_score', aggfunc='last').ffill() # Forward fill missing values for plotting
+        df_scores = df_scores.sort_values(['evaluation_round', 'timestamp'])
+        pivot = df_scores.pivot_table(index='evaluation_round', columns=['agent_id', 'dimension'], values='new_score', aggfunc='last').ffill()
 
-        fig, ax = plt.subplots(figsize=(14, 8))
-        for col in pivot.columns:
-            label = f"A{col[0]}-{col[1][:4]}" # Shorten label
-            pivot[col].plot(ax=ax, label=label, marker='.', linestyle='-', markersize=4)
+        # --- Prepare Investment Data ---
+        df_invest = None
+        source_color_map = {}
+        if show_investments and self.temporal_db['investments']:
+            df_invest = pd.DataFrame(self.temporal_db['investments'])
+            if agents: df_invest = df_invest[df_invest['agent_id'].isin(agents)]
+            df_invest = df_invest[df_invest['dimension'].isin(dims_to_iterate)]
+            if start_round is not None: df_invest = df_invest[df_invest['evaluation_round'] >= start_round]
+            if end_round is not None: df_invest = df_invest[df_invest['evaluation_round'] <= end_round]
 
+            if not df_invest.empty:
+                sources = sorted(df_invest['source_id'].unique())
+                palette = sns.color_palette("husl", len(sources))
+                source_color_map = {source: color for source, color in zip(sources, palette)}
+
+        # --- 2. Orchestration: Loop and Plot for each Dimension ---
+        for dim in dims_to_iterate:
+            fig, ax = plt.subplots(figsize=(14, 8))
+            
+            # Call the inner plotting function, passing a list with just the current dimension
+            plotted = self._plot_dimensions(ax, [dim], pivot, df_invest, source_color_map)
+
+            if not plotted:
+                plt.close(fig) # Don't show or save empty plots
+                continue
+            
+            # --- 3. Final Touches (Legend, Labels, Saving) for the current plot ---
+            legend_elements = ax.get_legend_handles_labels()[0]
+            
+            if source_color_map:
+                legend_elements.append(Line2D([0], [0], marker='', color='w', label=''))
+                for source, color in source_color_map.items():
+                    legend_elements.append(Line2D([0], [0], marker='o', color='w', label=source, markerfacecolor=color, markersize=10))
+                legend_elements.append(Line2D([0], [0], marker='^', color='w', markerfacecolor='gray', label='Buy', markersize=10))
+                legend_elements.append(Line2D([0], [0], marker='v', color='w', markerfacecolor='gray', label='Sell', markersize=10))
+
+            ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1, 0.5), fontsize='small')
+            ax.set_title(f'Agent Trust Scores Over Time: {dim}', fontsize=16)
+            plt.tight_layout(rect=[0, 0, 0.85, 1])
+
+            # Save Figure logic
+            if save_path and experiment_name:
+                try:
+                    folder = os.path.join(save_path, experiment_name)
+                    os.makedirs(folder, exist_ok=True)
+                    safe_dim_name = dim.replace(' ', '_').replace('/', '_')
+                    filepath = os.path.join(folder, f'trust_scores_{safe_dim_name}.png')
+                    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+                    print(f"Plot saved to {filepath}")
+                except Exception as e:
+                    print(f"Error saving plot for dimension {dim}: {e}")
+
+            plt.show()
+            plt.close(fig)
+        
+        return
+
+    def _plot_source_value_dimension(self, ax, dim, source_states_df, investments_df, agent_marker_map):
+        """
+        Helper function to draw source value data for a single dimension
+        onto a provided matplotlib Axes object.
+        """
+        # --- Plot Source Value Lines ---
+        # Pivot to get sources as columns and their total_value as values
+        pivot_source_values = source_states_df.pivot_table(
+            index='evaluation_round', 
+            columns='source_id', 
+            values='total_value', 
+            aggfunc='last'
+        ).ffill()
+
+        if pivot_source_values.empty:
+            return False
+
+        for source_id in pivot_source_values.columns:
+            pivot_source_values[source_id].plot(ax=ax, label=f"Value: {source_id}", marker='.', linestyle='-')
+
+        # --- Plot Investment Markers ---
+        if investments_df is not None:
+            for _, investment in investments_df.iterrows():
+                round_val = investment['evaluation_round']
+                source_id = investment['source_id']
+                agent_id = investment['agent_id']
+
+                # Place marker on the source's value line
+                if round_val in pivot_source_values.index and source_id in pivot_source_values.columns:
+                    y_val = pivot_source_values.loc[round_val, source_id]
+                    if pd.isna(y_val): continue
+                    
+                    marker = agent_marker_map.get(agent_id, 'x')
+                    color = 'green' if investment['amount'] > 0 else 'red'
+                    size = min(300, max(40, abs(investment['amount']) * 2))
+
+                    ax.scatter(round_val, y_val, marker=marker, color=color, s=size, alpha=0.9, edgecolors='w', zorder=5)
+        
         ax.set_xlabel('Evaluation Round')
-        ax.set_ylabel('Trust Score')
-        ax.set_title('Agent Trust Scores Over Time')
-        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize='small')
+        ax.set_ylabel('Total Portfolio Value ($)')
         ax.grid(True, linestyle='--', alpha=0.6)
-        ax.set_ylim(0, 1.05) # Ensure y-axis is 0-1
-        plt.tight_layout()
-        plt.show()
-        return fig
+        return True
 
-    def visualize_source_performance(self, sources=None, dimensions=None,
-                                start_round=None, end_round=None):
-        """Visualize source performance over time."""
-        # Keep existing logic, add similar import checks and robustness
+    def visualize_source_value(self, sources=None, dimensions=None,
+                                  start_round=None, end_round=None,
+                                  save_path=None, experiment_name=None):
+        """
+        Visualize the total portfolio value of each source over time.
+        Generates a separate plot for each dimension.
+        """
         try:
             import matplotlib.pyplot as plt
+            from matplotlib.lines import Line2D
             import pandas as pd
+            import os
         except ImportError:
-            print("Warning: matplotlib or pandas not installed. Cannot visualize source performance.")
-            return None
+            print("Warning: Required libraries not installed. Cannot visualize source value.")
+            return
 
-        if not self.temporal_db['source_performance']:
-            print("No source performance data available for visualization")
-            return None
+        if not self.temporal_db['source_states']:
+            print("No source state data available for visualization.")
+            return
 
-        df = pd.DataFrame(self.temporal_db['source_performance'])
-        # (Keep filtering logic as before)
-        if sources: df = df[df['source_id'].isin(sources)]
-        if dimensions: df = df[df['dimension'].isin(dimensions)]
-        if start_round is not None: df = df[df['evaluation_round'] >= start_round]
-        if end_round is not None: df = df[df['evaluation_round'] <= end_round]
+        # --- 1. Data Loading and Filtering ---
+        source_states_df = pd.DataFrame(self.temporal_db['source_states'])
+        dims_to_plot = dimensions or self.dimensions
 
-        if df.empty:
-            print("No data available with current filters for source performance visualization")
-            return None
+        if sources: source_states_df = source_states_df[source_states_df['source_id'].isin(sources)]
+        if start_round is not None: source_states_df = source_states_df[source_states_df['evaluation_round'] >= start_round]
+        if end_round is not None: source_states_df = source_states_df[source_states_df['evaluation_round'] <= end_round]
 
-        df = df.sort_values(['evaluation_round', 'timestamp'])
-        pivot = df.pivot_table(index='evaluation_round', columns=['source_id', 'dimension'], values='performance_score', aggfunc='mean').ffill() # Use mean performance in round
+        investments_df = pd.DataFrame(self.temporal_db.get('investments', []))
+        if not investments_df.empty:
+            if sources: investments_df = investments_df[investments_df['source_id'].isin(sources)]
 
-        fig, ax = plt.subplots(figsize=(14, 8))
-        for col in pivot.columns:
-            label = f"{col[0]}-{col[1][:4]}"
-            pivot[col].plot(ax=ax, label=label, marker='.', linestyle='-', markersize=4)
+        all_agent_ids = []
+        if not investments_df.empty:
+            all_agent_ids = sorted(investments_df['agent_id'].unique())
+        
+        # Define a unique marker for each agent
+        markers = ['o', 's', 'P', 'X', '*', 'D', 'v', '^', '<', '>']
+        agent_marker_map = {agent_id: markers[i % len(markers)] for i, agent_id in enumerate(all_agent_ids)}
 
-        ax.set_xlabel('Evaluation Round')
-        ax.set_ylabel('Performance Score')
-        ax.set_title('Information Source Performance Over Time')
-        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize='small')
-        ax.grid(True, linestyle='--', alpha=0.6)
-        plt.tight_layout()
-        plt.show()
-        return fig
+        # --- 2. Orchestration Loop ---
+        for dim in dims_to_plot:
+            fig, ax = plt.subplots(figsize=(14, 8))
+            
+            dim_source_states = source_states_df[source_states_df['dimension'] == dim]
+            dim_investments = investments_df[investments_df['dimension'] == dim] if not investments_df.empty else None
+
+            if dim_source_states.empty:
+                plt.close(fig)
+                continue
+
+            plotted = self._plot_source_value_dimension(ax, dim, dim_source_states, dim_investments, agent_marker_map)
+
+            if not plotted:
+                plt.close(fig)
+                continue
+            
+            # --- 3. Final Touches and Legend ---
+            legend_elements = ax.get_legend_handles_labels()[0]
+            legend_elements.append(Line2D([0], [0], marker='', color='w')) # Spacer
+            legend_elements.append(Line2D([0], [0], color='green', marker='^', linestyle='None', label='Buy Action'))
+            legend_elements.append(Line2D([0], [0], color='red', marker='v', linestyle='None', label='Sell Action'))
+            legend_elements.append(Line2D([0], [0], marker='', color='w', label='Target Agent:'))
+            for agent_id, marker in agent_marker_map.items():
+                legend_elements.append(Line2D([0], [0], color='gray', marker=marker, linestyle='None', label=f'Agent {agent_id}'))
+
+            ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1, 0.5), title="Legend")
+            ax.set_title(f'Source Portfolio Value Over Time: {dim}', fontsize=16)
+            plt.tight_layout(rect=[0, 0, 0.85, 1])
+
+            # --- Save Figure ---
+            if save_path and experiment_name:
+                try:
+                    folder = os.path.join(save_path, experiment_name)
+                    os.makedirs(folder, exist_ok=True)
+                    safe_dim_name = dim.replace(' ', '_').replace('/', '_')
+                    filepath = os.path.join(folder, f'source_value_{safe_dim_name}.png')
+                    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+                    print(f"Plot saved to {filepath}")
+                except Exception as e:
+                    print(f"Error saving plot for dimension {dim}: {e}")
+
+            plt.show()
+            plt.close(fig)
+

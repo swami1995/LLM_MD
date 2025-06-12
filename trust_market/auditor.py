@@ -400,6 +400,7 @@ class AuditorWithProfileAnalysis(InformationSource):
 
         import random
         num_to_compare = self.config.get('comparison_agents_per_target', 3)
+        num_to_compare = min(num_to_compare, len(valid_comparison_agents))
         
         # Prioritize agents not yet compared with agent_id in this round via comparison_results_cache
         new_comparison_candidates = [
@@ -423,7 +424,7 @@ class AuditorWithProfileAnalysis(InformationSource):
                         random.sample(existing_candidates, min(remaining_needed, len(existing_candidates)))
                     )
         if not comparison_agents_selected and valid_comparison_agents: # Fallback if selection logic yields empty
-             comparison_agents_selected = random.sample(valid_comparison_agents, min(num_to_compare, len(valid_comparison_agents)))
+            comparison_agents_selected = random.sample(valid_comparison_agents, min(num_to_compare, len(valid_comparison_agents)))
 
         accumulated_scores_for_target = defaultdict(list)
         accumulated_confs_for_target = defaultdict(list)
@@ -1493,6 +1494,126 @@ Format your response as a JSON object with this structure for each dimension:
         results = self._parse_comparison_results(response_text, dimensions)
         self.evaluation_cache[cache_key] = results
         return results
+
+    def compare_agent_profiles_and_convs(self, agent_a_profile, agent_a_convs, agent_a_id, agent_b_profile, agent_b_convs, agent_b_id, dimensions=None):
+        """Compares two agents based on profiles and conversation batches using LLM."""
+        dimensions = dimensions or list(self.dimension_descriptions.keys())
+        cache_key = ("hybrid_comp", hash(str(agent_a_profile)), hash(str(agent_a_convs)),
+                     hash(str(agent_b_profile)), hash(str(agent_b_convs)), tuple(dimensions))
+        if cache_key in self.evaluation_cache:
+            return self.evaluation_cache[cache_key]
+
+        # Format profiles and conversations
+        profile_a_formatted = ProfileAnalyzer()._format_profile_for_analysis(agent_a_profile)
+        profile_b_formatted = ProfileAnalyzer()._format_profile_for_analysis(agent_b_profile)
+        convs_a_formatted = self.format_conversation_batch(agent_a_convs)
+        convs_b_formatted = self.format_conversation_batch(agent_b_convs)
+
+        # Combine data for each agent
+        agent_a_data = f"""AGENT A ({agent_a_id}) PROFILE:
+--------------------------------------------------------------------------------------------------------------------------------
+{profile_a_formatted}
+--------------------------------------------------------------------------------------------------------------------------------
+
+AGENT A ({agent_a_id}) CONVERSATIONS:
+--------------------------------------------------------------------------------------------------------------------------------
+{convs_a_formatted}
+--------------------------------------------------------------------------------------------------------------------------------
+"""
+
+        agent_b_data = f"""AGENT B ({agent_b_id}) PROFILE:
+--------------------------------------------------------------------------------------------------------------------------------
+{profile_b_formatted}
+--------------------------------------------------------------------------------------------------------------------------------
+
+AGENT B ({agent_b_id}) CONVERSATIONS:
+--------------------------------------------------------------------------------------------------------------------------------
+{convs_b_formatted}
+--------------------------------------------------------------------------------------------------------------------------------
+"""
+
+        dimension_specs = "\n".join([f"- {dim}: {desc}" for dim, desc in self.dimension_descriptions.items() if dim in dimensions])
+
+        prompt = f"""You are an expert regulator comparing the trustworthiness and performance of two customer support AI agents.
+You must use BOTH their configuration profiles and their recent conversation histories with users for a holistic evaluation.
+
+**AGENT A DATA**
+
+{agent_a_data}
+
+================================================================================================================================
+
+**AGENT B DATA**
+
+{agent_b_data}
+
+================================================================================================================================
+
+**Task:** Compare Agent A and Agent B on the following dimensions:
+{dimension_specs}
+
+**For EACH dimension, provide:**
+1.  **Winner:** The agent that is more trustworthy/effective ("A", "B", or "Tie").
+2.  **Confidence:** Your confidence in this assessment on a 0-5 scale (0=Unsure, 5=Very Confident).
+3.  **Reasoning:** A brief explanation citing evidence from BOTH the profile and conversations.
+
+Format your response ONLY as a JSON object:
+{{
+  "DimensionName": {{ "winner": "A/B/Tie", "reasoning": "string", "confidence": int }},
+  ...
+}}"""
+
+        prompt_extensive = f"""You are an expert regulator comparing the trustworthiness and performance of two customer support AI agents. Your task is to perform a holistic evaluation using BOTH their configuration profiles AND their recent conversation histories with users.
+
+**AGENT A DATA**
+---
+**PROFILE for Agent A ({agent_a_id}):**
+{profile_a_formatted}
+
+**CONVERSATIONS for Agent A ({agent_a_id}):**
+{convs_a_formatted}
+---
+
+**AGENT B DATA**
+---
+**PROFILE for Agent B ({agent_b_id}):**
+{profile_b_formatted}
+
+**CONVERSATIONS for Agent B ({agent_b_id}):**
+{convs_b_formatted}
+---
+
+**EVALUATION TASK**
+
+Compare Agent A and Agent B on these dimensions, integrating insights from both profiles and conversations:
+{dimension_specs}
+
+For EACH dimension, provide:
+1.  **Winner:** The better-performing or more trustworthy agent ("A", "B", or "Tie").
+2.  **Magnitude of Difference:** A score from 0 to 5 indicating how much better the winner is.
+    - 0 = TIE: No meaningful difference found in profile or performance.
+    - 1 = SLIGHTLY BETTER: Subtle advantages.
+    - 2 = SOMEWHAT BETTER: Modest but noticeable advantages.
+    - 3 = NOTICEABLY BETTER: Clear advantages in configuration and/or performance.
+    - 4 = SUBSTANTIALLY BETTER: Major, consistent advantages.
+    - 5 = DRAMATICALLY BETTER: Overwhelming superiority in both design and execution.
+3.  **Reasoning:** Brief, integrated reasoning explaining your choice. Refer to specific aspects of the profiles (e.g., "Agent A's lower knowledge_accuracy seems to cause the factual errors seen in its conversations") and conversation patterns.
+
+Format your response as a JSON object with this structure:
+{{
+  "Dimension_Name": {{
+    "winner": "A or B or Tie",
+    "magnitude": integer from 0-5,
+    "reasoning": "brief explanation"
+  }},
+  ...
+}}"""
+        response_text = self._get_llm_response(prompt)
+        results = self._parse_comparison_results(response_text, dimensions)
+        self.evaluation_cache[cache_key] = results
+        return results
+
+
 
     def get_agent_scores(self, comparison_results, agent_a_id, agent_b_id):
         """Converts pairwise comparison to pseudo-absolute scores (0-1 range)."""
