@@ -837,7 +837,6 @@ class TrustMarket:
         ax.set_xlabel('Evaluation Round')
         ax.set_ylabel('Trust Score')
         ax.grid(True, linestyle='--', alpha=0.6)
-        ax.set_ylim(0, 1.05)
         return True # Return True indicating that plotting was successful
 
     def visualize_trust_scores(self, agents=None, dimensions=None,
@@ -976,6 +975,7 @@ class TrustMarket:
         ax.set_xlabel('Evaluation Round')
         ax.set_ylabel('Total Portfolio Value ($)')
         ax.grid(True, linestyle='--', alpha=0.6)
+        # No y-axis limits set here
         return True
 
     def visualize_source_value(self, sources=None, dimensions=None,
