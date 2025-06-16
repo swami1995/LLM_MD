@@ -107,7 +107,7 @@ class TrustMarketSystem:
         if initial_influence is None:
             # Default initial influence based on source type (example)
             if source.source_type == 'regulator':
-                influence_value = 100.0
+                influence_value = 10000.0
             elif source.source_type == 'auditor':
                 influence_value = 60.0
             else:

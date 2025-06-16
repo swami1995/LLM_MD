@@ -51,9 +51,8 @@ class UserRepresentative(InformationSource):
         # Add defaults for missing dimensions in segment weights
         all_dims = ["Factual_Correctness", "Process_Reliability", "Value_Alignment", "Communication_Quality", "Problem_Resolution", "Safety_Security", "Transparency", "Adaptability", "Trust_Calibration", "Manipulation_Resistance"]
         for seg_weights in self.segment_weights.values():
-             for dim in all_dims:
-                  seg_weights.setdefault(dim, 0.5) # Default importance if not specified
-
+            for dim in all_dims:
+                seg_weights.setdefault(dim, 0.5) # Default importance if not specified
 
     def add_represented_user(self, user_id, user_profile=None):
         """Adds a user ID to the set this rep represents."""

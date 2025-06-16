@@ -85,6 +85,7 @@ class Regulator(InformationSource):
             'rank_correction_strength': 0.5,
             'max_confidence_history': 10,
             'max_realloc_per_dim': 100,
+            'regulator_influence_ratio': 0.5, # Added for the new decide_investments method
         }
         self.compared_pairs = set() # Track compared pairs within a round
         self.derived_agent_scores = {} # Store scores derived from comparisons
@@ -556,10 +557,11 @@ class Regulator(InformationSource):
         
         # Step 4: Project steady-state prices
         projected_prices = {}
+        projected_capital_shares = {}
         
         for agent_id in expected_capital_shares:
             # Expected capital for this agent at steady state
-            expected_capital = steady_state_capital * expected_capital_shares[agent_id]
+            projected_capital_shares[agent_id] = steady_state_capital * expected_capital_shares[agent_id]
             
             # Project price based on AMM dynamics
             # At steady state, if R_ss is the reserve, need to estimate T_ss
@@ -570,13 +572,13 @@ class Regulator(InformationSource):
             # Estimate T at steady state (some shares bought from treasury)
             # treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
             # projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
-            projected_T = current_T * current_R / expected_capital 
+            projected_T = current_T * current_R / projected_capital_shares[agent_id]
             
             # Projected price = R_ss / T_ss
-            projected_price = expected_capital / projected_T if projected_T > 0 else 0
+            projected_price = projected_capital_shares[agent_id] / projected_T if projected_T > 0 else 0
             projected_prices[agent_id] = projected_price
-        
-        return projected_prices, steady_state_capital / current_total_market_capital
+
+        return projected_prices, projected_capital_shares, steady_state_capital / current_total_market_capital
 
     def check_market_capacity(self, own_evaluations, market_prices, regulatory_capacity=0.0):
         """
@@ -585,12 +587,14 @@ class Regulator(InformationSource):
         """
         capacity_flags = {} # Collect ratios for all dimensions
         projected_prices = {} # {agent_id: projected_price}
+        projected_capital_shares = {} # {agent_id: projected_capital_share}
         for dim in self.expertise_dimensions:
-            projected_prices_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, regulatory_capacity, dimension=dim)
+            projected_prices_dim, projected_capital_shares_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, regulatory_capacity, dimension=dim)
             capacity_flags[dim] = True # regulator always has capacity
             projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
+            projected_capital_shares[dim] = projected_capital_shares_dim # Store projected capital shares for this dimension
 
-        return projected_prices, capacity_flags
+        return projected_prices, projected_capital_shares, capacity_flags
 
     def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
         """
@@ -761,10 +765,15 @@ class Regulator(InformationSource):
             print(f"DEBUG: Config values: {self.config}")
         investments_to_propose_cash_value = [] # List of (agent_id, dimension, cash_amount_to_trade, confidence)
 
-        if not self.market: 
+        if not self.market:
             if self.verbose:
                 print(f"Warning ({self.source_id}): No market access.")
             return []
+
+        # --- Get accumulated user influence since last run ---
+        # This is the core of the reactive balancing mechanism
+        user_influence_by_dim = self.market.get_and_reset_cumulative_user_influence()
+        desired_influence_ratio = self.config.get('regulator_influence_ratio', 0.5) # How much to match user influence
 
         # DEBUG: Check available capacity
         available_capacity = self.market.source_available_capacity.get(self.source_id, {})
@@ -829,31 +838,41 @@ class Regulator(InformationSource):
                 print(f"DEBUG: No agents successfully evaluated - returning empty list")
             return []
 
-        projected_prices, capacity_flags = self.check_market_capacity(own_evaluations, market_prices, regulatory_capacity=self.config.get('regulatory_capacity', 0.0))
+        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices, regulatory_capacity=self.config.get('regulatory_capacity', 0.0))
 
         # --- 2. Determine "Target Value Holding" & "Attractiveness" ---
-        attractiveness_scores = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): attractiveness_score}
-        target_value_holding_ideal = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): ideal_cash_value_to_hold}
-
-        # Filter evaluations to only those agents for whom we also have market prices
-        # This ensures fair comparison for rank mapping and attractiveness calculation
-        valid_agent_ids_for_ranking = [aid for aid in own_evaluations.keys() if aid in market_prices and \
-                                       all(dim in market_prices[aid] for dim in self.expertise_dimensions)]
-        
-        if self.verbose:
-            print(f"DEBUG: Valid agents for ranking: {len(valid_agent_ids_for_ranking)} out of {len(own_evaluations)}")
-            print(f"DEBUG: Valid agent IDs: {valid_agent_ids_for_ranking}")
-        
-        relevant_own_evals_for_ranking = {aid: own_evaluations[aid] for aid in valid_agent_ids_for_ranking}
-        relevant_market_prices_for_ranking = {aid: market_prices[aid] for aid in valid_agent_ids_for_ranking}
-
         rebalance_aggressiveness = {}
         delta_value_target_map = defaultdict(lambda : defaultdict(float))
-        max_realloc_per_dim = self.config.get('max_realloc_per_dim', 100)
+        
+        # The maximum reallocation is now determined by actual user activity per dimension.
+        # Fallback to config value if no user activity was recorded for a dimension.
+        default_max_realloc = self.config.get('max_realloc_per_dim', 100)
+
         for dim in self.expertise_dimensions:
-            deltas = np.array([projected_prices[dim][agent_id] - market_prices[agent_id][dim] for agent_id in own_evaluations.keys()])
-            # TODO : fix this assert and division by 0.
-            # assert np.abs(deltas.sum()) < 1e-1, f"Delta sum for dim {dim} is {deltas.sum()}"
+            # Set this dimension's reallocation budget based on user influence
+            max_realloc_per_dim = user_influence_by_dim.get(dim, 0.0) * desired_influence_ratio
+            if max_realloc_per_dim <= 1e-6: # If no user influence, use fallback
+                max_realloc_per_dim = default_max_realloc
+                if self.verbose:
+                    print(f"DEBUG: No user influence for dim {dim}, using default max_realloc: {max_realloc_per_dim}")
+
+            agents_with_proj_capital = [
+                aid for aid in own_evaluations.keys() 
+                if dim in projected_capital_shares and aid in projected_capital_shares[dim] and
+                   aid in self.market.agent_amm_params and dim in self.market.agent_amm_params[aid]
+            ]
+            
+            if not agents_with_proj_capital:
+                if self.verbose:
+                    print(f"DEBUG: No agents with projected capital shares for dim {dim}, skipping rebalance calculation.")
+                continue
+
+            deltas = np.array([projected_capital_shares[dim][agent_id] - self.market.agent_amm_params[agent_id][dim]['R'] for agent_id in agents_with_proj_capital])
+            # TODO : fix this assert and division by 0 : rebalancing with capital shares for now. but need to decide between capital shares and prices or other better metrics.
+            if not np.isclose(deltas.sum(), 0.0, atol=1e-1):
+                print(f"Warning: Delta sum for dim {dim} is {deltas.sum()}, which is not close to zero.")
+            assert np.abs(deltas.sum()) < 1e-1, f"Delta sum for dim {dim} is {deltas.sum()}"
+            
             pos_deltas_sum = deltas[deltas > 0].sum()
             if pos_deltas_sum > 1e-9:
                 rebalance_aggressiveness[dim] = max_realloc_per_dim / pos_deltas_sum
@@ -861,55 +880,10 @@ class Regulator(InformationSource):
                 rebalance_aggressiveness[dim] = 1.0
             rebalance_aggressiveness[dim] = min(rebalance_aggressiveness[dim], 1.0)
             if self.verbose:
-                print(f"DEBUG: Rebalance aggressiveness for dim {dim}: {rebalance_aggressiveness[dim]:.4f}, max_realloc_per_dim={max_realloc_per_dim}, deltas={deltas[deltas > 0].sum()}")
-
-        for agent_id, agent_eval_data in own_evaluations.items(): # Iterate all evaluated agents
-            if self.verbose:
-                print(f"DEBUG: Processing attractiveness for agent {agent_id}")
-            for dimension, (pseudo_score, confidence_in_eval) in agent_eval_data.items():
-                if dimension not in self.expertise_dimensions: 
-                    if self.verbose:
-                        print(f"DEBUG: Skipping dimension {dimension} (not in expertise)")
-                    continue # Should not happen if eval_agent is correct
-
-                key = (agent_id, dimension)
-                p_current = market_prices.get(agent_id, {}).get(dimension, 0.5) # Use fetched market price
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id}, Dim {dimension}: pseudo_score={pseudo_score:.4f}, confidence={confidence_in_eval:.4f}, p_current={p_current:.4f}")
-
-                if capacity_flags.get(dimension, False):
-                    p_target_effective_est = projected_prices.get(dimension, {}).get(agent_id, p_current) # Use projected price if capacity is sufficient
-                    if self.verbose:
-                        print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_raw_from_projected_prices={p_target_effective_est:.4f}")
-                else:
-                    p_target_effective_est = p_current # Default if agent not in ranking pool
-                    if agent_id in relevant_own_evals_for_ranking: # Only calculate rank target if agent is in the valid pool
-                        p_target_effective_est = self._get_target_price_from_rank_mapping(
-                            agent_id, dimension, 
-                            relevant_own_evals_for_ranking, # Use filtered evals for ranking
-                            relevant_market_prices_for_ranking, # Use filtered prices for ranking
-                            confidence_in_eval
-                        )
-                        if self.verbose:
-                            print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_raw_from_rank={p_target_effective_est:.4f}")
-                
-
-                p_target_effective = p_target_effective_est
-                # p_target_effective = p_current + (p_target_effective_est - p_current) * confidence_in_eval
-                min_op_p = self.config.get('min_operational_price', 0.01)
-                # max_op_p = self.config.get('max_operational_price', 0.99)
-                # p_target_effective = max(min_op_p, min(max_op_p, p_target_effective))
-                p_target_effective = max(min_op_p, p_target_effective)
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_effective={p_target_effective:.4f} (clamped between {min_op_p})")#-{max_op_p})")
-
-                ideal_val = p_target_effective
-                current_val = p_current
-                
-                delta_v = (ideal_val - current_val) * rebalance_aggressiveness[dimension]
-                if self.verbose:
-                    print(f"DEBUG: Delta calculation - Dim {dim}, Agent {agent_id}: ideal={ideal_val:.4f}, current={current_val:.4f}, delta_raw={(ideal_val - current_val):.4f}, delta_scaled={delta_v:.4f}")
-                
+                print(f"DEBUG: Rebalance aggressiveness for dim {dim}: {rebalance_aggressiveness[dim]:.4f}, max_realloc_per_dim={max_realloc_per_dim:.2f}, deltas={deltas[deltas > 0].sum():.2f}")
+            
+            for i, agent_id in enumerate(agents_with_proj_capital):
+                delta_v = deltas[i] * rebalance_aggressiveness[dim]
                 # Apply a threshold to delta_v to avoid tiny trades
                 min_trade_threshold = self.config.get('min_delta_value_trade_threshold', 0.1)
                 if abs(delta_v) > min_trade_threshold: # e.g., trade if value change > $0.1
@@ -919,6 +893,78 @@ class Regulator(InformationSource):
                 else:
                     if self.verbose:
                         print(f"DEBUG: Delta below threshold ({min_trade_threshold}) - Skipping: {delta_v:.4f}")
+        
+
+        # attractiveness_scores = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): attractiveness_score}
+        # target_value_holding_ideal = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): ideal_cash_value_to_hold}
+
+        # # Filter evaluations to only those agents for whom we also have market prices
+        # # This ensures fair comparison for rank mapping and attractiveness calculation
+        # valid_agent_ids_for_ranking = [aid for aid in own_evaluations.keys() if aid in market_prices and \
+        #                                all(dim in market_prices[aid] for dim in self.expertise_dimensions)]
+        
+        # if self.verbose:
+        #     print(f"DEBUG: Valid agents for ranking: {len(valid_agent_ids_for_ranking)} out of {len(own_evaluations)}")
+        #     print(f"DEBUG: Valid agent IDs: {valid_agent_ids_for_ranking}")
+        
+        # relevant_own_evals_for_ranking = {aid: own_evaluations[aid] for aid in valid_agent_ids_for_ranking}
+        # relevant_market_prices_for_ranking = {aid: market_prices[aid] for aid in valid_agent_ids_for_ranking}
+        # for agent_id, agent_eval_data in own_evaluations.items(): # Iterate all evaluated agents
+        #     if self.verbose:
+        #         print(f"DEBUG: Processing attractiveness for agent {agent_id}")
+        #     for dimension, (pseudo_score, confidence_in_eval) in agent_eval_data.items():
+        #         if dimension not in self.expertise_dimensions: 
+        #             if self.verbose:
+        #                 print(f"DEBUG: Skipping dimension {dimension} (not in expertise)")
+        #             continue # Should not happen if eval_agent is correct
+
+        #         key = (agent_id, dimension)
+        #         p_current = market_prices.get(agent_id, {}).get(dimension, 0.5) # Use fetched market price
+        #         if self.verbose:
+        #             print(f"DEBUG: Agent {agent_id}, Dim {dimension}: pseudo_score={pseudo_score:.4f}, confidence={confidence_in_eval:.4f}, p_current={p_current:.4f}")
+
+        #         if capacity_flags.get(dimension, False):
+        #             p_target_effective_est = projected_prices.get(dimension, {}).get(agent_id, p_current) # Use projected price if capacity is sufficient
+        #             if self.verbose:
+        #                 print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_raw_from_projected_prices={p_target_effective_est:.4f}")
+        #         else:
+        #             p_target_effective_est = p_current # Default if agent not in ranking pool
+        #             if agent_id in relevant_own_evals_for_ranking: # Only calculate rank target if agent is in the valid pool
+        #                 p_target_effective_est = self._get_target_price_from_rank_mapping(
+        #                     agent_id, dimension, 
+        #                     relevant_own_evals_for_ranking, # Use filtered evals for ranking
+        #                     relevant_market_prices_for_ranking, # Use filtered prices for ranking
+        #                     confidence_in_eval
+        #                 )
+        #                 if self.verbose:
+        #                     print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_raw_from_rank={p_target_effective_est:.4f}")
+
+
+        #         p_target_effective = p_target_effective_est
+        #         # p_target_effective = p_current + (p_target_effective_est - p_current) * confidence_in_eval
+        #         min_op_p = self.config.get('min_operational_price', 0.01)
+        #         # max_op_p = self.config.get('max_operational_price', 0.99)
+        #         # p_target_effective = max(min_op_p, min(max_op_p, p_target_effective))
+        #         p_target_effective = max(min_op_p, p_target_effective)
+        #         if self.verbose:
+        #             print(f"DEBUG: Agent {agent_id}, Dim {dimension}: p_target_effective={p_target_effective:.4f} (clamped between {min_op_p})")#-{max_op_p})")
+
+        #         ideal_val = p_target_effective
+        #         current_val = p_current
+                
+        #         delta_v = (ideal_val - current_val) * rebalance_aggressiveness[dimension]
+        #         if self.verbose:
+        #             print(f"DEBUG: Delta calculation - Dim {dim}, Agent {agent_id}: ideal={ideal_val:.4f}, current={current_val:.4f}, delta_raw={(ideal_val - current_val):.4f}, delta_scaled={delta_v:.4f}")
+                
+        #         # Apply a threshold to delta_v to avoid tiny trades
+        #         min_trade_threshold = self.config.get('min_delta_value_trade_threshold', 0.1)
+        #         if abs(delta_v) > min_trade_threshold: # e.g., trade if value change > $0.1
+        #             delta_value_target_map[dim][agent_id] = delta_v
+        #             if self.verbose:
+        #                 print(f"DEBUG: Delta above threshold ({min_trade_threshold}) - Including in trade map: {delta_v:.4f}")
+        #         else:
+        #             if self.verbose:
+        #                 print(f"DEBUG: Delta below threshold ({min_trade_threshold}) - Skipping: {delta_v:.4f}")
 
         if self.verbose:
             print(f"DEBUG: Delta value target map: {dict(delta_value_target_map)}")

@@ -44,8 +44,9 @@ if __name__ == "__main__":
     parser.add_argument("--evaluation_method", type=str, choices=["specific_ratings", "comparative_binary"], default="comparative_binary", help="Evaluation method for user feedback.")
     parser.add_argument("--rating_scale", type=int, choices=[5, 10], default=5, help="Rating scale for user feedback (specific_ratings).")
     parser.add_argument("--trust_decay_rate", type=float, default=0.99, help="Decay rate for trust scores per round.")
-    parser.add_argument("--auditor_frequency", type=int, default=5, help="Frequency (in rounds) for auditor evaluations.")
+    parser.add_argument("--auditor_frequency", type=int, default=4, help="Frequency (in rounds) for auditor evaluations.")
     parser.add_argument("--user_rep_frequency", type=int, default=2, help="Frequency (in rounds) for user representative evaluations.")
+    parser.add_argument("--regulator_frequency", type=int, default=10, help="Frequency (in rounds) for regulator evaluations.")
 
 
     args = parser.parse_args()
@@ -177,6 +178,10 @@ if __name__ == "__main__":
     conversation_prompts = [conversation_prompts[i] for i in sampled_indices] if conversation_prompts and len(conversation_prompts) == len(user_profiles_all) else []
     
     print(f"Simulating with {len(agent_profiles)} agent profiles and {len(user_profiles)} user profiles.")
+    print(f"User profiles:")
+    print(json.dumps(user_profiles, indent=2))
+    print(f"Agent profiles:")
+    print(json.dumps(agent_profiles, indent=2))
 
 
     # --- 1. Initialize Customer Support Simulation Model ---

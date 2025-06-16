@@ -63,6 +63,7 @@ class TrustMarket:
         self.trust_decay_rate = config.get('trust_decay_rate', 0.99) # Rate per round towards neutral
         self.max_trust = config.get('max_trust', 1.0) # Maximum trust score
         self.min_trust = config.get('min_trust', 0.0) # Minimum trust score
+        self.primary_source_update_type = config.get('primary_source_update_type', 'fix_K') # Type of update for primary source
 
         self.agent_amm_params = defaultdict(lambda: {dim:{'R': 0.0, 'T': 0.0, 'K': 0.0, 'total_supply': 0.0} for dim in self.dimensions})
         # For simplicity, we won't track individual share ownership here, but assume sellers sell back to the AMM.
@@ -84,6 +85,9 @@ class TrustMarket:
         self.use_dimension_correlations = config.get('use_dimension_correlations', False)
         if self.use_dimension_correlations:
             self.initialize_dimension_correlations()
+
+        # --- Regulator Support ---
+        self.cumulative_user_influence = defaultdict(lambda: defaultdict(float))    # Tracks sum of |delta_R| from user feedback
 
         print("TrustMarket core initialized.")
         print(f"  - Rating Scale (for feedback normalization): {self.rating_scale}")
@@ -210,9 +214,13 @@ class TrustMarket:
                     R = K/T
                     old_price = R/T
                     y = min(y, R) # Don't divest more than the reserve
-                    num_shares_to_divest = y*T/(R - y)
-                    T_new = T + num_shares_to_divest
-                    R_new = R*T/T_new #= R- y  # = R*T/(T + num_shares_to_divest) = R*T/(T + y*T/(R - y)) = R*T*(R-y)/(R*T) = R - y
+                    if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
+                        R_new = R - y
+                        T_new = T
+                    else:
+                        num_shares_to_divest = y*T/(R - y)
+                        T_new = T + num_shares_to_divest
+                        R_new = R*T/T_new #= R- y  # = R*T/(T + num_shares_to_divest) = R*T/(T + y*T/(R - y)) = R*T*(R-y)/(R*T) = R - y
                     new_price = R_new/T_new
 
                     self.agent_amm_params[agent_id][dimension]['R'] = R_new
@@ -248,9 +256,13 @@ class TrustMarket:
                     T, K = agent_amm_params['T'], agent_amm_params['K']
                     R = K/T
                     old_price = R/T
-                    num_shares_to_invest = x*T/(R + x)
-                    T_new = T - num_shares_to_invest
-                    R_new = K/T_new #= R + x  # = R*T/(T - num_shares_to_invest) = R*T/(T - x*T/(R + x)) = R*T*(R+x)/(R*T) = R + x
+                    if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
+                        R_new = R - y
+                        T_new = T
+                    else:
+                        num_shares_to_invest = x*T/(R + x)
+                        T_new = T - num_shares_to_invest
+                        R_new = K/T_new #= R + x  # = R*T/(T - num_shares_to_invest) = R*T/(T - x*T/(R + x)) = R*T*(R+x)/(R*T) = R + x
                     new_price = R_new/T_new
 
                     self.agent_amm_params[agent_id][dimension]['R'] = R_new
@@ -458,7 +470,10 @@ class TrustMarket:
         # T remains unchanged by this direct oracle action
         # K changes: params['K'] = new_R * params['T']
         # Update K after R has changed and T is stable
-        params['K'] = params['R'] * params['T']
+        if self.primary_source_update_type == 'fix_K':
+            params['T'] = params['K'] / params['R']
+        elif self.primary_source_update_type == 'fix_T':
+            params['K'] = params['R'] * params['T']
 
         # The price (trust score) changesconfidence
         old_price = old_R / params['T'] if params['T'] > 0 else 0
@@ -470,6 +485,10 @@ class TrustMarket:
         for source_id in self.allocated_influence:
             if self.allocated_influence[source_id][dimension] > 0 and (self.source_investments[source_id][agent_id][dimension] > 0):
                 self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*(new_price - old_price)
+
+        # Accumulate the absolute change for the regulator
+        if 'user_feedback' in self.oracle_influence_mechanisms.values() or 'comparative_feedback' in self.oracle_influence_mechanisms.values(): # only if user feedback is an oracle
+            self.cumulative_user_influence[dimension][agent_id] += actual_delta_R
 
         self.amm_transactions_log.append({
             'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
@@ -527,25 +546,30 @@ class TrustMarket:
 
             # Ensure target price is within valid bounds (e.g., 0 to 1)
             # Let P_target = P_current + delta_P. Clamp P_target. Then actual_delta_P = P_target_clamped - P_current.
-            max_score = self.config.get('max_trust_score_oracle', 1.0)
+            # max_score = self.config.get('max_trust_score_oracle', 1.0)
             min_score = self.config.get('min_trust_score_oracle', 0.0)
 
             P_A_target_unclamped = P_A_current + delta_P_A
-            P_A_target_clamped = max(min_score, min(max_score, P_A_target_unclamped))  # TODO: set the min and max scores carefully
+            # P_A_target_clamped = max(min_score, min(max_score, P_A_target_unclamped))  # TODO: set the min and max scores carefully
+            P_A_target_clamped = max(min_score, P_A_target_unclamped)
             actual_delta_P_A = P_A_target_clamped - P_A_current
 
             P_B_target_unclamped = P_B_current + delta_P_B
-            P_B_target_clamped = max(min_score, min(max_score, P_B_target_unclamped))
+            P_B_target_clamped = max(min_score, P_B_target_unclamped)
             actual_delta_P_B = P_B_target_clamped - P_B_current
 
-            if abs(actual_delta_P_A) > 0.0001: # Threshold for action
+            if self.primary_source_update_type == 'fix_K':
+                delta_R_A = params_A['R'] *(np.sqrt(P_A_target_clamped/P_A_current) - 1)
+                delta_R_B = params_B['R'] *(np.sqrt(P_B_target_clamped/P_B_current) - 1)
+            elif self.primary_source_update_type == 'fix_T':
                 delta_R_A = actual_delta_P_A * params_A['T']
-                self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
-
-            if abs(actual_delta_P_B) > 0.0001: # Threshold for action
                 delta_R_B = actual_delta_P_B * params_B['T']
-                self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
 
+            if abs(actual_delta_P_A) > 0.0001: # Threshold for action
+                self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
+            if abs(actual_delta_P_B) > 0.0001: # Threshold for action
+                self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
+    
     # For trust decay
     def apply_trust_decay(self):
         decay_rate = self.config.get('trust_decay_rate_oracle', 0.001) # e.g., 0.1% per period
@@ -1038,4 +1062,18 @@ class TrustMarket:
 
             plt.show()
             plt.close(fig)
+
+    def get_and_reset_cumulative_user_influence(self) -> Dict[str, float]:
+        """
+        Called by a source (e.g., Regulator) to get the total user-driven
+        capital shifts since the last call, and then reset the tracker.
+        """
+        influence_data = {}
+        # compute the absolute sum of the influence data for each dimension
+        for dim in self.cumulative_user_influence.keys():
+            influence_data[dim] = sum(abs(v) for v in self.cumulative_user_influence[dim].values())
+            self.cumulative_user_influence[dim].clear()
+        if influence_data and any(v > 0 for v in influence_data.values()):
+            print(f"  DEBUG (Market): Returning and resetting user influence: {dict(influence_data)}")
+        return influence_data
 
