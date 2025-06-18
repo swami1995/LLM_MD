@@ -47,6 +47,7 @@ if __name__ == "__main__":
     parser.add_argument("--auditor_frequency", type=int, default=4, help="Frequency (in rounds) for auditor evaluations.")
     parser.add_argument("--user_rep_frequency", type=int, default=2, help="Frequency (in rounds) for user representative evaluations.")
     parser.add_argument("--regulator_frequency", type=int, default=10, help="Frequency (in rounds) for regulator evaluations.")
+    parser.add_argument("--exp_name", type=str, default="test_run", help="Name of the experiment.")
 
 
     args = parser.parse_args()
@@ -66,9 +67,9 @@ if __name__ == "__main__":
              print("Warning: GEMINI_API_KEY environment variable not set. Using hardcoded key (for testing ONLY).")
 
     if args.llm_source == 'api':
-        args.largest_model = "gemini-2.5-pro-preview-06-05"
-        # args.api_model_name = "gemini-2.5-pro-preview-06-05"
-        args.api_model_name = "gemini-2.5-flash-preview-05-20" 
+        args.largest_model = "gemini-2.5-pro"
+        # args.api_model_name = "gemini-2.5-pro"
+        args.api_model_name = "gemini-2.5-flash" 
         # args.api_model_name = "gemini-2.0-flash-lite"
         # args.api_model_name = "gemini-2.0-flash"
 
@@ -319,8 +320,8 @@ if __name__ == "__main__":
                  print(f"Error displaying scores for agent {agent_id_str}: {e}")
                  print(f"  Raw Scores: {scores}")
 
-    trust_market_system.trust_market.visualize_trust_scores(show_investments=True)
-    trust_market_system.trust_market.visualize_source_value(show_investments=True)
-
+    trust_market_system.trust_market.visualize_trust_scores(show_investments=True, save_path="figures/", experiment_name=args.exp_name)
+    trust_market_system.trust_market.visualize_source_value(save_path="figures/", experiment_name=args.exp_name)
+    trust_market_system.trust_market.save_logged_data("./run_logs", filename_prefix=args.exp_name, file_format="json")
     #agents=list(sim_agent_profiles.keys()), dimensions=sorted_dims,
     # show_investments=True, start_round=0, end_round=args.num_steps)

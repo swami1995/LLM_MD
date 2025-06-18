@@ -8,6 +8,8 @@ import seaborn as sns # Optional for visualization
 import ipdb # Optional for debugging
 import math
 import os
+import json  # For saving logs in JSON format
+import pickle  # For saving logs in pickle format
 
 # Trust markets are a way to combine curation, recommendation and scoring systems in a reputation system.
 # They are used to track the trustworthiness of agents based on various inputs, such as user feedback, regulator ratings, and comparative feedback.
@@ -70,8 +72,8 @@ class TrustMarket:
         self.amm_transactions_log = []
 
         # --- Oracle Configuration for AMM ---
-        # Mechanism: 'adjust_treasury', 'adjust_reserve', 'oracle_trades' # defaulting to 'adjust_reserve' for now. Others are not implemented yet.
-        self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_reserve'), 'regulator': config.get('regulator_amm', 'adjust_reserve')}
+        # Mechanism: 'adjust_treasury', 'adjust_reserve', 'oracle_trades' ('adjust_R', 'adjust_T', 'adjust_P' are version of 'oracle_trades') # defaulting to 'adjust_reserve' for now. Others are not implemented yet.
+        self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_R'), 'regulator': config.get('regulator_amm', 'adjust_reserve')}
 
         # --- Performance & History ---
         self.agent_performance = defaultdict(lambda: defaultdict(list)) # For external perf metrics
@@ -530,45 +532,56 @@ class TrustMarket:
                     # Initialize trust score from AMM price
                     self.agent_trust_scores[aid][dimension] = self.agent_amm_params[aid][dimension]['R'] / self.agent_amm_params[aid][dimension]['T']
 
-            P_A_current = params_A['R'] / params_A['T'] if params_A['T'] > 0 else 0.5 # Default if T is 0
-            P_B_current = params_B['R'] / params_B['T'] if params_B['T'] > 0 else 0.5
 
-            delta_P_A = 0.0
-            delta_P_B = 0.0
 
-            if winner_code == 'A':
-                delta_P_A = confidence * base_price_adj_factor # Absolute adjustment
-                delta_P_B = -confidence * base_price_adj_factor
-            elif winner_code == 'B':
-                delta_P_A = -confidence * base_price_adj_factor
-                delta_P_B = confidence * base_price_adj_factor
-            # If 'Tie', delta_P_A and delta_P_B remain 0.0
+            if self.oracle_influence_mechanisms['user_feedback'] == 'adjust_P':
+                P_A_current = params_A['R'] / params_A['T'] if params_A['T'] > 0 else 0.5 # Default if T is 0
+                P_B_current = params_B['R'] / params_B['T'] if params_B['T'] > 0 else 0.5
 
-            # Ensure target price is within valid bounds (e.g., 0 to 1)
-            # Let P_target = P_current + delta_P. Clamp P_target. Then actual_delta_P = P_target_clamped - P_current.
-            # max_score = self.config.get('max_trust_score_oracle', 1.0)
-            min_score = self.config.get('min_trust_score_oracle', 0.0)
+                delta_P_A = 0.0
+                delta_P_B = 0.0
 
-            P_A_target_unclamped = P_A_current + delta_P_A
-            # P_A_target_clamped = max(min_score, min(max_score, P_A_target_unclamped))  # TODO: set the min and max scores carefully
-            P_A_target_clamped = max(min_score, P_A_target_unclamped)
-            actual_delta_P_A = P_A_target_clamped - P_A_current
+                if winner_code == 'A':
+                    delta_P_A = confidence * base_price_adj_factor # Absolute adjustment
+                    delta_P_B = -confidence * base_price_adj_factor
+                elif winner_code == 'B':
+                    delta_P_A = -confidence * base_price_adj_factor
+                    delta_P_B = confidence * base_price_adj_factor
+                # If 'Tie', delta_P_A and delta_P_B remain 0.0
 
-            P_B_target_unclamped = P_B_current + delta_P_B
-            P_B_target_clamped = max(min_score, P_B_target_unclamped)
-            actual_delta_P_B = P_B_target_clamped - P_B_current
+                # Ensure target price is within valid bounds (e.g., 0 to 1)
+                # Let P_target = P_current + delta_P. Clamp P_target. Then actual_delta_P = P_target_clamped - P_current.
+                # max_score = self.config.get('max_trust_score_oracle', 1.0)
+                min_score = self.config.get('min_trust_score_oracle', 0.0)
 
-            if self.primary_source_update_type == 'fix_K':
-                delta_R_A = params_A['R'] *(np.sqrt(P_A_target_clamped/P_A_current) - 1)
-                delta_R_B = params_B['R'] *(np.sqrt(P_B_target_clamped/P_B_current) - 1)
-            elif self.primary_source_update_type == 'fix_T':
-                delta_R_A = actual_delta_P_A * params_A['T']
-                delta_R_B = actual_delta_P_B * params_B['T']
+                P_A_target_unclamped = P_A_current + delta_P_A
+                # P_A_target_clamped = max(min_score, min(max_score, P_A_target_unclamped))  # TODO: set the min and max scores carefully
+                P_A_target_clamped = max(min_score, P_A_target_unclamped)
+                actual_delta_P_A = P_A_target_clamped - P_A_current
 
-            if abs(actual_delta_P_A) > 0.0001: # Threshold for action
-                self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
-            if abs(actual_delta_P_B) > 0.0001: # Threshold for action
-                self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
+                P_B_target_unclamped = P_B_current + delta_P_B
+                P_B_target_clamped = max(min_score, P_B_target_unclamped)
+                actual_delta_P_B = P_B_target_clamped - P_B_current
+
+                if self.primary_source_update_type == 'fix_K':
+                    delta_R_A = params_A['R'] *(np.sqrt(P_A_target_clamped/P_A_current) - 1)
+                    delta_R_B = params_B['R'] *(np.sqrt(P_B_target_clamped/P_B_current) - 1)
+                elif self.primary_source_update_type == 'fix_T':
+                    delta_R_A = actual_delta_P_A * params_A['T']
+                    delta_R_B = actual_delta_P_B * params_B['T']
+
+                if abs(actual_delta_P_A) > 0.0001: # Threshold for action
+                    self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
+                if abs(actual_delta_P_B) > 0.0001: # Threshold for action
+                    self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
+            elif self.oracle_influence_mechanisms['user_feedback'] == 'adjust_R':
+                delta_R_A = confidence * base_price_adj_factor
+                delta_R_B = -confidence * base_price_adj_factor
+
+                if abs(delta_R_A) > 0.0001: # Threshold for action
+                    self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
+                if abs(delta_R_B) > 0.0001: # Threshold for action
+                    self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
     
     # For trust decay
     def apply_trust_decay(self):
@@ -955,22 +968,33 @@ class TrustMarket:
             pivot_source_values[source_id].plot(ax=ax, label=f"Value: {source_id}", marker='.', linestyle='-')
 
         # --- Plot Investment Markers ---
-        if investments_df is not None:
-            for _, investment in investments_df.iterrows():
-                round_val = investment['evaluation_round']
-                source_id = investment['source_id']
-                agent_id = investment['agent_id']
+        if investments_df is not None and not investments_df.empty:
+            import numpy as np  # Local import to avoid global dependency if function never called
 
-                # Place marker on the source's value line
-                if round_val in pivot_source_values.index and source_id in pivot_source_values.columns:
-                    y_val = pivot_source_values.loc[round_val, source_id]
-                    if pd.isna(y_val): continue
-                    
+            # Group by evaluation_round & source_id so we can jitter overlapping markers
+            grouped = investments_df.groupby(['evaluation_round', 'source_id'], sort=False)
+            for (round_val, source_id), group in grouped:
+                # Skip if the source line isn't present in pivot (e.g., filtered out)
+                if round_val not in pivot_source_values.index or source_id not in pivot_source_values.columns:
+                    continue
+
+                y_val = pivot_source_values.loc[round_val, source_id]
+                if pd.isna(y_val):
+                    continue
+
+                n = len(group)
+                # Pre-compute small symmetric jitter offsets (in x) so markers don't overlap
+                # If only one marker, offset = 0
+                offsets = np.linspace(-0.2, 0.2, n) if n > 1 else [0.0]
+
+                for jitter, (_, investment) in zip(offsets, group.iterrows()):
+                    agent_id = investment['agent_id']
                     marker = agent_marker_map.get(agent_id, 'x')
                     color = 'green' if investment['amount'] > 0 else 'red'
                     size = min(300, max(40, abs(investment['amount']) * 2))
 
-                    ax.scatter(round_val, y_val, marker=marker, color=color, s=size, alpha=0.9, edgecolors='w', zorder=5)
+                    ax.scatter(round_val + jitter, y_val, marker=marker, color=color,
+                               s=size, alpha=0.9, edgecolors='w', zorder=5)
         
         ax.set_xlabel('Evaluation Round')
         ax.set_ylabel('Total Portfolio Value ($)')
@@ -1076,4 +1100,100 @@ class TrustMarket:
         if influence_data and any(v > 0 for v in influence_data.values()):
             print(f"  DEBUG (Market): Returning and resetting user influence: {dict(influence_data)}")
         return influence_data
+
+    # ------------------------------------------------------------------
+    #                           Persistence
+    # ------------------------------------------------------------------
+    def save_logged_data(
+        self,
+        output_dir: str,
+        filename_prefix: str = "trust_market_logs",
+        file_format: str = "json",
+    ) -> str:
+        """Save all relevant logged data and internal state to disk.
+
+        This utility makes it easy to perform post-hoc analysis by persisting
+        the full temporal database, AMM transactions, and current market
+        state (trust scores, investments, capacities, etc.).
+
+        Parameters
+        ----------
+        output_dir : str
+            Directory where the log file will be written. The directory will
+            be created if it does not already exist.
+        filename_prefix : str, optional
+            Prefix for the generated file name, by default "trust_market_logs".
+        file_format : str, optional
+            Either "json" or "pickle"/"pkl". Determines the serialization
+            format, by default "json".
+
+        Returns
+        -------
+        str
+            Absolute path to the file that was written.
+        """
+        # Ensure the output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Build a time-stamped file name for easy sorting of multiple runs
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        ext = "json" if file_format.lower() == "json" else "pkl"
+        filename = f"{filename_prefix}_{timestamp}.{ext}"
+        filepath = os.path.join(output_dir, filename)
+
+        # Helper for JSON serialization of numpy & non-standard types
+        def _json_default(obj):  # pylint: disable=unused-argument
+            import numpy as _np  # Local import to avoid global dependency if not used
+            from collections import defaultdict as _dd
+
+            # Numpy scalars → Python scalars
+            if isinstance(obj, _np.generic):
+                return obj.item()
+            # Sets & tuples → lists for JSON compatibility
+            if isinstance(obj, (set, tuple)):
+                return list(obj)
+            # defaultdict → dict to drop default-factory behaviour
+            if isinstance(obj, _dd):
+                return dict(obj)
+            # Fallback: convert to string
+            return str(obj)
+
+        # Gather everything we may want to inspect later
+        data_to_save = {
+            "config": self.config,
+            "evaluation_round": self.evaluation_round,
+            "temporal_db": self.temporal_db,
+            "amm_transactions_log": self.amm_transactions_log,
+            "agent_trust_scores": {aid: dict(scores) for aid, scores in self.agent_trust_scores.items()},
+            "agent_amm_params": {
+                aid: {dim: dict(params) for dim, params in dims.items()}
+                for aid, dims in self.agent_amm_params.items()
+            },
+            "source_investments": {
+                sid: {aid: dict(dim_map) for aid, dim_map in inv.items()}
+                for sid, inv in self.source_investments.items()
+            },
+            "source_influence_capacity": {sid: dict(cap) for sid, cap in self.source_influence_capacity.items()},
+            "source_available_capacity": {sid: dict(cap) for sid, cap in self.source_available_capacity.items()},
+            "allocated_influence": {sid: dict(al) for sid, al in self.allocated_influence.items()},
+            "agent_performance": {
+                aid: {dim: list(entries) for dim, entries in dim_map.items()}
+                for aid, dim_map in self.agent_performance.items()
+            },
+        }
+
+        # Perform the actual serialization
+        if file_format.lower() == "json":
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(data_to_save, f, default=_json_default, indent=2)
+        elif file_format.lower() in {"pickle", "pkl"}:
+            with open(filepath, "wb") as f:
+                pickle.dump(data_to_save, f)
+        else:
+            raise ValueError(
+                f"Unsupported file_format '{file_format}'. Use 'json' or 'pickle'."
+            )
+
+        print(f"  Saved TrustMarket logs to: {filepath}")
+        return os.path.abspath(filepath)
 

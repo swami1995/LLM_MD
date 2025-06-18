@@ -6,7 +6,7 @@ import numpy as np
 from collections import defaultdict
 from trust_market.info_sources import InformationSource
 from typing import Dict, List, Tuple, Set, Optional, Union, Any
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google import genai
 from google.genai import types
 
@@ -38,22 +38,31 @@ class ProfileAnalyzer:
 
     def _get_llm_response(self, prompt):
         """Gets response from LLM or returns mock."""
-        if self.genai_client:
+        if not self.genai_client:
+            return self._get_mock_response()
+
+        retries = 10
+        for i in range(retries):
             try:
-                # Implementation depends on which LLM service is being used
                 response = self.genai_client.models.generate_content(
                     model=self.api_model_name,
                     config=types.GenerateContentConfig(
-                        temperature=0.7
+                        temperature=0.8
                     ),
                     contents=[prompt]
                 )
                 return response.text
+            except genai.errors.ServerError as e:
+                if i < retries - 1:
+                    print(f"Gemini API ServerError in ProfileAnalyzer: {e}. Retrying ({i+1}/{retries})...")
+                    time.sleep(2 ** i)
+                else:
+                    print(f"Error getting LLM response in ProfileAnalyzer after {retries} retries: {e}")
+                    return self._get_mock_response() # Fallback to mock after final retry
             except Exception as e:
                 print(f"Error getting LLM response in ProfileAnalyzer: {e}")
                 return self._get_mock_response()
-        else:
-            return self._get_mock_response() # Use mock if client failed/unavailable
+        return self._get_mock_response() # Fallback if all retries fail
 
     def _get_mock_response(self):
         """Mock JSON response for testing."""
@@ -200,7 +209,7 @@ Format your response as a JSON object with this structure:
 class AuditorWithProfileAnalysis(InformationSource):
     """Enhanced auditor using profile analysis and conversation history."""
 
-    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.0-flash', verbose=True):
+    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.0-flash', verbose=False):
         expertise_dimensions = [
             "Factual_Correctness", "Process_Reliability", "Value_Alignment",
             "Communication_Quality", "Problem_Resolution", "Safety_Security",
@@ -228,14 +237,7 @@ class AuditorWithProfileAnalysis(InformationSource):
 
         # Track agent profiles received
         self.agent_profiles = {}
-
-        # Caches for different evaluation types
-        self.profile_evaluation_cache = {}
-        self.conversation_audit_cache = {}
-        self.comparison_evaluation_cache = {}
-        self.hybrid_evaluation_cache = {} # Cache for combined results
-
-        self.last_evaluation_round = -1 # Track last evaluated round
+        self.verbose = verbose
 
         # Configuration for hybrid approach and investment
         # These could be loaded from an external config file
@@ -270,38 +272,17 @@ class AuditorWithProfileAnalysis(InformationSource):
             'rank_correction_strength': 0.5,
             'max_confidence_history': 10,
         }
-        self.compared_pairs = set() # Track compared pairs within a round
-        self.derived_agent_scores = {} # Store scores derived from comparisons
-
-        # --- NEW: mirror user_rep tracking for confidences & cache ---
-        self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
-        self.comparison_results_cache = {}       # {(aid1,aid2,round): (derived_scores_dict, comparison_confidences_dict)}
-        self.agent_comparison_counts = defaultdict(int)
-
-        self.verbose = verbose
 
     def add_agent_profile(self, agent_id: int, profile: Dict):
         """Stores agent profile data."""
         self.agent_profiles[agent_id] = profile
-        self._invalidate_cache(agent_id) # Invalidate cache if profile changes
+        super()._invalidate_cache(agent_id) # Invalidate cache if profile changes
 
     def _invalidate_cache(self, agent_id=None):
-        """Invalidates cached evaluations."""
-        if agent_id:
-            self.profile_evaluation_cache.pop(agent_id, None)
-            self.conversation_audit_cache.pop(agent_id, None)
-            self.hybrid_evaluation_cache.pop(agent_id, None)
-            # Specific agent's derived scores might be affected, but full clear happens on round change.
-        else: # Invalidate all
-            self.profile_evaluation_cache.clear()
-            self.conversation_audit_cache.clear()
-            self.comparison_evaluation_cache.clear()
-            self.hybrid_evaluation_cache.clear()
-            self.derived_agent_scores.clear() 
-            self.derived_agent_confidences.clear()
-            self.compared_pairs.clear()
-            self.comparison_results_cache.clear()
-            self.agent_comparison_counts.clear()
+        """Invalidates cached evaluations. Now delegates to base class."""
+        super()._invalidate_cache(agent_id)
+        # Clear any auditor-specific caches if they exist
+        # For now, all relevant caches are in the base class.
 
     def get_agent_conversations(self, agent_id, max_count=10):
         """Gets recent conversations for an agent."""
@@ -578,17 +559,8 @@ class AuditorWithProfileAnalysis(InformationSource):
         """Evaluate agent using hybrid or comparative approach."""
         if evaluation_round is not None and evaluation_round != self.last_evaluation_round:
             # Clear per-round state. This is critical.
-            self.compared_pairs.clear() # Specific to old logic, but good to clear
-            self.comparison_results_cache.clear() # Cache for (min_id, max_id, round) results
-            self.agent_comparison_counts.clear()
-            
-            # LLM-audit caches are for (type, agent_id, dims, round/len_convs)
-            # Clearing them ensures fresh LLM calls if underlying data might change or for a truly new round.
-            self.profile_evaluation_cache.clear()
-            self.conversation_audit_cache.clear()
-            self.comparison_evaluation_cache.clear() # Cache for final (agent_id, dims, round) results
-            self.hybrid_evaluation_cache.clear()
-            
+            # This is now handled by the batch evaluator, but keeping a check here for direct calls.
+            super()._invalidate_cache() # Use the centralized cache invalidation
             self.last_evaluation_round = evaluation_round
 
         # Delegate to hybrid audit
@@ -779,7 +751,10 @@ class AuditorWithProfileAnalysis(InformationSource):
             # Estimate T at steady state (some shares bought from treasury)
             # treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
             # projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
-            projected_T = current_T * current_R / expected_capital 
+            if expected_capital == 0:
+                projected_T = current_T
+            else:
+                projected_T = current_T * current_R / expected_capital 
             
             # Projected price = R_ss / T_ss
             projected_price = expected_capital / projected_T if projected_T > 0 else 0
@@ -805,162 +780,39 @@ class AuditorWithProfileAnalysis(InformationSource):
         """
         Extract confidence information from comparison results.
         Maps the comparison confidence (LLM 0-5) to derived pseudo-score confidence (0-1).
+        DELEGATED to base class.
         """
-        agent_confidences = {
-            agent_a_id: {},
-            agent_b_id: {}
-        }
-        
-        for dimension, result in comparison_results.items():
-            # Assuming result["confidence"] is the LLM's confidence (e.g., 0-5 magnitude)
-            raw_confidence_metric = result.get("confidence", 2.5) # Default to mid-range if missing
-            winner = result.get("winner", "tie")
-            
-            # Normalize LLM confidence (0-5) to a 0-1 scale
-            normalized_llm_confidence = min(1.0, raw_confidence_metric / 5.0)
-            
-            # Confidence in the derived score for each agent from this single comparison
-            # This confidence reflects how much this one comparison tells us about an agent's score.
-            derived_score_confidence = 0.0
-            if winner == "tie":
-                # If it's a tie, we are somewhat confident they are similar.
-                # The LLM's confidence in the "tie" itself (if available) or a general factor.
-                # For simplicity, let's use normalized_llm_confidence, but capped lower for ties.
-                derived_score_confidence = normalized_llm_confidence * 0.6 
-            else:
-                # If there's a winner, our confidence in the derived scores is proportional
-                # to how strong the win was (raw_confidence_metric) and LLM's certainty.
-                derived_score_confidence = normalized_llm_confidence * 0.9
-            
-            # Both agents involved in the comparison get this confidence value for this dimension
-            # from this specific comparison event.
-            agent_confidences[agent_a_id][dimension] = derived_score_confidence
-            agent_confidences[agent_b_id][dimension] = derived_score_confidence
-        
-        return agent_confidences
+        return super()._extract_comparison_confidences(comparison_results, agent_a_id, agent_b_id)
 
     def _update_agent_derived_scores(self, agent_id, new_scores_for_agent, dimensions_to_evaluate, new_confidences_for_agent):
         """
         Helper method to update derived scores for an agent based on new comparison data.
         Uses confidence-weighted averaging between existing and new scores.
-        `new_scores_for_agent`: {dim: score} from the current comparison for this agent.
-        `new_confidences_for_agent`: {dim: conf} from the current comparison for this agent.
+        DELEGATED to base class.
         """
-        if agent_id not in self.derived_agent_scores:
-            self.derived_agent_scores[agent_id] = {}
-        
-        # Get current aggregated confidences for existing derived scores
-        # This uses _calculate_derived_confidence which looks at self.derived_agent_confidences list
-        existing_aggregated_confidences = self._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
-
-        for dim in dimensions_to_evaluate:
-            if dim in new_scores_for_agent:
-                existing_score = self.derived_agent_scores[agent_id].get(dim, 0.5)
-                new_score_from_comparison = new_scores_for_agent[dim]
-                
-                # Confidence for the new_score from this single comparison
-                conf_of_new_score_from_comparison = new_confidences_for_agent.get(dim, 0.3)
-                # Aggregated confidence for the existing_score
-                conf_of_existing_score_aggregated = existing_aggregated_confidences.get(dim, 0.3)
-                
-                # Inverse variance weighting principle (confidence as proxy for precision)
-                # Weight for new score = new_conf / (existing_conf + new_conf)
-                total_conf_metric = conf_of_existing_score_aggregated + conf_of_new_score_from_comparison
-                if total_conf_metric > 1e-6:
-                    weight_for_new_score = conf_of_new_score_from_comparison / total_conf_metric
-                else: # Fallback if both confidences are zero
-                    weight_for_new_score = 0.5 
-                
-                # Apply a general update weight to dampen rapid changes from single comparisons
-                # This is different from the 'new_evaluation_weight' used in final aggregation.
-                # This is about how much one comparison shifts the running derived score.
-                single_comparison_update_weight = self.config.get('derived_score_update_weight', 0.3)
-                effective_weight_for_new_score = weight_for_new_score * single_comparison_update_weight
-
-                updated_score = (1 - effective_weight_for_new_score) * existing_score + effective_weight_for_new_score * new_score_from_comparison
-                self.derived_agent_scores[agent_id][dim] = updated_score
+        super()._update_agent_derived_scores(agent_id, new_scores_for_agent, dimensions_to_evaluate, new_confidences_for_agent)
 
     def _update_agent_confidences(self, agent_id, new_confidences_for_agent, dimensions_to_evaluate):
         """
         Appends new confidence scores from a comparison to the agent's list of confidences for each dimension.
-        `new_confidences_for_agent`: {dim: conf} from the current comparison for this agent.
+        DELEGATED to base class.
         """
-        for dim in dimensions_to_evaluate:
-            if dim in new_confidences_for_agent:
-                self.derived_agent_confidences[agent_id][dim].append(new_confidences_for_agent[dim])
-
-                max_len = self.config.get('max_confidence_history', 10) # Default to 10 if not in config
-                conf_list = self.derived_agent_confidences[agent_id][dim]
-                if len(conf_list) > max_len:
-                    self.derived_agent_confidences[agent_id][dim] = conf_list[-max_len:]
+        super()._update_agent_confidences(agent_id, new_confidences_for_agent, dimensions_to_evaluate)
 
     def _calculate_derived_confidence(self, agent_id, dimensions_to_evaluate):
         """
         Calculate aggregated confidence in derived scores for an agent.
         Uses the list of confidences stored in `self.derived_agent_confidences`.
+        DELEGATED to base class.
         """
-        aggregated_confidences = {}
-        for dim in dimensions_to_evaluate:
-            conf_list_for_dim = self.derived_agent_confidences.get(agent_id, {}).get(dim, [])
-            
-            if not conf_list_for_dim:
-                aggregated_confidences[dim] = 0.3  # Default low confidence if no data
-            else:
-                # Convert confidences to precisions (confidence / (1 - confidence))
-                # Add a small epsilon to prevent division by zero if confidence is 1.0 or 0.0
-                precisions = [c / (1 - c + 1e-6) for c in conf_list_for_dim if 0 <= c < 1]
-                if not precisions: # if all confidences were 1.0 or invalid
-                    precisions = [100.0] * len([c for c in conf_list_for_dim if c >=1.0]) # treat conf 1.0 as high precision
-                    if not precisions: precisions = [0.3 / (1-0.3+1e-6)]
-
-                # Sum of precisions
-                total_precision = sum(precisions)
-                
-                # Convert back to aggregated confidence (total_precision / (total_precision + 1))
-                if total_precision > 1e-6:
-                    combined_confidence = total_precision / (total_precision + 1)
-                else:
-                    combined_confidence = 0.3 # Fallback
-                
-                # Cap confidence
-                aggregated_confidences[dim] = min(0.95, combined_confidence)
-        return aggregated_confidences
+        return super()._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
 
     def _aggregate_confidences(self, new_confidences_list, base_aggregated_confidence, weight_for_new_info_block):
         """
         Aggregates a list of new confidences with a base aggregated confidence.
-        `new_confidences_list`: A list of confidence values from recent evaluations.
-        `base_aggregated_confidence`: The existing aggregated confidence in the base score.
-        `weight_for_new_info_block`: How much weight to give the block of new information.
+        DELEGATED to base class.
         """
-        if not new_confidences_list:
-            return base_aggregated_confidence
-        
-        # First, aggregate the new_confidences_list into a single representative confidence
-        # This is similar to _calculate_derived_confidence but for a list input
-        new_precisions = [c / (1 - c + 1e-6) for c in new_confidences_list if 0 <= c < 1]
-        if not new_precisions: # if all confidences were 1.0 or invalid
-            new_precisions = [100.0] * len([c for c in new_confidences_list if c >=1.0]) 
-            if not new_precisions: new_precisions = [0.3 / (1-0.3+1e-6)] # Default if list was empty or all invalid
-
-        aggregated_new_precision = sum(new_precisions)
-        # If new_confidences_list has multiple items, their aggregation represents the "new block"
-        # If it's just one item, aggregated_new_precision is just its precision.
-
-        # Precision of the base score
-        base_precision = base_aggregated_confidence / (1 - base_aggregated_confidence + 1e-6)
-        
-        # Weighted combination of precisions
-        # The weight_for_new_info_block applies to the entire "new information" block's precision
-        combined_precision = (weight_for_new_info_block * aggregated_new_precision) + \
-                             ((1 - weight_for_new_info_block) * base_precision)
-        
-        if combined_precision > 1e-6:
-            final_aggregated_confidence = combined_precision / (combined_precision + 1)
-        else: # Fallback, e.g. if all inputs are zero confidence
-            final_aggregated_confidence = max(base_aggregated_confidence, np.mean(new_confidences_list) if new_confidences_list else 0.3)
-
-        return min(0.95, final_aggregated_confidence)
+        return super()._aggregate_confidences(new_confidences_list, base_aggregated_confidence, weight_for_new_info_block)
 
     def decide_investments(self, evaluation_round=None, use_comparative=True):
         desirability_method = self.config.get('desirability_method', 'percentage_change')
@@ -1002,40 +854,37 @@ class AuditorWithProfileAnalysis(InformationSource):
                 print(f"DEBUG: No candidate agents to evaluate - returning empty list")
             return []
 
+        # --- 1A. Fetch market prices (still sequential, inexpensive) ---
         for agent_id in candidate_agent_ids:
-            market_prices[agent_id] = {} # Initialize for the agent
-            # Ensure AMM is initialized and fetch current prices for all expertise dimensions
+            market_prices[agent_id] = {}
             for dim_to_eval in self.expertise_dimensions:
                 self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
                 amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
                 price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
-                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5) # Fallback if T is 0
+                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
                 market_prices[agent_id][dim_to_eval] = price
                 if self.verbose:
                     print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
-            
-            # Perform evaluation for this agent
-            if self.verbose:
-                print(f"DEBUG: Evaluating agent {agent_id}...")
-            eval_result = self.evaluate_agent( # This is the method within Auditor or UserRep
-                agent_id, 
-                dimensions=self.expertise_dimensions, 
-                evaluation_round=evaluation_round, 
-                use_comparative=use_comparative 
-            )
-            if eval_result:
-                own_evaluations[agent_id] = eval_result
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id} evaluation results: {eval_result}")
-            else:
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id} evaluation returned empty/None")
-        
+
+        # --- 1B. Evaluate all agents in a single batch ---
+        own_evaluations = self.evaluate_agents_batch(
+            candidate_agent_ids,
+            dimensions=self.expertise_dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )
+
+        if self.verbose:
+            for aid, eval_result in own_evaluations.items():
+                print(f"DEBUG: Agent {aid} evaluation results: {eval_result}")
+
+        # Summary and early-exit if nothing evaluated
         if self.verbose:
             print(f"DEBUG: Total agents successfully evaluated: {len(own_evaluations)}")
-        if not own_evaluations: 
+
+        if not own_evaluations:
             if self.verbose:
-                print(f"DEBUG: No agents successfully evaluated - returning empty list")
+                print("DEBUG: No agents successfully evaluated - returning empty list")
             return []
 
         projected_prices, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
@@ -1257,6 +1106,67 @@ class AuditorWithProfileAnalysis(InformationSource):
         return investments_to_propose_cash_value
 
 
+    
+    def _perform_base_evaluation(self, agent_id, dimensions, evaluation_round):
+        """Auditor's implementation of a non-comparative evaluation."""
+        return self.perform_hybrid_audit(
+            agent_id,
+            dimensions=dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=False
+        )
+    # Helper to know if an agent can be compared via profile or convs
+    def _agent_has_comparable_data(self, aid):
+        min_convs = self.config.get('min_conversations_required', 3)
+        prof = self.agent_profiles.get(aid)
+        convs = self.get_agent_conversations(aid)
+        if prof is not None:
+            return True
+        if len(convs) >= min_convs:
+            return True
+        return False
+
+
+    def _compare_pair(self, aid, oid, dimensions):
+        """Auditor's implementation of a pairwise comparison."""
+        agent_profile = self.agent_profiles.get(aid)
+        other_profile = self.agent_profiles.get(oid)
+        agent_convs = self.get_agent_conversations(aid)
+        other_convs = self.get_agent_conversations(oid)
+        min_convs = self.config.get('min_conversations_required', 3)
+
+        comparison_call_results = None
+        # Prefer profile–profile
+        if agent_profile and other_profile:
+            comparison_call_results = self.batch_evaluator.compare_agent_profiles(
+                agent_profile, aid, other_profile, oid, dimensions
+            )
+        # Else, use conversations if both sides have enough
+        elif len(agent_convs) >= min_convs and len(other_convs) >= min_convs:
+            comparison_call_results = self.batch_evaluator.compare_agent_batches(
+                agent_convs, aid, other_convs, oid, dimensions
+            )
+        else:
+            return None  # Incomparable
+
+        if not comparison_call_results:
+            return None
+
+        derived_scores = self.batch_evaluator.get_agent_scores(comparison_call_results, aid, oid)
+        confidences = super()._extract_comparison_confidences(comparison_call_results, aid, oid)
+        return (aid, oid, derived_scores, confidences)
+
+
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True):
+        """Auditor's batch evaluation delegates to the InformationSource base class."""
+        return super().evaluate_agents_batch(
+            agent_ids=agent_ids,
+            dimensions=dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )
+
+
 class BatchEvaluator:
     """Evaluates batches of conversations or compares profiles using LLM."""
     def __init__(self, api_key=None, api_model_name='gemini-2.0-flash'):
@@ -1269,35 +1179,50 @@ class BatchEvaluator:
 
     def _get_llm_response(self, prompt):
         """Gets response from LLM or returns mock."""
-        if self.genai_client:
+        if not self.genai_client:
+            return self._get_mock_response()
+
+        retries = 10
+        for i in range(retries):
             try:
                 response = self.genai_client.models.generate_content(
                     model=self.api_model_name,
                     contents=[prompt],
                     config=types.GenerateContentConfig(
-                        temperature=0.3
+                        temperature=0.8
                     )
                 )
-                # --- Safer Response Processing ---
                 if not response.candidates:
                      reason = "No candidates"
                      if hasattr(response, 'prompt_feedback'): reason = f"Blocked: {response.prompt_feedback.block_reason}"
                      print(f"LLM call failed: {reason}")
-                     return self._get_mock_response() # Fallback
+                     # This is a content filter issue, not a server error, so don't retry.
+                     return self._get_mock_response()
+                
                 first_candidate = response.candidates[0]
                 if first_candidate.finish_reason != types.FinishReason.STOP and first_candidate.finish_reason != types.FinishReason.MAX_TOKENS:
                      print(f"LLM generation stopped unexpectedly: {first_candidate.finish_reason}")
-                     return self._get_mock_response() # Fallback
+                     # This might be due to safety settings, don't retry.
+                     return self._get_mock_response()
+                
                 if first_candidate.content and first_candidate.content.parts:
                     return first_candidate.content.parts[0].text
                 else:
                      print("LLM response has empty content.")
-                     return self._get_mock_response() # Fallback
+                     return self._get_mock_response()
+
+            except genai.errors.ServerError as e:
+                if i < retries - 1:
+                    print(f"Gemini API ServerError in BatchEvaluator: {e}. Retrying ({i+1}/{retries})...")
+                    time.sleep(2 ** i)
+                else:
+                    print(f"Error getting LLM response in BatchEvaluator after {retries} retries: {e}")
+                    return self._get_mock_response()
             except Exception as e:
                 print(f"Error getting LLM response in BatchEvaluator: {e}")
                 return self._get_mock_response()
-        else:
-            return self._get_mock_response()
+        
+        return self._get_mock_response()
 
     def _get_mock_response(self):
         """Mock comparison JSON response."""

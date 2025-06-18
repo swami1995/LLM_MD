@@ -2,13 +2,14 @@ import math
 import numpy as np
 from collections import defaultdict
 from trust_market.info_sources import InformationSource 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 # Import evaluator from auditor (assuming it's in the same directory/package)
 from trust_market.auditor import BatchEvaluator # Use BatchEvaluator for comparisons
 # Assuming google.genai for LLM calls
 from google import genai
 from google.genai import types
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Base UserRepresentative (Simplified Logic) ---
 class UserRepresentative(InformationSource):
@@ -131,19 +132,10 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # Initialize holistic evaluator (using BatchEvaluator from auditor.py)
         self.api_model_name = api_model_name
         self.evaluator = BatchEvaluator(api_key=api_key, api_model_name=api_model_name) # Pass API key
+        self.batch_evaluator = self.evaluator # For base class compatibility
 
-        # Cache for agent evaluations from holistic comparison
-        self.agent_evaluation_cache = {} # {agent_id: {dimension: (score, confidence)}}
-
-        # Tracking recent evaluation rounds and comparisons
-        self.last_evaluation_round = -1
-        self.compared_pairs = set()
-        self.derived_agent_scores = {} # Stores {agent_id: {dimension: score_0_1}}
-        self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
-        
-        # NEW: Track comparison results for efficient updates
-        self.comparison_results_cache = {} # {(agent1_id, agent2_id, eval_round): {agent_id: {dim: score}}}
-        self.agent_comparison_counts = defaultdict(int) # {agent_id: count} - tracks how many comparisons each agent has
+        # Cache for the single-agent evaluation method
+        self.agent_evaluation_cache = {}
 
         # Configuration specific to this Rep's strategy
         self.config = {
@@ -153,6 +145,20 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'invest_multiplier': 0.2,         # Investment aggressiveness
             'divest_multiplier': 0.15,        # Divestment aggressiveness
             'precision_scale_factor': 0.6,     # Controls how fast confidence grows. Lower is slower.
+            # Added for base class compatibility
+            'base_score_persistence': 0.2,
+            'derived_score_update_weight': 0.3,
+            'max_confidence_history': 10,
+            'desirability_method': 'percentage_change',
+            'min_operational_price': 0.01,
+            'attractiveness_buy_threshold': 0.01,
+            'min_value_holding_per_asset': 0.0,
+            'portfolio_rebalance_aggressiveness': 0.5,
+            'min_delta_value_trade_threshold': 0.1,
+            'investment_scale': 0.2,
+            'rank_correction_strength': 0.5,
+            'market_growth_factor': 1.0,
+            'quality_concentration_power': 2.0,
         }
         # Note: Uses segment_weights from base class for dimension importance
 
@@ -164,6 +170,34 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     def observed_agents(self):
         """Returns agent IDs with stored conversations."""
         return set(self.agent_conversations.keys())
+
+    def _agent_has_comparable_data(self, aid):
+        """Checks if an agent has enough conversation data to be used in a comparison."""
+        min_convs = self.config.get('min_conversations_required', 3)
+        return len(self.get_agent_conversations(aid)) >= min_convs
+    
+    def _perform_base_evaluation(self, agent_id, dimensions, evaluation_round):
+        """UserRep's non-comparative evaluation returns a neutral score, as its strength is comparison."""
+        return {dim: (0.5, 0.3) for dim in dimensions}
+
+    def _compare_pair(self, aid, oid, dimensions) -> Optional[Tuple[int, int, dict, dict]]:
+        """UserRep's implementation of a pairwise comparison based on conversations."""
+        if not (self._agent_has_comparable_data(aid) and self._agent_has_comparable_data(oid)):
+            return None # Incomparable
+
+        comparison_results = self.evaluator.compare_agent_batches(
+            self.get_agent_conversations(aid), aid,
+            self.get_agent_conversations(oid), oid,
+            dimensions
+        )
+
+        if not comparison_results:
+            return None
+
+        derived_scores = self.evaluator.get_agent_scores(comparison_results, aid, oid)
+        confidences = super()._extract_comparison_confidences(comparison_results, aid, oid)
+        
+        return (aid, oid, derived_scores, confidences)
 
     # Override evaluate_agent to use the holistic comparison method
     def evaluate_agent(self, agent_id, dimensions=None, evaluation_round=None, use_comparative=True):
@@ -179,7 +213,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         TODO : Figure out what to do about confidence for derived scores. 
         """
         if self.verbose:
-            print(f"\n--- UserRep {self.source_id} evaluating Agent {agent_id} for round {evaluation_round} ---")
+            print(f"\n--- UserRep {self.source_id} (single-agent eval) for Agent {agent_id} round {evaluation_round} ---")
 
         dimensions_to_evaluate = dimensions or self.expertise_dimensions
         # Use cache if available and for the current round
@@ -189,9 +223,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         # Reset comparison tracking if it's a new round
         if evaluation_round and evaluation_round != self.last_evaluation_round:
-            self.compared_pairs = set()
-            self.comparison_results_cache = {}
-            self.agent_comparison_counts = defaultdict(int)
+            super()._invalidate_cache()
             self.last_evaluation_round = evaluation_round
             if self.verbose:
                 print(f"UserRep {self.source_id} starting new evaluation round {evaluation_round}")
@@ -199,38 +231,23 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # --- Start Evaluation Logic ---
         # Get base scores (from previous comparisons in this round or neutral)
         base_scores_0_1 = self.derived_agent_scores.get(agent_id, {})
-        base_confidences = self._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
+        base_confidences = super()._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
 
         base_scores_with_conf = {
-            dim: (score, base_confidences.get(dim, 0.3)) # Assign moderate confidence to derived scores
-            for dim, score in base_scores_0_1.items()
-            if dim in dimensions_to_evaluate
+            dim: (base_scores_0_1.get(dim, 0.5), base_confidences.get(dim, 0.3))
+            for dim in dimensions_to_evaluate
         }
-        if not base_scores_0_1:
-            base_scores_with_conf = {dim: (0.5, 0.3) for dim in dimensions_to_evaluate}
 
         if self.verbose:
             print(f"DEBUG: Agent {agent_id} - Initial scores with confidence: {base_scores_with_conf}")
+        if not self._agent_has_comparable_data(agent_id):
+            return {dim: (score, min(conf, 0.3)) for dim, (score, conf) in base_scores_with_conf.items()}
 
-        agent_conversations = self.get_agent_conversations(agent_id)
-        min_convs = self.config.get('min_conversations_required', 1)
-
-        # if len(agent_conversations) < min_convs:
-        #     # Return base score with reduced confidence
-        #     return {dim: (score, min(conf, 0.3)) for dim, (score, conf) in base_scores_with_conf.items()}
-
-        # Find other agents with enough conversations to compare against
-        other_agent_ids = self.observed_agents()
+        other_agent_ids = {oid for oid in self.observed_agents() if self._agent_has_comparable_data(oid)}
         other_agent_ids.discard(agent_id)
-        valid_comparison_agents = []
-        for other_id in other_agent_ids:
-             other_convs = self.get_agent_conversations(other_id)
-             if len(other_convs) >= min_convs:
-                 valid_comparison_agents.append((other_id, other_convs))
-
+        valid_comparison_agents = list(other_agent_ids)
+        
         if not valid_comparison_agents:
-             if self.verbose:
-                print(f"No valid comparison agents found for agent {agent_id}.")
              return base_scores_with_conf
 
         # --- Select Comparison Subset (prioritize new comparisons) ---
@@ -281,33 +298,18 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                     print(f"DEBUG: Using cached comparison result for {agent_id} vs {other_id}")
                 derived_scores, comparison_confidences = self.comparison_results_cache[comparison_cache_key]
             else:
-                # Use the BatchEvaluator for conversation comparison
-                comparison_results = self.evaluator.compare_agent_batches(
-                    agent_conversations, agent_id,
-                    other_convs, other_id,
-                    dimensions_to_evaluate
-                )
-                if self.verbose:
-                    print(f"DEBUG: Raw comparison result ({agent_id} vs {other_id}): {comparison_results}")
-
-                # Get pseudo-absolute scores from comparison
-                derived_scores = self.evaluator.get_agent_scores(comparison_results, agent_id, other_id)
-                comparison_confidences = self._extract_comparison_confidences(comparison_results, agent_id, other_id)
-                
-                # Cache the comparison result for future use
+                pair_result = self._compare_pair(agent_id, other_id, dimensions_to_evaluate)
+                if not pair_result:
+                    continue
+                _, _, derived_scores, comparison_confidences = pair_result
                 self.comparison_results_cache[comparison_cache_key] = (derived_scores, comparison_confidences)
-                if self.verbose:
-                    print(f"DEBUG: Cached comparison result: {derived_scores, comparison_confidences}")
-                
-                # Update derived scores for BOTH agents
-                self._update_agent_derived_scores(agent_id, derived_scores.get(agent_id, {}), dimensions_to_evaluate,
-                                                  {agent_id: comparison_confidences.get(agent_id, {})})
-                self._update_agent_derived_scores(other_id, derived_scores.get(other_id, {}), dimensions_to_evaluate,
-                                                  {agent_id: comparison_confidences.get(agent_id, {})})
-                self._update_agent_confidences(agent_id, comparison_confidences.get(agent_id, {}), dimensions_to_evaluate)
-                self._update_agent_confidences(other_id, comparison_confidences.get(other_id, {}), dimensions_to_evaluate)
 
-            # Accumulate scores for the target agent_id
+                # Update derived scores for BOTH agents using base class methods
+                super()._update_agent_derived_scores(agent_id, derived_scores.get(agent_id, {}), dimensions_to_evaluate, comparison_confidences.get(agent_id, {}))
+                super()._update_agent_derived_scores(other_id, derived_scores.get(other_id, {}), dimensions_to_evaluate, comparison_confidences.get(other_id, {}))
+                super()._update_agent_confidences(agent_id, comparison_confidences.get(agent_id, {}), dimensions_to_evaluate)
+                super()._update_agent_confidences(other_id, comparison_confidences.get(other_id, {}), dimensions_to_evaluate)
+
             for dim in dimensions_to_evaluate:
                 if dim in derived_scores.get(agent_id, {}):
                     accumulated_scores[dim].append(derived_scores[agent_id][dim])
@@ -323,17 +325,15 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         
         # --- Calculate Final Scores ---
         final_eval_scores = {}
-        weight_new = self.config.get('new_evaluation_weight', 0.7)
         for dim in dimensions_to_evaluate:
             base_score, base_conf = base_scores_with_conf.get(dim, (0.5, 0.3))
             if dim in accumulated_scores and accumulated_scores[dim]:
                 new_scores = accumulated_scores[dim]
-                new_confidences = accumulated_confidences[dim]
+                new_confs = accumulated_confidences[dim]
                 
-                # Confidence-weighted average of new scores
-                if sum(new_confidences) > 1e-6:
-                    confidence_weighted_avg = sum(s * c for s, c in zip(new_scores, new_confidences)) / sum(new_confidences)
-                    avg_new_confidence = sum(new_confidences) / len(new_confidences)
+                if sum(new_confs) > 1e-6:
+                    confidence_weighted_avg = sum(s * c for s, c in zip(new_scores, new_confs)) / sum(new_confs)
+                    avg_new_confidence = sum(new_confs) / len(new_confs)
                 else:
                     confidence_weighted_avg = sum(new_scores) / len(new_scores)
                     avg_new_confidence = 0.3
@@ -350,7 +350,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 effective_weight_new = weight_new * (1 - persistence_factor)
                 
                 final_score = (effective_weight_new * confidence_weighted_avg) + ((1 - effective_weight_new) * base_score)
-                final_confidence = self._aggregate_confidences(new_confidences, base_conf, effective_weight_new)
+                final_confidence = super()._aggregate_confidences(new_confs, base_conf, effective_weight_new)
                 
                 final_eval_scores[dim] = (final_score, final_confidence)
                 if self.verbose:
@@ -362,197 +362,15 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 if self.verbose:
                     print(f"DEBUG: Agent {agent_id} Dim {dim}: No new data. Using base={base_score:.3f}, final_conf={base_conf * 0.9:.3f}")
 
-        # Update derived scores cache for this agent
-        if agent_id not in self.derived_agent_scores: 
-            self.derived_agent_scores[agent_id] = {}
         for dim, (score, _) in final_eval_scores.items():
+            if agent_id not in self.derived_agent_scores: self.derived_agent_scores[agent_id] = {}
             self.derived_agent_scores[agent_id][dim] = score
 
-        # Update comparison count for this agent
-        self.agent_comparison_counts[agent_id] += comparison_count
-
-        if self.verbose:
-            print(f"DEBUG: Updated derived_agent_scores for round {evaluation_round}: {self.derived_agent_scores}")
         self.agent_evaluation_cache[cache_key] = final_eval_scores
         if self.verbose:
             print(f"--- UserRep {self.source_id} finished evaluating Agent {agent_id}. Final Scores: {final_eval_scores} ---")
         return final_eval_scores
     
-    def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
-        """
-        Extract confidence information from comparison results.
-        Maps the comparison confidence to confidence in the derived pseudo-scores.
-        """
-        agent_confidences = {
-            agent_a_id: {},
-            agent_b_id: {}
-        }
-        
-        for dimension, result in comparison_results.items():
-            raw_confidence = result.get("confidence", 2.5)  # 0-5 scale from LLM, default to middle
-            winner = result.get("winner", "tie")
-            
-            # Convert LLM confidence (0-5) to our confidence scale (0-1)
-            normalized_confidence = min(1.0, raw_confidence / 5.0)
-            
-            # Confidence in derived score depends on:
-            # 1. How confident the LLM was in the comparison
-            # 2. How decisive the comparison was (strong winner vs tie)
-            if winner == "tie":
-                # Moderate confidence for both agents when it's a tie - we're confident it's close
-                base_confidence = normalized_confidence * 0.6  # Ties still give us information
-            else:
-                # Higher confidence for clear winners, scaled by LLM confidence
-                base_confidence = normalized_confidence * 0.9  # As you suggested
-            
-            # Both agents get the same base confidence from this comparison
-            agent_confidences[agent_a_id][dimension] = base_confidence
-            agent_confidences[agent_b_id][dimension] = base_confidence
-        
-        return agent_confidences
-
-    def _update_agent_derived_scores(self, agent_id, new_scores, dimensions_to_evaluate, new_confidences=None):
-        """
-        Helper method to update derived scores for an agent based on new comparison data.
-        Uses confidence-weighted averaging between existing and new scores.
-        """
-        if agent_id not in self.derived_agent_scores:
-            self.derived_agent_scores[agent_id] = {}
-        
-        # Get current confidence estimates for existing scores
-        existing_confidences = self._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
-        
-        for dim in dimensions_to_evaluate:
-            if dim in new_scores:
-                existing_score = self.derived_agent_scores[agent_id].get(dim, 0.5)
-                new_score = new_scores[dim]
-                
-                # Get confidences
-                existing_conf = existing_confidences.get(dim, 0.3)
-                new_conf = new_confidences.get(dim, {}).get(dim, 0.5) if new_confidences else 0.5
-                
-                # Confidence-weighted update (inverse variance weighting principle)
-                if existing_conf + new_conf > 1e-6:  # Avoid division by zero
-                    weight_new = new_conf / (existing_conf + new_conf)
-                    updated_score = (1 - weight_new) * existing_score + weight_new * new_score
-                else:
-                    # Fallback to simple average if confidences are both near zero
-                    updated_score = 0.5 * (existing_score + new_score)
-                
-                self.derived_agent_scores[agent_id][dim] = updated_score
-                
-                if self.verbose:
-                    print(f"DEBUG: Confidence-weighted update for Agent {agent_id}, Dim {dim}: "
-                        f"{existing_score:.3f}(conf={existing_conf:.3f}) + {new_score:.3f}(conf={new_conf:.3f}) "
-                        f"-> {updated_score:.3f} (weight_new={weight_new:.3f})")
-
-    def _calculate_derived_confidence(self, agent_id, dimensions_to_evaluate):
-        """
-        Calculate confidence in derived scores using proper statistical aggregation.
-        Treats each comparison as providing a noisy estimate of the true score.
-        """
-        confidences = {}
-        precision_scale_factor = self.config.get('precision_scale_factor', 0.6)
-        
-        for dim in dimensions_to_evaluate:
-            conf_list = self.derived_agent_confidences.get(agent_id, {}).get(dim, [])
-            
-            if not conf_list:
-                confidences[dim] = 0.3  # Default low confidence
-            else:
-                # Statistical confidence aggregation
-                # Each measurement has variance inversely proportional to confidence
-                # Combined variance = 1 / sum(1/individual_variances)
-                
-                # Convert confidences to precisions (inverse of variance)
-                # conf=1 -> precision=100, conf=0.1 -> precision=1
-                precisions = [precision_scale_factor * (conf / (1 - conf + 1e-6)) for conf in conf_list]
-                
-                # Combined precision is sum of individual precisions
-                combined_precision = sum(precisions)
-                
-                # Convert back to confidence
-                if combined_precision > 1e-6:
-                    combined_confidence = combined_precision / (combined_precision + 1)
-                    # Cap at reasonable maximum
-                    combined_confidence = min(0.95, combined_confidence)
-                else:
-                    combined_confidence = 0.3
-                
-                # Apply sample size adjustment (more comparisons = more confidence)
-                sample_size_factor = 1 + 0.1 * np.log1p(len(conf_list))
-                combined_confidence = min(0.95, combined_confidence * sample_size_factor)
-                
-                confidences[dim] = combined_confidence
-                if self.verbose:
-                    print(f"DEBUG: Derived confidence for Agent {agent_id}, Dim {dim}: "
-                        f"{len(conf_list)} comparisons -> {combined_confidence:.3f}")
-        
-        return confidences
-
-    def _aggregate_confidences(self, new_confidences, base_confidence, weight_new):
-        """
-        Properly aggregate confidence using statistical principles.
-        Treats confidence as inverse of variance for principled combination.
-        """
-        if not new_confidences:
-            return base_confidence
-        
-        precision_scale_factor = self.config.get('precision_scale_factor', 0.6)
-        # Convert confidences to precisions
-        base_precision = base_confidence / (1 - base_confidence + 1e-6)
-        
-        # For multiple new confidences, first aggregate them
-        if len(new_confidences) == 1:
-            new_precision = precision_scale_factor * (new_confidences[0] / (1 - new_confidences[0] + 1e-6))
-        else:
-            # Aggregate multiple new confidences first
-            new_precisions = [precision_scale_factor * (conf / (1 - conf + 1e-6)) for conf in new_confidences]
-            new_precision = sum(new_precisions)
-        
-        # Weight the precisions according to the weight_new parameter
-        # This allows us to discount either old or new information
-        effective_base_precision = base_precision * (1 - weight_new) / weight_new if weight_new > 1e-6 else base_precision
-        combined_precision = effective_base_precision + new_precision
-        
-        # Convert back to confidence
-        if combined_precision > 1e-6:
-            combined_confidence = combined_precision / (combined_precision + 1)
-            combined_confidence = min(0.95, combined_confidence)
-        else:
-            combined_confidence = max(base_confidence, np.mean(new_confidences))
-        
-        return combined_confidence
-
-    def _update_agent_confidences(self, agent_id, new_confidences, dimensions_to_evaluate):
-        """Update confidence tracking for an agent."""
-        if not hasattr(self, 'derived_agent_confidences'):
-            self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
-        
-        for dim in dimensions_to_evaluate:
-            if dim in new_confidences:
-                self.derived_agent_confidences[agent_id][dim].append(new_confidences[dim])
-                max_len = self.config.get('max_confidence_history', 20) # Default to 20 if not in config
-                conf_list = self.derived_agent_confidences[agent_id][dim]
-                if len(conf_list) > max_len:
-                    self.derived_agent_confidences[agent_id][dim] = conf_list[-max_len:]
-
-    def get_all_agent_scores_for_round(self, evaluation_round, dimensions=None):
-        """
-        Utility method to get current derived scores for all agents in this evaluation round.
-        Useful for debugging and ensuring all agents have been updated.
-        """
-        dimensions = dimensions or self.expertise_dimensions
-        result = {}
-        
-        for agent_id in self.derived_agent_scores:
-            result[agent_id] = {
-                dim: self.derived_agent_scores[agent_id].get(dim, 0.5)
-                for dim in dimensions
-            }
-        
-        return result
-
     def _get_target_price_from_rank_mapping(self, agent_id, dimension, own_evaluations, market_prices, confidence_in_own_eval):
         """
         Calculates a target price for agent_id in a given dimension using rank-order mapping.
@@ -696,6 +514,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 current_total_market_capital += self.market.agent_amm_params[agent_id][dimension]['R']
         
         steady_state_capital += current_total_market_capital # Include current capital in the market
+        if current_total_market_capital < 1e-6:
+            current_total_market_capital = 1e-6
+
         # Step 3: Project capital distribution based on quality scores
         # Use own evaluations as best estimate of true quality
         quality_scores = {
@@ -715,10 +536,12 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         total_quality_powered = sum(quality_powered.values())
         
         # Expected share of steady-state capital for each agent
-        expected_capital_shares = {
-            aid: qp / total_quality_powered 
-            for aid, qp in quality_powered.items()
-        }
+        expected_capital_shares = {}
+        if total_quality_powered > 1e-6:
+            expected_capital_shares = {
+                aid: qp / total_quality_powered 
+                for aid, qp in quality_powered.items()
+            }
         
         # Step 4: Project steady-state prices
         projected_prices = {}
@@ -736,10 +559,13 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             # Estimate T at steady state (some shares bought from treasury)
             # treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
             # projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
-            projected_T = current_T * current_R / expected_capital 
-            
+            if expected_capital > 1e-6 :
+                projected_T = current_T * current_R / expected_capital 
+            else:
+                projected_T = current_T
+
             # Projected price = R_ss / T_ss
-            projected_price = expected_capital / projected_T if projected_T > 0 else 0
+            projected_price = expected_capital / projected_T if projected_T > 1e-6 else 0
             projected_prices[agent_id] = projected_price
         
         return projected_prices, steady_state_capital / current_total_market_capital
@@ -792,47 +618,30 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             print(f"DEBUG: No candidate agents to evaluate - returning empty list")
             return []
 
+        # --- 1A. Fetch market prices ---
         for agent_id in candidate_agent_ids:
-            market_prices[agent_id] = {} # Initialize for the agent
-            # Ensure AMM is initialized and fetch current prices for all expertise dimensions
+            market_prices[agent_id] = {}
             for dim_to_eval in self.expertise_dimensions:
                 self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
                 amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
                 price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
-                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5) # Fallback if T is 0
+                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
                 market_prices[agent_id][dim_to_eval] = price
                 if self.verbose:
                     print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
-            
-            # Perform evaluation for this agent
-            eval_result = self.evaluate_agent( # This is the method within Auditor or UserRep
-                agent_id, 
-                dimensions=self.expertise_dimensions, 
-                evaluation_round=evaluation_round, 
-                use_comparative=use_comparative 
-            )
-            if eval_result:
-                own_evaluations[agent_id] = eval_result
-            else:
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id} evaluation returned empty/None")
-        
-        if not own_evaluations: 
-            print(f"DEBUG: No agents successfully evaluated - returning empty list")
+
+        # --- 1B. Batch evaluate all agents ---
+        own_evaluations = self.evaluate_agents_batch(
+            candidate_agent_ids,
+            dimensions=self.expertise_dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )
+
+        if not own_evaluations:
+            if self.verbose:
+                print("DEBUG: No agents successfully evaluated - returning empty list")
             return []
-
-        #####################
-        # Okay. I think this is good. but just thinking through how I would go about it :
-
-        # 1) projected capital deployment based on own_evals or extrapolated current market value. the other strategy is perhaps to consider yourself as another agent with 0 expected returns... the problem is we can't get evaluated scores here. actually maybe we can... we'll just get 0.5-0.5 likelihood of winning... 
-
-        # 2) use that to make investments when 'far away' in terms of total invested capital. 
-
-        # 3) otherwise, use the rankings based methods we developed to make investments. (rankings are again great when dealing with large number of agents but bad when dealing with very few agents)... 
-
-        # 4) We still need to figure out calibration in both cases.. 
-
-        # 5) Need to likewise find a mechanism when the capital will likely be pulled out by a large fraction of the market because the market broadly is loosing trust for some reason.
 
         projected_prices, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
 
@@ -843,7 +652,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # Filter evaluations to only those agents for whom we also have market prices
         # This ensures fair comparison for rank mapping and attractiveness calculation
         valid_agent_ids_for_ranking = [aid for aid in own_evaluations.keys() if aid in market_prices and \
-                                       all(dim in market_prices[aid] for dim in self.expertise_dimensions)]
+                                       all(dim in market_prices.get(aid, {}) for dim in self.expertise_dimensions)]
         
         if self.verbose:
             print(f"DEBUG: Valid agents for ranking: {len(valid_agent_ids_for_ranking)} out of {len(own_evaluations)}")
@@ -985,8 +794,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         for dim in delta_value_target_map.keys():
             if total_proposed_investments[dim] > 0:
                 investment_scale = self.config.get('invest_multiplier', 0.2) # Scale factor for investment aggressiveness
-                investment_scale_pot = min(total_portfolio_value_potential[dim]*investment_scale / total_proposed_investments[dim], 1.0)
-                investment_scale_cap = min(uninvested_capacity[dim]/(total_proposed_investments[dim]*investment_scale_pot), 1.0)
+                investment_scale_pot = min(total_portfolio_value_potential.get(dim, 0.0)*investment_scale / total_proposed_investments[dim], 1.0) if total_proposed_investments[dim] > 0 else 1.0
+                investment_scale_cap = min(uninvested_capacity.get(dim, 0.0)/(total_proposed_investments[dim]*investment_scale_pot), 1.0) if total_proposed_investments[dim]*investment_scale_pot > 0 else 1.0
                 final_investment_scale = investment_scale_pot * investment_scale_cap
                 
                 # print(f"DEBUG: Scaling for dim {dim}: base_scale={investment_scale}, scale_pot={investment_scale_pot:.4f}, scale_cap={investment_scale_cap:.4f}, final_scale={final_investment_scale:.4f}")
@@ -1021,3 +830,12 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
         return investments_to_propose_cash_value
+
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True):
+        """Parallel batch evaluation wrapper for UserRep."""
+        return super().evaluate_agents_batch(
+            agent_ids=agent_ids,
+            dimensions=dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )

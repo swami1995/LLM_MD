@@ -2,6 +2,7 @@ import random
 import torch
 import re # Added for robust parsing
 import json # Added for robust parsing
+import time
 from typing import List, Dict, Any, Optional, Tuple, Union
 from collections import defaultdict
 import concurrent.futures
@@ -185,85 +186,95 @@ KNOWLEDGE BASE:
         Helper function to generate content using Gemini API.
         Uses chat session API if use_chat_api is True and context is provided.
         """
-        #try:
-        if True:
-            # If we're doing single-turn conversations or no conversation context was provided
-            if conversation_id is None or agent_id is None or history is None or not use_chat_api:
-                # Use the standard generate_content API for one-off queries
-                response = self.genai_client.models.generate_content(
-                    model=self.api_model_name,
-                    config=types.GenerateContentConfig(
-                        # max_output_tokens=500,
-                        temperature=0.7
-                    ),
-                    contents=[prompt_text]
-                )
-            else:
-                # Create a unique key for this agent's conversation
-                session_key = f"agent_{agent_id}_conv_{conversation_id}"
-                
-                # If this is a new conversation, create a new chat session
-                if session_key not in self.chat_sessions:
-                    system_prompt = self.get_agent_prompt(agent_id)
-                    
-                    # Get knowledge base from conversation if available
-                    knowledge_base = ""
-                    if conversation_id in self.conversation_knowledge_bases and agent_id in self.conversation_knowledge_bases[conversation_id]:
-                        knowledge_base = self.conversation_knowledge_bases[conversation_id][agent_id]
-                    
-                    # Append static knowledge base if available
-                    if self.static_knowledge_base:
-                        static_kb_text = "\n".join([f"Q: {q}\nA: {a}" for q, a in self.static_knowledge_base.items()])
-                        knowledge_base += f"\n\nAdditional Information:\n{static_kb_text}"
-                    
-                    # Create the full system prompt
-                    full_system_prompt = f"{system_prompt}\n\nKNOWLEDGE BASE:\n{knowledge_base}\n\nHowever, given your profile characteristics, you may need to adapt whether you actually know all of the information or not. Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know. Abide by the communication style and primary goals specified in your profile."
-                    
-                    # print(f"Agent System Prompt (AID : {agent_id}) : ", full_system_prompt)
-                    
-                    # Create a new chat session with the system prompt
-                    chat = self.genai_client.chats.create(
+        retries = 10
+        for i in range(retries):
+            try:
+                # If we're doing single-turn conversations or no conversation context was provided
+                if conversation_id is None or agent_id is None or history is None or not use_chat_api:
+                    # Use the standard generate_content API for one-off queries
+                    response = self.genai_client.models.generate_content(
                         model=self.api_model_name,
                         config=types.GenerateContentConfig(
-                            system_instruction=full_system_prompt),
+                            # max_output_tokens=500,
+                            temperature=0.7
+                        ),
+                        contents=[prompt_text]
                     )
-                    self.chat_sessions[session_key] = chat
+                else:
+                    # Create a unique key for this agent's conversation
+                    session_key = f"agent_{agent_id}_conv_{conversation_id}"
                     
-                    # Send the first user message (current query)
-                    chat_response = chat.send_message(f"""Customer Service Agent (you): 
+                    # If this is a new conversation, create a new chat session
+                    if session_key not in self.chat_sessions:
+                        system_prompt = self.get_agent_prompt(agent_id)
+                        
+                        # Get knowledge base from conversation if available
+                        knowledge_base = ""
+                        if conversation_id in self.conversation_knowledge_bases and agent_id in self.conversation_knowledge_bases[conversation_id]:
+                            knowledge_base = self.conversation_knowledge_bases[conversation_id][agent_id]
+                        
+                        # Append static knowledge base if available
+                        if self.static_knowledge_base:
+                            static_kb_text = "\n".join([f"Q: {q}\nA: {a}" for q, a in self.static_knowledge_base.items()])
+                            knowledge_base += f"\n\nAdditional Information:\n{static_kb_text}"
+                        
+                        # Create the full system prompt
+                        full_system_prompt = f"{system_prompt}\n\nKNOWLEDGE BASE:\n{knowledge_base}\n\nHowever, given your profile characteristics, you may need to adapt whether you actually know all of the information or not. Answer questions based on your profile characteristics and your best estimate of what a customer support agent with those profile characteristics would actually know. Abide by the communication style and primary goals specified in your profile."
+                        
+                        # print(f"Agent System Prompt (AID : {agent_id}) : ", full_system_prompt)
+                        
+                        # Create a new chat session with the system prompt
+                        chat = self.genai_client.chats.create(
+                            model=self.api_model_name,
+                            config=types.GenerateContentConfig(
+                                system_instruction=full_system_prompt),
+                        )
+                        self.chat_sessions[session_key] = chat
+                        
+                        # Send the first user message (current query)
+                        chat_response = chat.send_message(f"""Customer Service Agent (you): 
 Hi, how can I help you today?
-                                                      
+                                                        
 Customer: 
 {prompt_text}
 
 Customer Support Agent (you): 
 """)
-                else:
-                    # Use existing chat session
-                    chat = self.chat_sessions[session_key]
-                    
-                    # Send the next message in the conversation
-                    chat_response = chat.send_message(f"""Customer: 
+                    else:
+                        # Use existing chat session
+                        chat = self.chat_sessions[session_key]
+                        
+                        # Send the next message in the conversation
+                        chat_response = chat.send_message(f"""Customer: 
 {prompt_text}
 
 Customer Support Agent (you):
 """)
+                    
+                    # Get the response text
+                    response = chat_response
                 
-                # Get the response text
-                response = chat_response
-            
-            # Check for successful completion
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
-                error_message = f"Gemini API blocked the prompt: {response.prompt_feedback.block_reason}"
+                # Check for successful completion
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
+                    error_message = f"Gemini API blocked the prompt: {response.prompt_feedback.block_reason}"
+                    print(error_message)
+                    return error_message
+
+                return response.text if hasattr(response, 'text') and response.text else "Error: Gemini API returned empty response."
+
+            except genai.errors.ServerError as e:
+                if i < retries - 1:
+                    print(f"Gemini API ServerError in _generate_gemini_content: {e}. Retrying ({i+1}/{retries})...")
+                    time.sleep(2 ** i) # Exponential backoff
+                else:
+                    error_message = f"Gemini API ServerError after {retries} retries: {e}"
+                    print(error_message)
+                    return f"[ERROR: {error_message}]"
+            except Exception as e:
+                error_message = f"Gemini API error in _generate_gemini_content: {e}"
                 print(error_message)
-                return error_message
-
-            return response.text if hasattr(response, 'text') and response.text else "Error: Gemini API returned empty response."
-
-        # except Exception as e:
-        #     error_message = f"Gemini API error: {e}"
-        #     print(error_message)
-        #     return error_message
+                return f"[ERROR: {error_message}]"
+        return "[ERROR: All retries failed for Gemini API call in _generate_gemini_content]"
 
 
     def _generate_llama_response_batch(self, prompts: List[str]) -> List[str]:
@@ -613,105 +624,114 @@ IMPORTANT INSTRUCTIONS:
         Helper function to generate user queries using Gemini API.
         Uses chat session API if use_chat_api is True and context is provided.
         """
-        # try:
-        if True:
-            # If we're doing single-turn conversations or no conversation context was provided
-            if conversation_id is None or user_id is None or history is None or not use_chat_api:
-                # Use the standard generate_content API for one-off queries
-                response = self.genai_client.models.generate_content(
-                    model=self.api_model_name,
-                    config=types.GenerateContentConfig(
-                        # max_output_tokens=500,
-                        temperature=0.7
-                    ),
-                    contents=[prompt_text]
-                )
-            else:
-                # Create a unique key for this user's conversation
-                session_key = f"user_{user_id}_conv_{conversation_id}"
-                
-                # If this is a new conversation, create a new chat session
-                # Add agent_id to session_key to avoid conflicts
-                # reset history in between each conversation, restore independence of entities. 
-                # print(f"User {user_id} conversation id: ", conversation_id)
-                if session_key not in self.chat_sessions:
-                    system_prompt = self.get_user_prompt(user_id, conversation_id)
-                    
-                    # Get knowledge base from conversation if available
-                    knowledge_base = ""
-                    if conversation_id in self.conversation_knowledge_bases and user_id in self.conversation_knowledge_bases[conversation_id]:
-                        knowledge_base = "Here is a summary of your existing knowledge and context as a customer:\n"
-                        knowledge_base += self.conversation_knowledge_bases[conversation_id][user_id]
-                    
-                    # Append static knowledge base if available
-                    if self.static_knowledge_base:
-                        static_kb_text = "\n".join([f"Q: {q}\nA: {a}" for q, a in self.static_knowledge_base.items()])
-                        knowledge_base += f"\n\nAdditional Information:\n{static_kb_text}"
-                    
-                    # Create the full system prompt
-                    full_system_prompt = f"{system_prompt}\n\n{knowledge_base}\n\nNow, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue."
-
-                    # print(f"User System Prompt (UID : {user_id}) : ", full_system_prompt)
-                                                                                                                                                                                                                                                                                                                                                                                                                          
-                    # Create a new chat session with the system prompt
-                    chat = self.genai_client.chats.create(
+        retries = 10
+        for i in range(retries):
+            try:
+                # If we're doing single-turn conversations or no conversation context was provided
+                if conversation_id is None or user_id is None or history is None or not use_chat_api:
+                    # Use the standard generate_content API for one-off queries
+                    response = self.genai_client.models.generate_content(
                         model=self.api_model_name,
                         config=types.GenerateContentConfig(
-                            system_instruction=full_system_prompt),
+                            # max_output_tokens=500,
+                            temperature=0.7
+                        ),
+                        contents=[prompt_text]
                     )
-                    self.chat_sessions[session_key] = chat
-                    
-                    # For the initial message, we need to provide context about the agent's greeting
-                    # Format all previous messages in the conversation history
-                    history_formatted = []
-                    for turn in history:
-                        if 'agent' in turn and turn['agent']:
-                            history_formatted.append(f"Customer Service Agent: {turn['agent']}")
-                        if 'user' in turn and turn['user']:
-                            history_formatted.append(f"Customer (you): {turn['user']}")
-                    
-                    # Initial agent greeting or latest agent message
-                    agent_message = "Hi, how can I help you today?" if not history or not history[-1].get('agent') else history[-1].get('agent', '')
-                    
-                    # Send the first request
-                    chat_response = chat.send_message(f"""Customer Service Agent: 
-{agent_message}
-
-Customer (you):
-""")
                 else:
-                    # Use existing chat session
-                    chat = self.chat_sessions[session_key]
+                    # Create a unique key for this user's conversation
+                    session_key = f"user_{user_id}_conv_{conversation_id}"
                     
-                    # Get the most recent agent message
-                    try:
-                        agent_message = history[-1].get('agent', 'What else can I help you with?')
-                    except:
-                        ipdb.set_trace()
-                    
-                    # Send the agent's message to get the user's response
-                    chat_response = chat.send_message(f"""Customer Service Agent: 
+                    # If this is a new conversation, create a new chat session
+                    # Add agent_id to session_key to avoid conflicts
+                    # reset history in between each conversation, restore independence of entities. 
+                    # print(f"User {user_id} conversation id: ", conversation_id)
+                    if session_key not in self.chat_sessions:
+                        system_prompt = self.get_user_prompt(user_id, conversation_id)
+                        
+                        # Get knowledge base from conversation if available
+                        knowledge_base = ""
+                        if conversation_id in self.conversation_knowledge_bases and user_id in self.conversation_knowledge_bases[conversation_id]:
+                            knowledge_base = "Here is a summary of your existing knowledge and context as a customer:\n"
+                            knowledge_base += self.conversation_knowledge_bases[conversation_id][user_id]
+                        
+                        # Append static knowledge base if available
+                        if self.static_knowledge_base:
+                            static_kb_text = "\n".join([f"Q: {q}\nA: {a}" for q, a in self.static_knowledge_base.items()])
+                            knowledge_base += f"\n\nAdditional Information:\n{static_kb_text}"
+                        
+                        # Create the full system prompt
+                        full_system_prompt = f"{system_prompt}\n\n{knowledge_base}\n\nNow, based on this profile and information provided above, you have to engage in a conversation with the customer support agent to resolve your issue."
+
+                        # print(f"User System Prompt (UID : {user_id}) : ", full_system_prompt)
+                                                                                                                                                                                                                                                                                                                                                                                                                            
+                        # Create a new chat session with the system prompt
+                        chat = self.genai_client.chats.create(
+                            model=self.api_model_name,
+                            config=types.GenerateContentConfig(
+                                system_instruction=full_system_prompt),
+                        )
+                        self.chat_sessions[session_key] = chat
+                        
+                        # For the initial message, we need to provide context about the agent's greeting
+                        # Format all previous messages in the conversation history
+                        history_formatted = []
+                        for turn in history:
+                            if 'agent' in turn and turn['agent']:
+                                history_formatted.append(f"Customer Service Agent: {turn['agent']}")
+                            if 'user' in turn and turn['user']:
+                                history_formatted.append(f"Customer (you): {turn['user']}")
+                        
+                        # Initial agent greeting or latest agent message
+                        agent_message = "Hi, how can I help you today?" if not history or not history[-1].get('agent') else history[-1].get('agent', '')
+                        
+                        # Send the first request
+                        chat_response = chat.send_message(f"""Customer Service Agent: 
 {agent_message}
 
 Customer (you):
 """)
+                    else:
+                        # Use existing chat session
+                        chat = self.chat_sessions[session_key]
+                        
+                        # Get the most recent agent message
+                        agent_message = 'What else can I help you with?'
+                        if history:
+                            agent_message = history[-1].get('agent', 'What else can I help you with?')
+                        
+                        # Send the agent's message to get the user's response
+                        chat_response = chat.send_message(f"""Customer Service Agent: 
+{agent_message}
+
+Customer (you):
+""")
+                    
+                    # Get the response text
+                    response = chat_response
                 
-                # Get the response text
-                response = chat_response
-            
-            # Check for successful completion
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
-                error_message = f"Gemini API blocked the prompt: {response.prompt_feedback.block_reason}"
+                # Check for successful completion
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
+                    error_message = f"Gemini API blocked the prompt: {response.prompt_feedback.block_reason}"
+                    print(error_message)
+                    return error_message
+
+                return response.text if hasattr(response, 'text') and response.text else "Error: Gemini API returned empty response."
+
+            except genai.errors.ServerError as e:
+                if i < retries - 1:
+                    print(f"Gemini API ServerError in _generate_gemini_query: {e}. Retrying ({i+1}/{retries})...")
+                    time.sleep(2 ** i) # Exponential backoff
+                else:
+                    error_message = f"Gemini API ServerError after {retries} retries: {e}"
+                    print(error_message)
+                    return f"[ERROR: {error_message}]"
+            except Exception as e:
+                error_message = f"Gemini API error in _generate_gemini_query: {e}"
                 print(error_message)
-                return error_message
+                return f"[ERROR: {error_message}]"
+        return "[ERROR: All retries failed for Gemini API call in _generate_gemini_query]"
 
-            return response.text if hasattr(response, 'text') and response.text else "Error: Gemini API returned empty response."
-
-        # except Exception as e:
-        #     error_message = f"Gemini API error: {e}"
-        #     print(error_message)
-        #     ipdb.set_trace()
-        #     return error_message
 
     def _generate_llama_query_batch(self, prompts: List[str]) -> List[str]:
         """Helper function to generate queries in batch using local Llama model."""
@@ -1178,15 +1198,31 @@ Do NOT include explanations or any other text.
 
         responses = [""] * len(prompts)
         def call_gemini(index, prompt):
-            response = self.genai_client.models.generate_content(
-                model=self.api_model_name,
-                config=types.GenerateContentConfig(
-                    # max_output_tokens=500,
-                    temperature=0.7
-                ),
-                contents=[prompt]
-            )
-            return response.text if hasattr(response, 'text') else "Error: Gemini API returned empty response."
+            retries = 10
+            for i in range(retries):
+                try:
+                    response = self.genai_client.models.generate_content(
+                        model=self.api_model_name,
+                        config=types.GenerateContentConfig(
+                            # max_output_tokens=500,
+                            temperature=0.7
+                        ),
+                        contents=[prompt]
+                    )
+                    return response.text if hasattr(response, 'text') else "Error: Gemini API returned empty response."
+                except genai.errors.ServerError as e:
+                    if i < retries - 1:
+                        print(f"Gemini API ServerError in call_gemini (rating): {e}. Retrying ({i+1}/{retries})...")
+                        time.sleep(2 ** i)
+                    else:
+                        error_message = f"Gemini API ServerError after {retries} retries: {e}"
+                        print(error_message)
+                        return f"[ERROR: {error_message}]"
+                except Exception as e:
+                    error_message = f"Gemini API error in call_gemini (rating): {e}"
+                    print(error_message)
+                    return f"[ERROR: {error_message}]"
+            return "[ERROR: All retries failed for Gemini API call in call_gemini]"
 
         if parallel_api_calls:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor:

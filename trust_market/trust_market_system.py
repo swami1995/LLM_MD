@@ -108,12 +108,19 @@ class TrustMarketSystem:
             # Default initial influence based on source type (example)
             if source.source_type == 'regulator':
                 influence_value = 10000.0
+                initial_influence = {dim: influence_value for dim in source.expertise_dimensions}
             elif source.source_type == 'auditor':
-                influence_value = 60.0
+                influence_value_shared = 60.0
+                influence_value_full = 100.0
+                user_rep_expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment", "Transparency"]
+                initial_influence = {dim: influence_value_shared for dim in source.expertise_dimensions if dim in user_rep_expertise_dimensions}
+                initial_influence.update({dim: influence_value_full for dim in source.expertise_dimensions if dim not in user_rep_expertise_dimensions})
+            elif source.source_type == 'user_representative':
+                influence_value = 40.0
+                initial_influence = {dim: influence_value for dim in source.expertise_dimensions}
             else:
                 influence_value = 40.0
-            initial_influence = {dim: influence_value for dim in source.expertise_dimensions}
-
+            
         self.trust_market.add_information_source(
             source.source_id, source.source_type, initial_influence, is_primary or is_primary_type
         )

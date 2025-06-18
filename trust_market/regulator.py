@@ -7,6 +7,7 @@ from collections import defaultdict
 from trust_market.info_sources import InformationSource
 from typing import Dict, List, Tuple, Set, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from google import genai
 from google.genai import types
 from trust_market.auditor import BatchEvaluator
@@ -43,14 +44,7 @@ class Regulator(InformationSource):
 
         # Track agent profiles received
         self.agent_profiles = {}
-
-        # Caches for different evaluation types
-        self.profile_evaluation_cache = {}
-        self.conversation_audit_cache = {}
-        self.comparison_evaluation_cache = {}
-        self.hybrid_evaluation_cache = {} # Cache for combined results
-
-        self.last_evaluation_round = -1 # Track last evaluated round
+        self.verbose = verbose
 
         # Configuration for hybrid approach and investment
         # These could be loaded from an external config file
@@ -87,15 +81,6 @@ class Regulator(InformationSource):
             'max_realloc_per_dim': 100,
             'regulator_influence_ratio': 0.5, # Added for the new decide_investments method
         }
-        self.compared_pairs = set() # Track compared pairs within a round
-        self.derived_agent_scores = {} # Store scores derived from comparisons
-
-        # --- NEW: mirror user_rep tracking for confidences & cache ---
-        self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
-        self.comparison_results_cache = {}       # {(aid1,aid2,round): (derived_scores_dict, comparison_confidences_dict)}
-        self.agent_comparison_counts = defaultdict(int)
-
-        self.verbose = verbose
 
     def add_agent_profile(self, agent_id: int, profile: Dict):
         """Stores agent profile data."""
@@ -106,21 +91,7 @@ class Regulator(InformationSource):
 
     def _invalidate_cache(self, agent_id=None):
         """Invalidates cached evaluations."""
-        if agent_id:
-            self.profile_evaluation_cache.pop(agent_id, None)
-            self.conversation_audit_cache.pop(agent_id, None)
-            self.hybrid_evaluation_cache.pop(agent_id, None)
-            # Specific agent's derived scores might be affected, but full clear happens on round change.
-        else: # Invalidate all
-            self.profile_evaluation_cache.clear()
-            self.conversation_audit_cache.clear()
-            self.comparison_evaluation_cache.clear()
-            self.hybrid_evaluation_cache.clear()
-            self.derived_agent_scores.clear() 
-            self.derived_agent_confidences.clear()
-            self.compared_pairs.clear()
-            self.comparison_results_cache.clear()
-            self.agent_comparison_counts.clear()
+        super()._invalidate_cache(agent_id)
 
     def add_conversation(self, conversation_history: List[Dict], user_id: Any, agent_id: int):
         """Stores conversation history if the user is represented."""
@@ -572,7 +543,10 @@ class Regulator(InformationSource):
             # Estimate T at steady state (some shares bought from treasury)
             # treasury_depletion_rate = self.config.get('treasury_depletion_rate', 0.3)
             # projected_T = current_T * (1 - treasury_depletion_rate)                             # TODO : Need a more sophisticated mechanism to compute projected_T and corresponding projected prices.
-            projected_T = current_T * current_R / projected_capital_shares[agent_id]
+            if projected_capital_shares[agent_id] == 0:
+                projected_T = current_T
+            else:
+                projected_T = current_T * current_R / projected_capital_shares[agent_id]
             
             # Projected price = R_ss / T_ss
             projected_price = projected_capital_shares[agent_id] / projected_T if projected_T > 0 else 0
@@ -601,38 +575,7 @@ class Regulator(InformationSource):
         Extract confidence information from comparison results.
         Maps the comparison confidence (LLM 0-5) to derived pseudo-score confidence (0-1).
         """
-        agent_confidences = {
-            agent_a_id: {},
-            agent_b_id: {}
-        }
-        
-        for dimension, result in comparison_results.items():
-            # Assuming result["confidence"] is the LLM's confidence (e.g., 0-5 magnitude)
-            raw_confidence_metric = result.get("confidence", 2.5) # Default to mid-range if missing
-            winner = result.get("winner", "tie")
-            
-            # Normalize LLM confidence (0-5) to a 0-1 scale
-            normalized_llm_confidence = min(1.0, raw_confidence_metric / 5.0)
-            
-            # Confidence in the derived score for each agent from this single comparison
-            # This confidence reflects how much this one comparison tells us about an agent's score.
-            derived_score_confidence = 0.0
-            if winner == "tie":
-                # If it's a tie, we are somewhat confident they are similar.
-                # The LLM's confidence in the "tie" itself (if available) or a general factor.
-                # For simplicity, let's use normalized_llm_confidence, but capped lower for ties.
-                derived_score_confidence = normalized_llm_confidence * 0.6 
-            else:
-                # If there's a winner, our confidence in the derived scores is proportional
-                # to how strong the win was (raw_confidence_metric) and LLM's certainty.
-                derived_score_confidence = normalized_llm_confidence * 0.9
-            
-            # Both agents involved in the comparison get this confidence value for this dimension
-            # from this specific comparison event.
-            agent_confidences[agent_a_id][dimension] = derived_score_confidence
-            agent_confidences[agent_b_id][dimension] = derived_score_confidence
-        
-        return agent_confidences
+        return super()._extract_comparison_confidences(comparison_results, agent_a_id, agent_b_id)
 
     def _update_agent_derived_scores(self, agent_id, new_scores_for_agent, dimensions_to_evaluate, new_confidences_for_agent):
         """
@@ -641,85 +584,21 @@ class Regulator(InformationSource):
         `new_scores_for_agent`: {dim: score} from the current comparison for this agent.
         `new_confidences_for_agent`: {dim: conf} from the current comparison for this agent.
         """
-        if agent_id not in self.derived_agent_scores:
-            self.derived_agent_scores[agent_id] = {}
-        
-        # Get current aggregated confidences for existing derived scores
-        # This uses _calculate_derived_confidence which looks at self.derived_agent_confidences list
-        existing_aggregated_confidences = self._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
-
-        for dim in dimensions_to_evaluate:
-            if dim in new_scores_for_agent:
-                existing_score = self.derived_agent_scores[agent_id].get(dim, 0.5)
-                new_score_from_comparison = new_scores_for_agent[dim]
-                
-                # Confidence for the new_score from this single comparison
-                conf_of_new_score_from_comparison = new_confidences_for_agent.get(dim, 0.3)
-                # Aggregated confidence for the existing_score
-                conf_of_existing_score_aggregated = existing_aggregated_confidences.get(dim, 0.3)
-                
-                # Inverse variance weighting principle (confidence as proxy for precision)
-                # Weight for new score = new_conf / (existing_conf + new_conf)
-                total_conf_metric = conf_of_existing_score_aggregated + conf_of_new_score_from_comparison
-                if total_conf_metric > 1e-6:
-                    weight_for_new_score = conf_of_new_score_from_comparison / total_conf_metric
-                else: # Fallback if both confidences are zero
-                    weight_for_new_score = 0.5 
-                
-                # Apply a general update weight to dampen rapid changes from single comparisons
-                # This is different from the 'new_evaluation_weight' used in final aggregation.
-                # This is about how much one comparison shifts the running derived score.
-                single_comparison_update_weight = self.config.get('derived_score_update_weight', 0.3)
-                effective_weight_for_new_score = weight_for_new_score * single_comparison_update_weight
-
-                updated_score = (1 - effective_weight_for_new_score) * existing_score + effective_weight_for_new_score * new_score_from_comparison
-                self.derived_agent_scores[agent_id][dim] = updated_score
+        super()._update_agent_derived_scores(agent_id, new_scores_for_agent, dimensions_to_evaluate, new_confidences_for_agent)
 
     def _update_agent_confidences(self, agent_id, new_confidences_for_agent, dimensions_to_evaluate):
         """
         Appends new confidence scores from a comparison to the agent's list of confidences for each dimension.
         `new_confidences_for_agent`: {dim: conf} from the current comparison for this agent.
         """
-        for dim in dimensions_to_evaluate:
-            if dim in new_confidences_for_agent:
-                self.derived_agent_confidences[agent_id][dim].append(new_confidences_for_agent[dim])
-
-                max_len = self.config.get('max_confidence_history', 10) # Default to 10 if not in config
-                conf_list = self.derived_agent_confidences[agent_id][dim]
-                if len(conf_list) > max_len:
-                    self.derived_agent_confidences[agent_id][dim] = conf_list[-max_len:]
+        super()._update_agent_confidences(agent_id, new_confidences_for_agent, dimensions_to_evaluate)
 
     def _calculate_derived_confidence(self, agent_id, dimensions_to_evaluate):
         """
         Calculate aggregated confidence in derived scores for an agent.
         Uses the list of confidences stored in `self.derived_agent_confidences`.
         """
-        aggregated_confidences = {}
-        for dim in dimensions_to_evaluate:
-            conf_list_for_dim = self.derived_agent_confidences.get(agent_id, {}).get(dim, [])
-            
-            if not conf_list_for_dim:
-                aggregated_confidences[dim] = 0.3  # Default low confidence if no data
-            else:
-                # Convert confidences to precisions (confidence / (1 - confidence))
-                # Add a small epsilon to prevent division by zero if confidence is 1.0 or 0.0
-                precisions = [c / (1 - c + 1e-6) for c in conf_list_for_dim if 0 <= c < 1]
-                if not precisions: # if all confidences were 1.0 or invalid
-                    precisions = [100.0] * len([c for c in conf_list_for_dim if c >=1.0]) # treat conf 1.0 as high precision
-                    if not precisions: precisions = [0.3 / (1-0.3+1e-6)]
-
-                # Sum of precisions
-                total_precision = sum(precisions)
-                
-                # Convert back to aggregated confidence (total_precision / (total_precision + 1))
-                if total_precision > 1e-6:
-                    combined_confidence = total_precision / (total_precision + 1)
-                else:
-                    combined_confidence = 0.3 # Fallback
-                
-                # Cap confidence
-                aggregated_confidences[dim] = min(0.95, combined_confidence)
-        return aggregated_confidences
+        return super()._calculate_derived_confidence(agent_id, dimensions_to_evaluate)
 
     def _aggregate_confidences(self, new_confidences_list, base_aggregated_confidence, weight_for_new_info_block):
         """
@@ -728,34 +607,7 @@ class Regulator(InformationSource):
         `base_aggregated_confidence`: The existing aggregated confidence in the base score.
         `weight_for_new_info_block`: How much weight to give the block of new information.
         """
-        if not new_confidences_list:
-            return base_aggregated_confidence
-        
-        # First, aggregate the new_confidences_list into a single representative confidence
-        # This is similar to _calculate_derived_confidence but for a list input
-        new_precisions = [c / (1 - c + 1e-6) for c in new_confidences_list if 0 <= c < 1]
-        if not new_precisions: # if all confidences were 1.0 or invalid
-            new_precisions = [100.0] * len([c for c in new_confidences_list if c >=1.0]) 
-            if not new_precisions: new_precisions = [0.3 / (1-0.3+1e-6)] # Default if list was empty or all invalid
-
-        aggregated_new_precision = sum(new_precisions)
-        # If new_confidences_list has multiple items, their aggregation represents the "new block"
-        # If it's just one item, aggregated_new_precision is just its precision.
-
-        # Precision of the base score
-        base_precision = base_aggregated_confidence / (1 - base_aggregated_confidence + 1e-6)
-        
-        # Weighted combination of precisions
-        # The weight_for_new_info_block applies to the entire "new information" block's precision
-        combined_precision = (weight_for_new_info_block * aggregated_new_precision) + \
-                             ((1 - weight_for_new_info_block) * base_precision)
-        
-        if combined_precision > 1e-6:
-            final_aggregated_confidence = combined_precision / (combined_precision + 1)
-        else: # Fallback, e.g. if all inputs are zero confidence
-            final_aggregated_confidence = max(base_aggregated_confidence, np.mean(new_confidences_list) if new_confidences_list else 0.3)
-
-        return min(0.95, final_aggregated_confidence)
+        return super()._aggregate_confidences(new_confidences_list, base_aggregated_confidence, weight_for_new_info_block)
 
     def decide_investments(self, evaluation_round=None, use_comparative=True):
         desirability_method = self.config.get('desirability_method', 'percentage_change')
@@ -998,4 +850,66 @@ class Regulator(InformationSource):
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
         return investments_to_propose_cash_value
+
+    def _perform_base_evaluation(self, agent_id, dimensions, evaluation_round):
+        """Regulator's implementation of a non-comparative evaluation is not standard."""
+        # The regulator's main evaluation is comparative. A non-comparative score
+        # is not its primary function. Returning a neutral score.
+        # A more sophisticated implementation could perhaps run a single-agent evaluation.
+        return {dim: (0.5, 0.3) for dim in dimensions}
+
+    def _compare_pair(self, aid, oid, dimensions):
+        """Regulator's implementation of a pairwise comparison."""
+        agent_profile = self.agent_profiles.get(aid)
+        other_profile = self.agent_profiles.get(oid)
+        agent_convs = self.get_agent_conversations(aid)
+        other_convs = self.get_agent_conversations(oid)
+        min_convs = self.config.get('min_conversations_required', 3)
+
+        can_compare_convs_aid = len(agent_convs) >= min_convs
+        can_compare_convs_oid = len(other_convs) >= min_convs
+
+        comparison_call_results = None
+        # Prefer hybrid comparison if all data is available
+        if agent_profile and other_profile and can_compare_convs_aid and can_compare_convs_oid:
+            comparison_call_results = self.batch_evaluator.compare_agent_profiles_and_convs(
+                agent_profile, agent_convs, aid, other_profile, other_convs, oid, dimensions
+            )
+        # Fallback to profile-only
+        elif agent_profile and other_profile:
+            comparison_call_results = self.batch_evaluator.compare_agent_profiles(
+                agent_profile, aid, other_profile, oid, dimensions
+            )
+        # Fallback to conversation-only
+        elif can_compare_convs_aid and can_compare_convs_oid:
+            comparison_call_results = self.batch_evaluator.compare_agent_batches(
+                agent_convs, aid, other_convs, oid, dimensions
+            )
+        else:
+            return None  # Incomparable
+
+        if not comparison_call_results:
+            return None
+
+        derived_scores = self.batch_evaluator.get_agent_scores(comparison_call_results, aid, oid)
+        confidences = self._extract_comparison_confidences(comparison_call_results, aid, oid)
+        return (aid, oid, derived_scores, confidences)
+
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True):
+        """Regulator's batch evaluation delegates to the InformationSource base class."""
+        return super().evaluate_agents_batch(
+            agent_ids=agent_ids,
+            dimensions=dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )
+
+    # Helper to know if an agent can be compared via profile or convs
+    def _agent_has_comparable_data(self, aid):
+        min_convs = self.config.get('min_conversations_required', 3)
+        prof = self.agent_profiles.get(aid)
+        convs = self.get_agent_conversations(aid)
+        if prof is not None and len(convs) >= min_convs:
+            return True
+        return False
 

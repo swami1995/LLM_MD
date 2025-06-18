@@ -71,62 +71,65 @@ def create_realistic_mock_market(num_rounds=50, num_agents=4):
                 })
 
         # 2. Generate Investments for the round
-        for source_id, source_arch in sources.items():
-            # Decide whether to make an investment this round
-            if random.random() < 0.4: # 40% chance of making a move
-                target_agent = random.choice(list(agents.keys()))
-                target_dim = random.choice(dims)
-                
-                is_correct_move = random.random() < source_arch['accuracy']
-                agent_is_good = agents[target_agent]['trend'] >= 0
+        #   Only allow investments on sparse rounds to avoid over-crowding:
+        #   round 1 and every 5th round thereafter (5, 10, 15, ...)
+        if r == 1 or r % 5 == 0:
+            for source_id, source_arch in sources.items():
+                # Decide how many investments this source will attempt this round (0-3)
+                num_actions = np.random.randint(0, 4)  # 0,1,2,3 investments
+                for _ in range(num_actions):
+                    target_agent = random.choice(list(agents.keys()))
+                    target_dim = random.choice(dims)
 
-                # If correct, invest in good agents, sell bad ones. If incorrect, do the opposite.
-                should_invest = (is_correct_move and agent_is_good) or (not is_correct_move and not agent_is_good)
-                
-                amount = random.uniform(20, 100)
-                if not should_invest:
-                    amount *= -1 # Make it a divestment
+                    is_correct_move = random.random() < source_arch['accuracy']
+                    agent_is_good = agents[target_agent]['trend'] >= 0
 
-                investments_data.append({
-                    'evaluation_round': r, 'timestamp': time.time(),
-                    'source_id': source_id, 'agent_id': target_agent, 'dimension': target_dim,
-                    'amount': amount, 'confidence': random.uniform(0.6, 0.95),
-                    'type': 'investment' if amount > 0 else 'divestment'
-                })
+                    # If correct, invest in good agents, sell bad ones. If incorrect, do the opposite.
+                    should_invest = (is_correct_move and agent_is_good) or (not is_correct_move and not agent_is_good)
 
-                # --- Simulate the portfolio change and log the new state ---
-                portfolio = source_portfolios[source_id]
-                current_price = agent_scores[target_agent][target_dim]
-                
-                if amount > 0: # It's a Buy
-                    buy_amount = min(amount, portfolio['available_cash'][target_dim]) # Can't spend more than they have
-                    num_shares = buy_amount / current_price if current_price > 0 else 0
-                    portfolio['available_cash'][target_dim] -= buy_amount
-                    portfolio['shares'][target_agent][target_dim] += num_shares
-                else: # It's a Sell
-                    sell_request_cash = abs(amount)
-                    shares_owned = portfolio['shares'][target_agent][target_dim]
-                    # Can't sell more shares than they own
-                    cash_from_sale = min(sell_request_cash, shares_owned * current_price)
-                    portfolio['available_cash'][target_dim] += cash_from_sale
-                    if current_price > 0:
-                         portfolio['shares'][target_agent][target_dim] -= cash_from_sale / current_price
+                    amount = random.uniform(20, 100)
+                    if not should_invest:
+                        amount *= -1  # Make it a divestment
 
-                # After the transaction, calculate the new total value of the portfolio for this dimension
-                total_invested_value = 0
-                for aid, agent_shares in portfolio['shares'].items():
-                    price = agent_scores[aid][target_dim]
-                    total_invested_value += agent_shares[target_dim] * price
-                
-                available_cash = portfolio['available_cash'][target_dim]
+                    investments_data.append({
+                        'evaluation_round': r, 'timestamp': time.time(),
+                        'source_id': source_id, 'agent_id': target_agent, 'dimension': target_dim,
+                        'amount': amount, 'confidence': random.uniform(0.6, 0.95),
+                        'type': 'investment' if amount > 0 else 'divestment'
+                    })
 
-                source_states_data.append({
-                    'evaluation_round': r, 'timestamp': time.time(),
-                    'source_id': source_id, 'dimension': target_dim,
-                    'total_invested_value': total_invested_value,
-                    'available_cash': available_cash,
-                    'total_value': total_invested_value + available_cash
-                })
+                    # --- Simulate the portfolio change and log the new state ---
+                    portfolio = source_portfolios[source_id]
+                    current_price = agent_scores[target_agent][target_dim]
+
+                    if amount > 0:  # Buy
+                        buy_amount = min(amount, portfolio['available_cash'][target_dim])
+                        num_shares = buy_amount / current_price if current_price > 0 else 0
+                        portfolio['available_cash'][target_dim] -= buy_amount
+                        portfolio['shares'][target_agent][target_dim] += num_shares
+                    else:  # Sell
+                        sell_request_cash = abs(amount)
+                        shares_owned = portfolio['shares'][target_agent][target_dim]
+                        cash_from_sale = min(sell_request_cash, shares_owned * current_price)
+                        portfolio['available_cash'][target_dim] += cash_from_sale
+                        if current_price > 0:
+                            portfolio['shares'][target_agent][target_dim] -= cash_from_sale / current_price
+
+                    # After the transaction, recalc total value of this dimension
+                    total_invested_value = 0
+                    for aid, agent_shares in portfolio['shares'].items():
+                        price = agent_scores[aid][target_dim]
+                        total_invested_value += agent_shares[target_dim] * price
+
+                    available_cash = portfolio['available_cash'][target_dim]
+
+                    source_states_data.append({
+                        'evaluation_round': r, 'timestamp': time.time(),
+                        'source_id': source_id, 'dimension': target_dim,
+                        'total_invested_value': total_invested_value,
+                        'available_cash': available_cash,
+                        'total_value': total_invested_value + available_cash
+                    })
 
     market.temporal_db['trust_scores'] = trust_scores_data
     market.temporal_db['investments'] = investments_data
@@ -150,11 +153,11 @@ def main():
     # 2. Visualize the trust scores with investment overlays
     print("\nDisplaying Trust Score Visualization...")
     print("Close the plot window to continue...")
-    # mock_market.visualize_trust_scores(
-    #     show_investments=True,
-    #     save_path='figures',
-    #     experiment_name='mock_archetype_run'
-    # )
+    mock_market.visualize_trust_scores(
+        show_investments=True,
+        save_path='figures',
+        experiment_name='mock_archetype_run'
+    )
     
     print("\nDisplaying Source Value Visualization...")
     print("Close the plot window to finish.")
