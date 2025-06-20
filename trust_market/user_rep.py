@@ -126,12 +126,17 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     User representative that evaluates agents holistically across batches of conversations using LLM.
     """
 
-    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None, api_model_name='gemini-2.0-flash', verbose=False): # Added api_key
+    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None):
         super().__init__(source_id, user_segment, representative_profile, market, verbose=verbose)
 
         # Initialize holistic evaluator (using BatchEvaluator from auditor.py)
         self.api_model_name = api_model_name
-        self.evaluator = BatchEvaluator(api_key=api_key, api_model_name=api_model_name) # Pass API key
+        self.evaluator = BatchEvaluator(
+            api_key=api_key,
+            api_model_name=api_model_name,
+            api_provider=api_provider,
+            openai_api_key=openai_api_key
+        )
         self.batch_evaluator = self.evaluator # For base class compatibility
 
         # Cache for the single-agent evaluation method

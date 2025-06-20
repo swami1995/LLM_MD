@@ -8,14 +8,16 @@ from collections import defaultdict
 import concurrent.futures
 from google import genai
 from google.genai import types
+from openai import OpenAI
 # from transformers import AutoModelForCausalLM, AutoTokenizer
 import ipdb
 
 parallel_api_calls = True
 # --- InfoSeekingAgentSet ---
 class InfoSeekingAgentSet:
-    def __init__(self, agent_profiles, model_path=None, gemini_api_key=None, 
-                 llm_source="api", api_model_name = 'gemini-2.0-flash', static_knowledge_base=None):
+    def __init__(self, agent_profiles, model_path=None,
+                 gemini_api_key=None, openai_api_key=None,
+                 llm_source="api", api_provider="gemini", api_model_name='gemini-2.0-flash', static_knowledge_base=None):
         # Removed alpha, evaluation_method, rating_scale - TrustMarket handles scoring
 
         self.agent_profiles = agent_profiles
@@ -28,8 +30,15 @@ class InfoSeekingAgentSet:
 
         # REMOVED: self.trust_scores dictionary
 
+        # API provider selection
+        self.api_provider = api_provider.lower() if llm_source == "api" else None
+
+        # Keys / clients for providers
         self.gemini_api_key = gemini_api_key
-        self.genai_client = None # Initialize later if needed
+        self.openai_api_key = openai_api_key
+
+        self.genai_client = None  # Gemini client
+        self.openai_client = None  # OpenAI client
         self.llm_source = llm_source
         self.api_model_name = api_model_name
 
@@ -40,12 +49,21 @@ class InfoSeekingAgentSet:
         self._initialize_llm(model_path)
 
     def _initialize_llm(self, model_path):
-        """Initialize the LLM based on source type."""
+        """Initialize the LLM based on source type and provider."""
         if self.llm_source == "api":
-            if self.gemini_api_key is None:
-                raise ValueError("Gemini API key must be specified when using Gemini API.")
-            self.genai_client = genai.Client(api_key=self.gemini_api_key)
-            print("Gemini API client initialized for InfoAgent.")
+            if self.api_provider == "gemini":
+                if self.gemini_api_key is None:
+                    raise ValueError("Gemini API key must be specified when using Gemini API.")
+                self.genai_client = genai.Client(api_key=self.gemini_api_key)
+                print("Gemini API client initialized for InfoAgent.")
+
+            elif self.api_provider == "openai":
+                if self.openai_api_key is None:
+                    raise ValueError("OpenAI API key must be specified when using OpenAI API.")
+                self.openai_client = OpenAI(api_key=self.openai_api_key)
+                print("OpenAI client initialized for InfoAgent.")
+            else:
+                raise ValueError(f"Unsupported api_provider: {self.api_provider}. Use 'gemini' or 'openai'.")
         elif self.llm_source == "local":
             if not model_path:
                 raise ValueError("Model path must be specified when using local LLM.")
@@ -160,7 +178,7 @@ KNOWLEDGE BASE:
             prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n" # Llama expects this structure
             return prompt
 
-        elif self.llm_source == "api":
+        elif self.llm_source == "api" and self.api_provider == "gemini":
             # For Gemini API (non-chat): Construct a single prompt string
             conversation_text = ""
             if conversation_history:
@@ -177,9 +195,70 @@ KNOWLEDGE BASE:
 
             current_query_text = f"CURRENT CUSTOMER QUERY:\nCustomer: {query}\n\nCustomer Service Agent (you):"
             return f"{system_prompt}\n\n{conversation_text}{current_query_text}"
-        else:
-            raise ValueError(f"Invalid llm_source: {self.llm_source}.")
 
+        elif self.llm_source == "api" and self.api_provider == "openai":
+            # Construct prompt for OpenAI single-turn call
+            conversation_text = ""
+            if conversation_history:
+                conversation_text = "PREVIOUS CONVERSATION HISTORY:\n"
+                for turn in conversation_history:
+                    user_utterance = turn.get('user', '').strip()
+                    agent_utterance = turn.get('agent', '').strip()
+                    if user_utterance:
+                        conversation_text += f"Customer: {user_utterance}\n"
+                    if agent_utterance:
+                        conversation_text += f"Customer Service Agent (you): {agent_utterance}\n"
+                    conversation_text += "\n"
+
+            current_query_text = f"CURRENT CUSTOMER QUERY:\nCustomer: {query}\n\nCustomer Service Agent (you):"
+
+            # Prepend system prompt marker and delimiter as required
+            openai_prompt = (
+                "System Prompt :\n" + system_prompt +
+                "\n-------------------\n" +
+                conversation_text + current_query_text
+            )
+            return openai_prompt
+        else:
+            raise ValueError(f"Invalid llm_source/provider combination: {self.llm_source}/{self.api_provider}.")
+
+
+    def _generate_api_content(self, prompt_text: str, conversation_id: Optional[Any]=None, agent_id: Optional[int]=None, history: Optional[List[Dict]]=None, use_chat_api: bool = False):
+        """
+        Helper function to generate content using the configured API provider.
+        """
+        if self.api_provider == 'gemini':
+            return self._generate_gemini_content(prompt_text, conversation_id, agent_id, history, use_chat_api)
+        elif self.api_provider == 'openai':
+            return self._generate_openai_content(prompt_text)
+        else:
+            return f"[ERROR: Unsupported API provider '{self.api_provider}']"
+
+    def _generate_openai_content(self, prompt_text: str) -> str:
+        """Helper function to generate content using OpenAI API."""
+        if not self.openai_client:
+            return "[ERROR: OpenAI client not initialized]"
+        retries = 10
+        for i in range(retries):
+            try:
+                response = self.openai_client.chat.completions.create(
+                    model=self.api_model_name,
+                    messages=[{"role": "user", "content": prompt_text}],
+                    temperature=0.7,
+                )
+                if response.choices:
+                    return response.choices[0].message.content.strip()
+                else:
+                    return "[ERROR: OpenAI API returned empty response.]"
+            except Exception as e:
+                if i < retries - 1:
+                    print(f"OpenAI API error in _generate_openai_content: {e}. Retrying ({i+1}/{retries})...")
+                    time.sleep(2 ** i) # Exponential backoff
+                else:
+                    error_message = f"OpenAI API error after {retries} retries: {e}"
+                    print(error_message)
+                    return f"[ERROR: {error_message}]"
+        return "[ERROR: All retries failed for OpenAI API call in _generate_openai_content]"
 
     def _generate_gemini_content(self, prompt_text: str, conversation_id: Optional[Any]=None, agent_id: Optional[int]=None, history: Optional[List[Dict]]=None, use_chat_api: bool = False):
         """
@@ -352,14 +431,13 @@ Customer Support Agent (you):
 
         responses_raw = []
 
-        if self.llm_source == "api":
+        if self.llm_source == "api":# and self.api_provider == "gemini":
             if parallel_api_calls:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(queries)) as executor:
-                    # Map the appropriate arguments based on whether chat API is used
-                    if use_chat_api and conversation_ids is not None and conversation_histories is not None:
-                        # Map arguments for chat API (_generate_gemini_content expects query as first arg)
+                    if self.api_provider == 'gemini' and use_chat_api and conversation_ids is not None and conversation_histories is not None:
+                         # Map arguments for Gemini chat API
                         future_results = executor.map(
-                            self._generate_gemini_content,
+                            self._generate_api_content,
                             prompts_or_queries, # These are just the queries
                             conversation_ids,
                             service_agent_ids,
@@ -367,26 +445,27 @@ Customer Support Agent (you):
                             [use_chat_api] * len(queries) # Pass use_chat_api flag
                         )
                     else:
-                        # Map arguments for non-chat API (_generate_gemini_content expects full prompt)
+                        # Map arguments for non-chat API (Gemini or OpenAI)
                         future_results = executor.map(
-                            self._generate_gemini_content,
+                            self._generate_api_content,
                             prompts_or_queries, # These are the full prompts
-                            [None] * len(queries), # No conv_id needed here
-                            [None] * len(queries), # No agent_id needed here
-                            [None] * len(queries), # No history needed here
-                            [False] * len(queries) # Explicitly False for use_chat_api
+                            [None] * len(queries),
+                            [None] * len(queries),
+                            [None] * len(queries),
+                            [False] * len(queries)
                         )
                     responses_raw = list(future_results)
-            
             else:
-                # serial version with a simple for loop
-                for i, query in enumerate(prompts_or_queries):
-                    conv_id = conversation_ids[i] if conversation_ids else None
-                    history = conversation_histories[i] if conversation_histories else None
-                    response = self._generate_gemini_content(
-                        query,
+                # serial version
+                for i, prompt_or_query in enumerate(prompts_or_queries):
+                    conv_id = conversation_ids[i] if conversation_ids and self.api_provider == 'gemini' and use_chat_api else None
+                    history = conversation_histories[i] if conversation_histories and self.api_provider == 'gemini' and use_chat_api else None
+                    agent_id = service_agent_ids[i] if self.api_provider == 'gemini' and use_chat_api else None
+                    
+                    response = self._generate_api_content(
+                        prompt_or_query,
                         conversation_id=conv_id,
-                        agent_id=service_agent_ids[i],
+                        agent_id=agent_id,
                         history=history,
                         use_chat_api=use_chat_api
                     )
@@ -426,7 +505,8 @@ Customer Support Agent (you):
 # --- UserAgentSet ---
 class UserAgentSet:
     def __init__(self, user_profiles, model_path=None, evaluation_method="specific_ratings",
-                 rating_scale=5, gemini_api_key=None, llm_source="api", api_model_name='gemini-2.0-flash', static_knowledge_base=None):
+                 rating_scale=5, gemini_api_key=None, openai_api_key=None,
+                 llm_source="api", api_provider="gemini", api_model_name='gemini-2.0-flash', static_knowledge_base=None):
 
         self.user_profiles = user_profiles
         self.num_users = len(user_profiles)
@@ -442,8 +522,11 @@ class UserAgentSet:
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
         self.gemini_api_key = gemini_api_key
+        self.openai_api_key = openai_api_key
         self.genai_client = None
+        self.openai_client = None
         self.llm_source = llm_source
+        self.api_provider = api_provider.lower() if llm_source == "api" else None
         self.api_model_name = api_model_name
 
         # Chat sessions for Gemini API (for query generation)
@@ -475,10 +558,19 @@ class UserAgentSet:
         """Initialize the LLM based on source type."""
         # Same logic as InfoSeekingAgentSet._initialize_llm
         if self.llm_source == "api":
-            if self.gemini_api_key is None:
-                raise ValueError("Gemini API key must be specified when using Gemini API.")
-            self.genai_client = genai.Client(api_key=self.gemini_api_key)
-            print("Gemini API client initialized for UserAgentSet.")
+            if self.api_provider == "gemini":
+                if self.gemini_api_key is None:
+                    raise ValueError("Gemini API key must be specified when using Gemini API.")
+                self.genai_client = genai.Client(api_key=self.gemini_api_key)
+                print("Gemini API client initialized for UserAgentSet.")
+
+            elif self.api_provider == "openai":
+                if self.openai_api_key is None:
+                    raise ValueError("OpenAI API key must be specified when using OpenAI API.")
+                self.openai_client = OpenAI(api_key=self.openai_api_key)
+                print("OpenAI client initialized for UserAgentSet.")
+            else:
+                raise ValueError(f"Unsupported api_provider: {self.api_provider}. Use 'gemini' or 'openai'.")
         elif self.llm_source == "local":
             if self.model_path is None:
                 raise ValueError("Model path must be specified when using local LLM.")
@@ -599,7 +691,7 @@ IMPORTANT INSTRUCTIONS:
             conversation_text = ""
             if conversation_history:
                  conversation_text = "PREVIOUS CONVERSATION HISTORY:\n"
-                 conversation_text += "Customer Service Agent : Hi, how can I help you today?\n" # Default greeting
+                 conversation_text += "Customer Service Agent : Hi, how can I help you today?\n"
                  for turn in conversation_history:
                       agent_utterance = turn.get('agent', '').strip()
                       user_utterance = turn.get('user', '').strip()
@@ -608,16 +700,56 @@ IMPORTANT INSTRUCTIONS:
                       if agent_utterance:
                            conversation_text += f"Customer Service Agent: {agent_utterance}\n"
                       conversation_text += "\n"
-                      last_agent_utterance = agent_utterance # Update to the last agent utterance
 
             current_turn_prompt = f"CURRENT TURN:\nCustomer Service Agent: {last_agent_utterance}\n\nCustomer (you):"
-            return f"{system_prompt}\n\n{conversation_text}{current_turn_prompt}"
+            openai_prompt = (
+                "System Prompt :\n" + system_prompt +
+                "\n-------------------\n" + conversation_text + current_turn_prompt
+            )
+            return openai_prompt
         else:
-            raise ValueError(f"Invalid llm_source: {self.llm_source}.")
+            raise ValueError(f"Invalid llm_source/provider combination: {self.llm_source}/{self.api_provider}.")
 
     # --- LLM Generation Methods (_generate_gemini_query, _generate_llama_query_batch) ---
     # These are very similar to the InfoSeekingAgentSet generation methods.
     # Reuse the logic, adjusting roles ('user' vs 'assistant'/'model') and prompts.
+
+    def _generate_api_query(self, prompt_text: str, conversation_id: Optional[Any]=None, user_id: Optional[int]=None, history: Optional[List[Dict]]=None, use_chat_api: bool = False):
+        """
+        Helper function to generate user queries using the configured API provider.
+        """
+        if self.api_provider == 'gemini':
+            return self._generate_gemini_query(prompt_text, conversation_id, user_id, history, use_chat_api)
+        elif self.api_provider == 'openai':
+            return self._generate_openai_query(prompt_text)
+        else:
+            return f"[ERROR: Unsupported API provider '{self.api_provider}']"
+
+    def _generate_openai_query(self, prompt_text: str) -> str:
+        """Helper function to generate user queries using OpenAI API."""
+        if not self.openai_client:
+            return "[ERROR: OpenAI client not initialized]"
+        retries = 10
+        for i in range(retries):
+            try:
+                response = self.openai_client.chat.completions.create(
+                    model=self.api_model_name,
+                    messages=[{"role": "user", "content": prompt_text}],
+                    temperature=0.7,
+                )
+                if response.choices:
+                    return response.choices[0].message.content.strip()
+                else:
+                    return "[ERROR: OpenAI API returned empty response.]"
+            except Exception as e:
+                if i < retries - 1:
+                    print(f"OpenAI API error in _generate_openai_query: {e}. Retrying ({i+1}/{retries})...")
+                    time.sleep(2 ** i) # Exponential backoff
+                else:
+                    error_message = f"OpenAI API error after {retries} retries: {e}"
+                    print(error_message)
+                    return f"[ERROR: {error_message}]"
+        return "[ERROR: All retries failed for OpenAI API call in _generate_openai_query]"
 
     def _generate_gemini_query(self, prompt_text: str, conversation_id: Optional[Any]=None, user_id: Optional[int]=None, history: Optional[List[Dict]]=None, use_chat_api: bool = False):
         """
@@ -800,21 +932,12 @@ Customer (you):
 
         queries_raw = []
 
-        if self.llm_source == "api":
+        if self.llm_source == "api" and self.api_provider == "gemini":
             if parallel_api_calls:
-                current_batch_pairs = []
-                if conversation_ids is not None and conversation_histories is not None: # Ensure lists are valid
-                    current_batch_pairs = [(user_ids[i], conversation_ids[i]) for i in range(len(user_ids))]
-                    from collections import Counter
-                    pair_counts = Counter(current_batch_pairs)
-                    duplicates = {pair: count for pair, count in pair_counts.items() if count > 1}
-                    if duplicates:
-                        print(f"DEBUG: Duplicate (user_id, conversation_id) pairs in current batch: {duplicates}")
-
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor:
-                    if use_chat_api and conversation_ids is not None and conversation_histories is not None:
+                    if self.api_provider == 'gemini' and use_chat_api and conversation_ids is not None and conversation_histories is not None:
                         future_results = executor.map(
-                            self._generate_gemini_query,
+                            self._generate_api_query,
                             prompts_or_triggers, # These are just triggers (" ")
                             conversation_ids,
                             user_ids,
@@ -823,18 +946,20 @@ Customer (you):
                         )
                     else:
                         future_results = executor.map(
-                            self._generate_gemini_query,
+                            self._generate_api_query,
                             prompts_or_triggers, # These are full prompts
-                            [None] * len(user_ids), [None] * len(user_ids), [None] * len(user_ids),
+                            [None] * len(user_ids),
+                            [None] * len(user_ids),
+                            [None] * len(user_ids),
                             [False] * len(user_ids)
                         )
                     queries_raw = list(future_results)
             else:
-                # serial version with a simple for loop
+                # serial version
                 for i, (user_id, trigger) in enumerate(zip(user_ids, prompts_or_triggers)):
-                    conv_id = conversation_ids[i] if conversation_ids else None
-                    history = conversation_histories[i] if conversation_histories else None
-                    queries_raw.append(self._generate_gemini_query(trigger, conv_id, user_id, history, use_chat_api))
+                    conv_id = conversation_ids[i] if conversation_ids and self.api_provider == 'gemini' and use_chat_api else None
+                    history = conversation_histories[i] if conversation_histories and self.api_provider == 'gemini' and use_chat_api else None
+                    queries_raw.append(self._generate_api_query(trigger, conv_id, user_id, history, use_chat_api))
 
         elif self.llm_source == "local":
             queries_raw = self._generate_llama_query_batch(prompts_or_triggers) # Pass full prompts
@@ -1061,11 +1186,11 @@ Do NOT include explanations or any other text.
 
             # Get LLM responses
             if self.llm_source == "api":
-                ratings_responses = self._get_gemini_api_responses(prompts)
+                ratings_responses = self._get_api_responses(prompts)
             elif self.llm_source == "local":
                 ratings_responses = self._generate_llama_rating_batch(prompts)
             else:
-                raise ValueError(f"Invalid llm_source: {self.llm_source}")
+                raise ValueError(f"Invalid llm_source/provider combination: {self.llm_source}/{self.api_provider}")
 
             # Parse responses
             batch_ratings_parsed = []
@@ -1156,11 +1281,11 @@ Do NOT include explanations or any other text.
 
             # Get LLM responses
             if self.llm_source == "api":
-                evaluation_responses = self._get_gemini_api_responses(prompts)
+                evaluation_responses = self._get_api_responses(prompts)
             elif self.llm_source == "local":
                 evaluation_responses = self._generate_llama_rating_batch(prompts, max_tokens=100) # Shorter output needed
             else:
-                raise ValueError(f"Invalid llm_source: {self.llm_source}")
+                raise ValueError(f"Invalid llm_source/provider combination: {self.llm_source}/{self.api_provider}")
 
             # Parse responses and format for TrustMarketSystem
             batch_winners_parsed = []
@@ -1186,6 +1311,17 @@ Do NOT include explanations or any other text.
 
         else:
             raise ValueError(f"Invalid evaluation method: {self.evaluation_method}")
+
+    def _get_api_responses(self, prompts: List[str]) -> List[str]:
+        """
+        Helper function to make batched API calls in parallel for evaluations.
+        """
+        if self.api_provider == 'gemini':
+            return self._get_gemini_api_responses(prompts)
+        elif self.api_provider == 'openai':
+            return self._get_openai_api_responses(prompts)
+        else:
+            return [f"[ERROR: Unsupported API provider '{self.api_provider}']"] * len(prompts)
 
     def _get_gemini_api_responses(self, prompts: List[str]) -> List[str]:
         """
@@ -1239,12 +1375,52 @@ Do NOT include explanations or any other text.
                 responses[i] = call_gemini(i, prompt)
         return responses
 
+    def _get_openai_api_responses(self, prompts: List[str]) -> List[str]:
+        """Helper function for batched OpenAI API calls."""
+        if not self.openai_client:
+            return ["[ERROR: OpenAI client not initialized]"] * len(prompts)
+
+        responses = [""] * len(prompts)
+        def call_openai(index, prompt):
+            retries = 10
+            for i in range(retries):
+                try:
+                    response = self.openai_client.chat.completions.create(
+                        model=self.api_model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.7
+                    )
+                    return response.choices[0].message.content if response.choices else "Error: OpenAI API returned empty response."
+                except Exception as e:
+                    if i < retries - 1:
+                        print(f"OpenAI API error in call_openai (rating): {e}. Retrying ({i+1}/{retries})...")
+                        time.sleep(2 ** i)
+                    else:
+                        error_message = f"OpenAI API error after {retries} retries: {e}"
+                        print(error_message)
+                        return f"[ERROR: {error_message}]"
+            return "[ERROR: All retries failed for OpenAI API call in call_openai]"
+
+        if parallel_api_calls:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(prompts)) as executor:
+                future_to_index = {executor.submit(call_openai, i, prompt): i for i, prompt in enumerate(prompts)}
+                for future in concurrent.futures.as_completed(future_to_index):
+                    index = future_to_index[future]
+                    try:
+                        responses[index] = future.result()
+                    except Exception as e:
+                        responses[index] = f"[ERROR: Thread execution failed - {e}]"
+        else:
+            for i, prompt in enumerate(prompts):
+                responses[i] = call_openai(i, prompt)
+        return responses
+
 # --- CustomerSupportModel ---
 class CustomerSupportModel:
     # Removed alpha from init
     def __init__(self, num_users, num_agents, batch_size=3, model_path=None,
                  evaluation_method="specific_ratings", rating_scale=5, gemini_api_key=None,
-                 llm_source="api", api_model_name='gemini-2.0-flash', agent_profiles=None, user_profiles=None,
+                 openai_api_key=None, llm_source="api", api_provider="gemini", api_model_name='gemini-2.0-flash', agent_profiles=None, user_profiles=None,
                  conversation_prompts=None, static_knowledge_base=None,
                  max_dialog_rounds=1, use_chat_api=False):
 
@@ -1255,7 +1431,9 @@ class CustomerSupportModel:
         self.evaluation_method = evaluation_method
         self.rating_scale = rating_scale
         self.gemini_api_key = gemini_api_key
+        self.openai_api_key = openai_api_key
         self.llm_source = llm_source
+        self.api_provider = api_provider.lower() if llm_source == "api" else None
         self.api_model_name = api_model_name
         self.static_knowledge_base = static_knowledge_base
         self.conversation_id_counter = 0
@@ -1290,7 +1468,9 @@ class CustomerSupportModel:
             evaluation_method=self.evaluation_method,
             rating_scale=self.rating_scale,
             gemini_api_key=self.gemini_api_key,
+            openai_api_key=self.openai_api_key,
             llm_source=self.llm_source,
+            api_provider=self.api_provider,
             api_model_name=self.api_model_name,
             static_knowledge_base=self.static_knowledge_base
         )
@@ -1299,7 +1479,9 @@ class CustomerSupportModel:
             agent_profiles=self.agent_profiles_all,
             model_path=self.model_path,
             gemini_api_key=self.gemini_api_key,
+            openai_api_key=self.openai_api_key,
             llm_source=self.llm_source,
+            api_provider=self.api_provider,
             api_model_name=self.api_model_name,
             static_knowledge_base=self.static_knowledge_base
         )

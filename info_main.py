@@ -48,13 +48,17 @@ if __name__ == "__main__":
     parser.add_argument("--user_rep_frequency", type=int, default=2, help="Frequency (in rounds) for user representative evaluations.")
     parser.add_argument("--regulator_frequency", type=int, default=10, help="Frequency (in rounds) for regulator evaluations.")
     parser.add_argument("--exp_name", type=str, default="test_run", help="Name of the experiment.")
+    parser.add_argument("--api_provider", type=str, choices=["gemini", "openai"], default="gemini", help="API provider to use. Default is 'gemini'.")
+    parser.add_argument("--api_sp", type=str, default="gemini-2.5-flash", help="API model name.")
 
 
     args = parser.parse_args()
 
     # --- API Key Handling ---
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
-    if not gemini_api_key and args.llm_source == "api":
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+
+    if not gemini_api_key and args.api_provider == "gemini":
         # IMPORTANT: Replace with your actual key ONLY for testing. Use environment variables.
         gemini_api_key = "YOUR_GEMINI_API_KEY" # MODIFY THIS IF NEEDED FOR TESTING
         if gemini_api_key == "YOUR_GEMINI_API_KEY":
@@ -66,16 +70,32 @@ if __name__ == "__main__":
         else:
              print("Warning: GEMINI_API_KEY environment variable not set. Using hardcoded key (for testing ONLY).")
 
+    if not openai_api_key and args.api_provider == "openai":
+        # IMPORTANT: Replace with your actual key ONLY for testing. Use environment variables.
+        openai_api_key = "YOUR_OPENAI_API_KEY" # MODIFY THIS IF NEEDED FOR TESTING
+        if openai_api_key == "YOUR_OPENAI_API_KEY":
+            print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print("WARNING: OPENAI_API_KEY not set in environment.")
+            print("Using placeholder. LLM calls will likely fail.")
+            print("Set the OPENAI_API_KEY environment variable.")
+            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
+        else:
+            print("Warning: OPENAI_API_KEY environment variable not set. Using hardcoded key (for testing ONLY).")
+
     if args.llm_source == 'api':
-        args.largest_model = "gemini-2.5-pro"
-        # args.api_model_name = "gemini-2.5-pro"
-        args.api_model_name = "gemini-2.5-flash" 
-        # args.api_model_name = "gemini-2.0-flash-lite"
-        # args.api_model_name = "gemini-2.0-flash"
+        if args.api_provider == 'gemini':
+            args.largest_model = "gemini-2.5-pro"
+            args.api_model_name = "gemini-2.5-flash"
+            # args.api_model_name = "gemini-2.5-pro"
+        elif args.api_provider == 'openai':
+            # Configure OpenAI models here if needed
+            args.largest_model = "o3"
+            # args.api_model_name = "o3"
+            args.api_model_name = "o4-mini"
 
     # Validate chat API usage
-    if args.use_chat_api and args.llm_source != "api":
-        print("Warning: --use_chat_api is only applicable when using Gemini API ('api'). Ignoring.")
+    if args.use_chat_api and args.api_provider != "gemini":
+        print("Warning: --use_chat_api is only applicable when using Gemini API ('gemini'). Ignoring.")
         args.use_chat_api = False
 
     # --- Knowledge Base ---
@@ -197,7 +217,9 @@ if __name__ == "__main__":
         evaluation_method=args.evaluation_method, # Still needed for user feedback type
         rating_scale=args.rating_scale,           # Still needed for user feedback type
         gemini_api_key=gemini_api_key,
+        openai_api_key=openai_api_key,
         llm_source=args.llm_source,
+        api_provider=args.api_provider,
         agent_profiles=agent_profiles, # Pass the selected profiles
         user_profiles=user_profiles,   # Pass the selected profiles
         conversation_prompts=conversation_prompts,
@@ -236,6 +258,8 @@ if __name__ == "__main__":
         market=trust_market_system.trust_market, # Pass the market instance
         api_key=gemini_api_key if args.llm_source == "api" else None,
         api_model_name=args.api_model_name if args.llm_source == "api" else None,
+        api_provider=args.api_provider,
+        openai_api_key=openai_api_key,
         # Pass llm_client if you initialize it separately
     )
     # Provide profiles *after* simulation module registration (which copies profiles to market sys)
@@ -253,6 +277,8 @@ if __name__ == "__main__":
         market=trust_market_system.trust_market,
         api_key=gemini_api_key if args.llm_source == "api" else None,
         api_model_name=args.api_model_name if args.llm_source == "api" else None,
+        api_provider=args.api_provider,
+        openai_api_key=openai_api_key,
         # Pass llm_client if needed
     )
     # Map users in the simulation to this representative
@@ -264,10 +290,12 @@ if __name__ == "__main__":
 
     # Add Regulator
     regulator = Regulator(
-        source_id="regulator_main",
+        source_id="regulator",
         market=trust_market_system.trust_market,
         api_key=gemini_api_key if args.llm_source == "api" else None,
         api_model_name=args.largest_model if args.llm_source == "api" else None,
+        api_provider=args.api_provider,
+        openai_api_key=openai_api_key,
     )
     for agent_id, profile in trust_market_system.agent_profiles.items():
         regulator.add_agent_profile(agent_id, profile)

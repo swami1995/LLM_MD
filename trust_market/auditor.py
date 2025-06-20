@@ -14,12 +14,17 @@ from google.genai import types
 # --- LLM-Powered Analyzer Classes (ProfileAnalyzer, BatchEvaluator) ---
 class ProfileAnalyzer:
     """Analyzes agent profiles using LLM."""
-    def __init__(self, api_key=None, api_model_name='gemini-2.0-flash'):
+    def __init__(self, api_key=None, api_model_name='gemini-2.5-flash', api_provider='gemini', openai_api_key=None):
         self.api_model_name = api_model_name
+        self.api_provider = api_provider
         self.genai_client = None
-        self.api_key = api_key
-        if api_key is not None:
-            self.genai_client = genai.Client(api_key=self.api_key)
+        self.openai_client = None
+
+        if self.api_provider == 'gemini' and api_key:
+            self.genai_client = genai.Client(api_key=api_key)
+        elif self.api_provider == 'openai' and openai_api_key:
+            from openai import OpenAI
+            self.openai_client = OpenAI(api_key=openai_api_key)
         
         # Map of dimension names to descriptions for LLM prompting
         self.dimension_descriptions = {
@@ -36,11 +41,20 @@ class ProfileAnalyzer:
         }
         self.analysis_cache = {}
 
-    def _get_llm_response(self, prompt):
-        """Gets response from LLM or returns mock."""
-        if not self.genai_client:
+    def _get_api_response(self, prompt):
+        """Gets response from the configured API provider."""
+        if self.api_provider == 'gemini':
+            if not self.genai_client: return self._get_mock_response()
+            return self._get_gemini_response(prompt)
+        elif self.api_provider == 'openai':
+            if not self.openai_client: return self._get_mock_response()
+            return self._get_openai_response(prompt)
+        else:
+            print(f"Unsupported API provider in ProfileAnalyzer: {self.api_provider}")
             return self._get_mock_response()
 
+    def _get_gemini_response(self, prompt):
+        """Gets response from Gemini LLM."""
         retries = 10
         for i in range(retries):
             try:
@@ -57,12 +71,39 @@ class ProfileAnalyzer:
                     print(f"Gemini API ServerError in ProfileAnalyzer: {e}. Retrying ({i+1}/{retries})...")
                     time.sleep(2 ** i)
                 else:
-                    print(f"Error getting LLM response in ProfileAnalyzer after {retries} retries: {e}")
+                    print(f"Error getting Gemini response in ProfileAnalyzer after {retries} retries: {e}")
                     return self._get_mock_response() # Fallback to mock after final retry
             except Exception as e:
-                print(f"Error getting LLM response in ProfileAnalyzer: {e}")
+                print(f"Error getting Gemini response in ProfileAnalyzer: {e}")
                 return self._get_mock_response()
         return self._get_mock_response() # Fallback if all retries fail
+
+    def _get_openai_response(self, prompt):
+        """Gets response from OpenAI LLM."""
+        retries = 10
+        for i in range(retries):
+            try:
+                response = self.openai_client.chat.completions.create(
+                    model=self.api_model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.8
+                )
+                if response.choices:
+                    return response.choices[0].message.content
+                else:
+                    return "Error: OpenAI API returned empty response."
+            except Exception as e:
+                if i < retries - 1:
+                    print(f"OpenAI API error in ProfileAnalyzer: {e}. Retrying ({i+1}/{retries})...")
+                    time.sleep(2 ** i)
+                else:
+                    print(f"Error getting OpenAI response in ProfileAnalyzer after {retries} retries: {e}")
+                    return self._get_mock_response()
+        return self._get_mock_response()
+
+    def _get_llm_response(self, prompt):
+        """Gets response from LLM or returns mock."""
+        return self._get_api_response(prompt)
 
     def _get_mock_response(self):
         """Mock JSON response for testing."""
@@ -209,7 +250,7 @@ Format your response as a JSON object with this structure:
 class AuditorWithProfileAnalysis(InformationSource):
     """Enhanced auditor using profile analysis and conversation history."""
 
-    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.0-flash', verbose=False):
+    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None):
         expertise_dimensions = [
             "Factual_Correctness", "Process_Reliability", "Value_Alignment",
             "Communication_Quality", "Problem_Resolution", "Safety_Security",
@@ -232,8 +273,18 @@ class AuditorWithProfileAnalysis(InformationSource):
         self.agent_conversations = defaultdict(list) # Stores {agent_id: [conversation_history, ...]}
 
         # Initialize LLM-based analyzers
-        self.profile_analyzer = ProfileAnalyzer(api_key=api_key, api_model_name=api_model_name)
-        self.batch_evaluator = BatchEvaluator(api_key=api_key, api_model_name=api_model_name)
+        self.profile_analyzer = ProfileAnalyzer(
+            api_key=api_key,
+            api_model_name=api_model_name,
+            api_provider=api_provider,
+            openai_api_key=openai_api_key
+        )
+        self.batch_evaluator = BatchEvaluator(
+            api_key=api_key,
+            api_model_name=api_model_name,
+            api_provider=api_provider,
+            openai_api_key=openai_api_key
+        )
 
         # Track agent profiles received
         self.agent_profiles = {}
@@ -1169,19 +1220,36 @@ class AuditorWithProfileAnalysis(InformationSource):
 
 class BatchEvaluator:
     """Evaluates batches of conversations or compares profiles using LLM."""
-    def __init__(self, api_key=None, api_model_name='gemini-2.0-flash'):
+    def __init__(self, api_key=None, api_model_name='gemini-1.5-flash-latest', api_provider='gemini', openai_api_key=None):
         self.api_key = api_key
         self.api_model_name = api_model_name
+        self.api_provider = api_provider
         self.genai_client = None
-        self.genai_client = genai.Client(api_key=self.api_key)
+        self.openai_client = None
+
+        if self.api_provider == 'gemini' and api_key:
+            self.genai_client = genai.Client(api_key=api_key)
+        elif self.api_provider == 'openai' and openai_api_key:
+            from openai import OpenAI
+            self.openai_client = OpenAI(api_key=openai_api_key)
+
         self.dimension_descriptions = ProfileAnalyzer().dimension_descriptions # Reuse descriptions
         self.evaluation_cache = {}
 
-    def _get_llm_response(self, prompt):
-        """Gets response from LLM or returns mock."""
-        if not self.genai_client:
+    def _get_api_response(self, prompt):
+        """Gets response from the configured API provider."""
+        if self.api_provider == 'gemini':
+            if not self.genai_client: return self._get_mock_response()
+            return self._get_gemini_response(prompt)
+        elif self.api_provider == 'openai':
+            if not self.openai_client: return self._get_mock_response()
+            return self._get_openai_response(prompt)
+        else:
+            print(f"Unsupported API provider in BatchEvaluator: {self.api_provider}")
             return self._get_mock_response()
 
+    def _get_gemini_response(self, prompt):
+        """Gets response from Gemini LLM."""
         retries = 10
         for i in range(retries):
             try:
@@ -1216,13 +1284,40 @@ class BatchEvaluator:
                     print(f"Gemini API ServerError in BatchEvaluator: {e}. Retrying ({i+1}/{retries})...")
                     time.sleep(2 ** i)
                 else:
-                    print(f"Error getting LLM response in BatchEvaluator after {retries} retries: {e}")
+                    print(f"Error getting Gemini response in BatchEvaluator after {retries} retries: {e}")
                     return self._get_mock_response()
             except Exception as e:
-                print(f"Error getting LLM response in BatchEvaluator: {e}")
+                print(f"Error getting Gemini response in BatchEvaluator: {e}")
                 return self._get_mock_response()
         
         return self._get_mock_response()
+
+    def _get_openai_response(self, prompt):
+        """Gets response from OpenAI LLM."""
+        retries = 10
+        for i in range(retries):
+            try:
+                response = self.openai_client.chat.completions.create(
+                    model=self.api_model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.8
+                )
+                if response.choices:
+                    return response.choices[0].message.content
+                else:
+                    return "Error: OpenAI API returned empty response."
+            except Exception as e:
+                if i < retries - 1:
+                    print(f"OpenAI API error in BatchEvaluator: {e}. Retrying ({i+1}/{retries})...")
+                    time.sleep(2 ** i)
+                else:
+                    print(f"Error getting OpenAI response in BatchEvaluator after {retries} retries: {e}")
+                    return self._get_mock_response()
+        return self._get_mock_response()
+
+    def _get_llm_response(self, prompt):
+        """Gets response from LLM or returns mock."""
+        return self._get_api_response(prompt)
 
     def _get_mock_response(self):
         """Mock comparison JSON response."""

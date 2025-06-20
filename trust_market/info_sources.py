@@ -355,32 +355,6 @@ class InformationSource:
 
     def _calculate_derived_confidence(self, agent_id, dimensions_to_evaluate):
         """
-        Calculate aggregated confidence in derived scores for an agent.
-        """
-        aggregated_confidences = {}
-        for dim in dimensions_to_evaluate:
-            conf_list_for_dim = self.derived_agent_confidences.get(agent_id, {}).get(dim, [])
-            
-            if not conf_list_for_dim:
-                aggregated_confidences[dim] = 0.3
-            else:
-                precisions = [c / (1 - c + 1e-6) for c in conf_list_for_dim if 0 <= c < 1]
-                if not precisions:
-                    precisions = [100.0] * len([c for c in conf_list_for_dim if c >=1.0])
-                    if not precisions: precisions = [0.3 / (1-0.3+1e-6)]
-
-                total_precision = sum(precisions)
-                
-                if total_precision > 1e-6:
-                    combined_confidence = total_precision / (total_precision + 1)
-                else:
-                    combined_confidence = 0.3
-                
-                aggregated_confidences[dim] = min(0.95, combined_confidence)
-        return aggregated_confidences
-
-    def _calculate_derived_confidence(self, agent_id, dimensions_to_evaluate):
-        """
         Calculate confidence in derived scores using proper statistical aggregation.
         Treats each comparison as providing a noisy estimate of the true score.
         """

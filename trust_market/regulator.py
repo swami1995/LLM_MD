@@ -16,7 +16,7 @@ from trust_market.auditor import BatchEvaluator
 class Regulator(InformationSource):
     """Regulator evaluates using profile analysis and conversation history."""
 
-    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.0-flash', verbose=True):
+    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=True, api_provider='gemini', openai_api_key=None):
         expertise_dimensions = [
             "Factual_Correctness", "Process_Reliability", "Value_Alignment",
             "Communication_Quality", "Problem_Resolution", "Safety_Security",
@@ -40,7 +40,12 @@ class Regulator(InformationSource):
         self.direct_feedback = defaultdict(lambda: defaultdict(list)) # Stores {user_id: {agent_id: {dimension: rating}}}
 
         # Initialize LLM-based analyzers
-        self.batch_evaluator = BatchEvaluator(api_key=api_key, api_model_name=api_model_name)
+        self.batch_evaluator = BatchEvaluator(
+            api_key=api_key,
+            api_model_name=api_model_name,
+            api_provider=api_provider,
+            openai_api_key=openai_api_key
+        )
 
         # Track agent profiles received
         self.agent_profiles = {}
@@ -817,6 +822,7 @@ class Regulator(InformationSource):
         #         else:
         #             if self.verbose:
         #                 print(f"DEBUG: Delta below threshold ({min_trade_threshold}) - Skipping: {delta_v:.4f}")
+
 
         if self.verbose:
             print(f"DEBUG: Delta value target map: {dict(delta_value_target_map)}")

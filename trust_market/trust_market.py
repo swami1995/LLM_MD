@@ -73,7 +73,7 @@ class TrustMarket:
 
         # --- Oracle Configuration for AMM ---
         # Mechanism: 'adjust_treasury', 'adjust_reserve', 'oracle_trades' ('adjust_R', 'adjust_T', 'adjust_P' are version of 'oracle_trades') # defaulting to 'adjust_reserve' for now. Others are not implemented yet.
-        self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_R'), 'regulator': config.get('regulator_amm', 'adjust_reserve')}
+        self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_R'), 'regulator': config.get('regulator_amm', 'adjust_R')}
 
         # --- Performance & History ---
         self.agent_performance = defaultdict(lambda: defaultdict(list)) # For external perf metrics
@@ -829,23 +829,28 @@ class TrustMarket:
 
         # Plot investment markers on top of the score lines
         if df_invest is not None and not df_invest.empty:
+            import numpy as np  # Local import for jitter calculation
             invest_dims = df_invest[df_invest['dimension'].isin(dims_to_plot)]
-            for _, investment in invest_dims.iterrows():
-                round_val = investment['evaluation_round']
-                agent_val = investment['agent_id']
-                dim_val = investment['dimension']
-                
+
+            # Group by the point on the plot to identify overlapping markers
+            grouped = invest_dims.groupby(['evaluation_round', 'agent_id', 'dimension'], sort=False)
+            for (round_val, agent_val, dim_val), group in grouped:
                 # Check if there is a score value to plot on
                 if round_val in pivot_dims.index and (agent_val, dim_val) in pivot_dims.columns:
                     score_val = pivot_dims.loc[round_val, (agent_val, dim_val)]
                     if pd.isna(score_val):
                         continue
-                    
-                    marker = '^' if investment['amount'] > 0 else 'v'
-                    color = source_color_map.get(investment['source_id'])
-                    size = min(375, max(40, abs(investment['amount']) * 1.5))
 
-                    ax.scatter(round_val, score_val, marker=marker, color=color, s=size, alpha=0.9, edgecolors='w', zorder=5)
+                    # Pre-compute small symmetric jitter offsets (in x) so markers don't overlap
+                    n = len(group)
+                    offsets = np.linspace(-0.4, 0.4, n) if n > 1 else [0.0]
+
+                    for jitter, (_, investment) in zip(offsets, group.iterrows()):
+                        marker = '^' if investment['amount'] > 0 else 'v'
+                        color = source_color_map.get(investment['source_id'])
+                        size = min(375, max(40, abs(investment['amount']) * 1.5))
+
+                        ax.scatter(round_val + jitter, score_val, marker=marker, color=color, s=size, alpha=0.9, edgecolors='w', zorder=5)
         
         ax.set_xlabel('Evaluation Round')
         ax.set_ylabel('Trust Score')
@@ -985,7 +990,7 @@ class TrustMarket:
                 n = len(group)
                 # Pre-compute small symmetric jitter offsets (in x) so markers don't overlap
                 # If only one marker, offset = 0
-                offsets = np.linspace(-0.2, 0.2, n) if n > 1 else [0.0]
+                offsets = np.linspace(-0.4, 0.4, n) if n > 1 else [0.0]
 
                 for jitter, (_, investment) in zip(offsets, group.iterrows()):
                     agent_id = investment['agent_id']
@@ -1197,3 +1202,118 @@ class TrustMarket:
         print(f"  Saved TrustMarket logs to: {filepath}")
         return os.path.abspath(filepath)
 
+
+def regenerate_plots_from_logs(
+    log_filepath: str,
+    output_dir: Optional[str] = None,
+    experiment_name: Optional[str] = None,
+    show_investments: bool = True,
+):
+    """
+    Loads trust market data from a log file and regenerates visualizations.
+
+    This function instantiates a TrustMarket object, populates its temporal
+    database from a saved log file (JSON or pickle), and then calls the
+    visualization methods to regenerate and save plots for trust scores and
+    source values.
+
+    Parameters
+    ----------
+    log_filepath : str
+        Path to the trust market log file (e.g., 'outputs/run1/trust_market_logs.json').
+    output_dir : str, optional
+        The directory to save the regenerated plots. If None, it defaults to the
+        directory containing the log file.
+    experiment_name : str, optional
+        A subdirectory name for the plots. If None, a default name like
+        'regen_plots_<timestamp>' will be used.
+    show_investments : bool, optional
+        Whether to show investment markers on the trust score plots, by default True.
+    """
+    import os
+    import json
+    import pickle
+    import time
+
+    if not os.path.exists(log_filepath):
+        print(f"Error: Log file not found at {log_filepath}")
+        return
+
+    # 1. Load data from file
+    print(f"--- Loading data from {log_filepath} ---")
+    file_format = os.path.splitext(log_filepath)[1].lower()
+
+    saved_data = {}
+    try:
+        if file_format == ".json":
+            with open(log_filepath, "r", encoding="utf-8") as f:
+                saved_data = json.load(f)
+        elif file_format in {".pkl", ".pickle"}:
+            with open(log_filepath, "rb") as f:
+                saved_data = pickle.load(f)
+        else:
+            print(f"Error: Unsupported file format '{file_format}'. Use 'json' or 'pickle'.")
+            return
+    except Exception as e:
+        print(f"Error loading data from file: {e}")
+        return
+
+    # 2. Re-create a minimal TrustMarket instance for plotting
+    config = saved_data.get("config")
+    if not config:
+        print("Error: 'config' not found in saved data. Cannot re-create market for plotting.")
+        return
+
+    # Suppress print statements during re-initialization for cleaner output
+    class MutedTrustMarket(TrustMarket):
+        def __init__(self, config):
+            import sys
+            from io import StringIO
+            stdout_ref = sys.stdout
+            sys.stdout = StringIO()
+            super().__init__(config)
+            sys.stdout = stdout_ref
+
+    market = MutedTrustMarket(config)
+
+    # 3. Restore the necessary data for visualization
+    market.temporal_db = saved_data.get("temporal_db")
+    if not market.temporal_db or not market.temporal_db.get('trust_scores'):
+        print("Warning: 'temporal_db' or 'trust_scores' not found or empty in log file. No plots to generate.")
+        return
+
+    # 4. Prepare paths for saving plots
+    if output_dir is None:
+        output_dir = os.path.dirname(log_filepath)
+
+    if experiment_name is None:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        experiment_name = f"regen_plots_{timestamp}"
+
+    print(f"--- Regenerating plots ---")
+    print(f"Plots will be saved in: {os.path.join(output_dir, experiment_name)}")
+
+    # 5. Call visualization functions
+    print("\nGenerating agent trust score plots...")
+    market.visualize_trust_scores(
+        save_path=output_dir,
+        experiment_name=experiment_name,
+        show_investments=show_investments
+    )
+
+    print("\nGenerating source portfolio value plots...")
+    market.visualize_source_value(
+        save_path=output_dir,
+        experiment_name=experiment_name
+    )
+
+    print("\n--- Plot regeneration complete. ---")
+
+
+if __name__ == "__main__":
+    regenerate_plots_from_logs(
+        log_filepath="run_logs/flash_regfix_20250618_231452.json",
+        output_dir="figures/",
+        experiment_name="flash_regfix1",
+        show_investments=True
+    )
