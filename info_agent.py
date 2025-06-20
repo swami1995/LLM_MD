@@ -241,11 +241,15 @@ KNOWLEDGE BASE:
         retries = 10
         for i in range(retries):
             try:
-                response = self.openai_client.chat.completions.create(
-                    model=self.api_model_name,
-                    messages=[{"role": "user", "content": prompt_text}],
-                    temperature=0.7,
-                )
+                completion_params = {
+                    "model": self.api_model_name,
+                    "messages": [{"role": "user", "content": prompt_text}],
+                }
+                if not self.api_model_name.startswith('o'):
+                    completion_params["temperature"] = 0.7
+
+                response = self.openai_client.chat.completions.create(**completion_params)
+
                 if response.choices:
                     return response.choices[0].message.content.strip()
                 else:
@@ -732,11 +736,15 @@ IMPORTANT INSTRUCTIONS:
         retries = 10
         for i in range(retries):
             try:
-                response = self.openai_client.chat.completions.create(
-                    model=self.api_model_name,
-                    messages=[{"role": "user", "content": prompt_text}],
-                    temperature=0.7,
-                )
+                completion_params = {
+                    "model": self.api_model_name,
+                    "messages": [{"role": "user", "content": prompt_text}],
+                }
+                if not self.api_model_name.startswith('o'):
+                    completion_params["temperature"] = 0.7
+                
+                response = self.openai_client.chat.completions.create(**completion_params)
+
                 if response.choices:
                     return response.choices[0].message.content.strip()
                 else:
@@ -932,7 +940,7 @@ Customer (you):
 
         queries_raw = []
 
-        if self.llm_source == "api" and self.api_provider == "gemini":
+        if self.llm_source == "api":# and self.api_provider == "gemini":
             if parallel_api_calls:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=len(user_ids)) as executor:
                     if self.api_provider == 'gemini' and use_chat_api and conversation_ids is not None and conversation_histories is not None:
@@ -1385,11 +1393,14 @@ Do NOT include explanations or any other text.
             retries = 10
             for i in range(retries):
                 try:
-                    response = self.openai_client.chat.completions.create(
-                        model=self.api_model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.7
-                    )
+                    completion_params = {
+                        "model": self.api_model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                    if not self.api_model_name.startswith('o'):
+                        completion_params["temperature"] = 0.7
+
+                    response = self.openai_client.chat.completions.create(**completion_params)
                     return response.choices[0].message.content if response.choices else "Error: OpenAI API returned empty response."
                 except Exception as e:
                     if i < retries - 1:

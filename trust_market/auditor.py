@@ -83,11 +83,15 @@ class ProfileAnalyzer:
         retries = 10
         for i in range(retries):
             try:
-                response = self.openai_client.chat.completions.create(
-                    model=self.api_model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.8
-                )
+                completion_params = {
+                    "model": self.api_model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if not self.api_model_name.startswith('o'):
+                    completion_params["temperature"] = 0.8
+                
+                response = self.openai_client.chat.completions.create(**completion_params)
+
                 if response.choices:
                     return response.choices[0].message.content
                 else:
@@ -1297,11 +1301,15 @@ class BatchEvaluator:
         retries = 10
         for i in range(retries):
             try:
-                response = self.openai_client.chat.completions.create(
-                    model=self.api_model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.8
-                )
+                completion_params = {
+                    "model": self.api_model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if not self.api_model_name.startswith('o'):
+                    completion_params["temperature"] = 0.8
+                
+                response = self.openai_client.chat.completions.create(**completion_params)
+
                 if response.choices:
                     return response.choices[0].message.content
                 else:

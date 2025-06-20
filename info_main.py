@@ -49,7 +49,6 @@ if __name__ == "__main__":
     parser.add_argument("--regulator_frequency", type=int, default=10, help="Frequency (in rounds) for regulator evaluations.")
     parser.add_argument("--exp_name", type=str, default="test_run", help="Name of the experiment.")
     parser.add_argument("--api_provider", type=str, choices=["gemini", "openai"], default="gemini", help="API provider to use. Default is 'gemini'.")
-    parser.add_argument("--api_sp", type=str, default="gemini-2.5-flash", help="API model name.")
 
 
     args = parser.parse_args()
@@ -89,7 +88,7 @@ if __name__ == "__main__":
             # args.api_model_name = "gemini-2.5-pro"
         elif args.api_provider == 'openai':
             # Configure OpenAI models here if needed
-            args.largest_model = "o3"
+            args.largest_model = "o4-mini"
             # args.api_model_name = "o3"
             args.api_model_name = "o4-mini"
 
