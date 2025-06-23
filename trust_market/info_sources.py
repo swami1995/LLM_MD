@@ -81,6 +81,13 @@ class InformationSource:
             'timestamp': time.time()
         })
 
+    def reset_evaluation_state(self):
+        """
+        Resets all evaluation-related caches and derived data.
+        Useful for ensuring independent analysis runs.
+        """
+        self._invalidate_cache()
+
     def _invalidate_cache(self, agent_id=None):
         """Invalidates cached evaluations."""
         if agent_id:
@@ -125,7 +132,8 @@ class InformationSource:
         return False
 
     def evaluate_agents_batch(self, agent_ids: List[int], dimensions: Optional[List[str]] = None, 
-                              evaluation_round: Optional[int] = None, use_comparative: bool = True):
+                              evaluation_round: Optional[int] = None, use_comparative: bool = True,
+                              analysis_mode: bool = False):
         """Batch variant of evaluate_agent that pairs agents globally and evaluates in parallel.
 
         Returns: {agent_id: {dimension: (score, confidence)}}
@@ -266,6 +274,8 @@ class InformationSource:
                     final_weight_new = effective_weight_new * (1 - persistence_factor)
 
                     current_score_for_update = self.derived_agent_scores.get(aid, {}).get(dim, 0.5)
+                    if analysis_mode:
+                        final_weight_new = 1.0
 
                     final_score = (final_weight_new * avg_new_score) + ((1 - final_weight_new) * current_score_for_update)
                     final_confidence = self._aggregate_confidences(new_confs, base_conf, final_weight_new)

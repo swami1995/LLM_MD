@@ -275,6 +275,8 @@ class AuditorWithProfileAnalysis(InformationSource):
 
         self.audit_results = defaultdict(dict) # Stores {agent_id: {dimension: (rating, confidence)}}
         self.agent_conversations = defaultdict(list) # Stores {agent_id: [conversation_history, ...]}
+        self.conversation_histories = defaultdict(list)
+        self.agent_profiles = {}  # agent_id -> profile_dict
 
         # Initialize LLM-based analyzers
         self.profile_analyzer = ProfileAnalyzer(
@@ -329,7 +331,7 @@ class AuditorWithProfileAnalysis(InformationSource):
         }
 
     def add_agent_profile(self, agent_id: int, profile: Dict):
-        """Stores agent profile data."""
+        """Adds or updates an agent's profile."""
         self.agent_profiles[agent_id] = profile
         super()._invalidate_cache(agent_id) # Invalidate cache if profile changes
 
@@ -792,10 +794,11 @@ class AuditorWithProfileAnalysis(InformationSource):
         
         # Step 4: Project steady-state prices
         projected_prices = {}
-        
+        projected_capital_shares = {}
         for agent_id in expected_capital_shares:
             # Expected capital for this agent at steady state
             expected_capital = steady_state_capital * expected_capital_shares[agent_id]
+            projected_capital_shares[agent_id] = expected_capital
             
             # Project price based on AMM dynamics
             # At steady state, if R_ss is the reserve, need to estimate T_ss
@@ -815,7 +818,7 @@ class AuditorWithProfileAnalysis(InformationSource):
             projected_price = expected_capital / projected_T if projected_T > 0 else 0
             projected_prices[agent_id] = projected_price
         
-        return projected_prices, steady_state_capital / current_total_market_capital
+        return projected_prices, projected_capital_shares, steady_state_capital / current_total_market_capital
 
     def check_market_capacity(self, own_evaluations, market_prices):
         """
@@ -824,12 +827,14 @@ class AuditorWithProfileAnalysis(InformationSource):
         """
         capacity_flags = {} # Collect ratios for all dimensions
         projected_prices = {} # {agent_id: projected_price}
+        projected_capital_shares = {} # {agent_id: projected_capital_share}
         for dim in self.expertise_dimensions:
-            projected_prices_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, dimension=dim)
+            projected_prices_dim, projected_capital_shares_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, dimension=dim)
             capacity_flags[dim] = steady_state_ratio>1.2 # Collect ratios for all dimensions
             projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
+            projected_capital_shares[dim] = projected_capital_shares_dim # Store projected capital shares for this dimension
 
-        return projected_prices, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
+        return projected_prices, projected_capital_shares, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
 
     def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
         """
@@ -869,82 +874,46 @@ class AuditorWithProfileAnalysis(InformationSource):
         """
         return super()._aggregate_confidences(new_confidences_list, base_aggregated_confidence, weight_for_new_info_block)
 
-    def decide_investments(self, evaluation_round=None, use_comparative=True):
+    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False):
+        """
+        The main decision-making loop for the auditor.
+        1. Evaluates all agents to get up-to-date scores.
+        """
         desirability_method = self.config.get('desirability_method', 'percentage_change')
         if self.verbose:
-            print(f"\n=== DEBUG: {self.source_type.capitalize()} {self.source_id} deciding investments for round {evaluation_round} ===")
-            print(f"DEBUG: Desirability method: {desirability_method}")
-            print(f"DEBUG: Config values: {self.config}")
-        investments_to_propose_cash_value = [] # List of (agent_id, dimension, cash_amount_to_trade, confidence)
+            print(f"AUDITOR ({self.source_id}): Starting investment decisions for round {evaluation_round}.")
 
-        if not self.market: 
-            if self.verbose:
-                print(f"Warning ({self.source_id}): No market access.")
-            return []
-
-        # DEBUG: Check available capacity
-        available_capacity = self.market.source_available_capacity.get(self.source_id, {})
-        if self.verbose:
-            print(f"DEBUG: Available capacity: {available_capacity}")
-
-        # --- 1. Evaluations & Price Targets ---
-        own_evaluations = {} # {agent_id: {dimension: (pseudo_score, confidence_in_eval)}}
-        market_prices = {}   # {agent_id: {dimension: P_current}}
+        # --- 1. Evaluate Agents ---
+        # Get evaluations for all agents the auditor is aware of.
+        all_agent_ids = list(self.agent_profiles.keys())
+        analysis_data = defaultdict(lambda : defaultdict(dict)) # {(agent_id, dimension): (pseudo_score, confidence_in_eval)}
+        investments_to_propose_cash_value = [] # {(agent_id, dimension): cash_value_to_trade}
         
-        # Determine which agents this source will evaluate
-        candidate_agent_ids = []
-        if self.source_type == 'auditor':
-            candidate_agent_ids = list(self.agent_profiles.keys())
-        elif self.source_type == 'user_representative': # Assuming UserRep uses this structure
-            candidate_agent_ids = list(self.agent_conversations.keys()) 
-        else: # Fallback for other types if they use this method
-            # This might need adjustment based on how other source types store their candidates
-            candidate_agent_ids = list(self.market.agent_amm_params.keys())
-
-        if self.verbose:
-            print(f"DEBUG: Found {len(candidate_agent_ids)} candidate agents: {candidate_agent_ids}")
-
-        if not candidate_agent_ids: 
-            if self.verbose:
-                print(f"DEBUG: No candidate agents to evaluate - returning empty list")
-            return []
-
-        # --- 1A. Fetch market prices (still sequential, inexpensive) ---
-        for agent_id in candidate_agent_ids:
-            market_prices[agent_id] = {}
-            for dim_to_eval in self.expertise_dimensions:
-                self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
-                amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
-                price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
-                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
-                market_prices[agent_id][dim_to_eval] = price
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
-
-        # --- 1B. Evaluate all agents in a single batch ---
+        # In analysis mode, we want to see the raw evaluation output.
+        # Otherwise, we might use cached evaluations.
         own_evaluations = self.evaluate_agents_batch(
-            candidate_agent_ids,
+            agent_ids=all_agent_ids,
             dimensions=self.expertise_dimensions,
             evaluation_round=evaluation_round,
-            use_comparative=use_comparative
+            use_comparative=use_comparative,
+            analysis_mode=analysis_mode
         )
-
-        if self.verbose:
-            for aid, eval_result in own_evaluations.items():
-                print(f"DEBUG: Agent {aid} evaluation results: {eval_result}")
-
-        # Summary and early-exit if nothing evaluated
-        if self.verbose:
-            print(f"DEBUG: Total agents successfully evaluated: {len(own_evaluations)}")
-
+        if own_evaluations:
+            self.own_evaluations_cache[evaluation_round] = own_evaluations
+        
         if not own_evaluations:
-            if self.verbose:
-                print("DEBUG: No agents successfully evaluated - returning empty list")
-            return []
+            print("AUDITOR: No evaluations were generated. Cannot decide investments.")
+            return [], {}
 
-        projected_prices, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
+        # --- 2. Get Current Market State ---
+        market_prices = self.market.get_market_prices(candidate_agent_ids=all_agent_ids, verbose=self.verbose)
+        if not market_prices:
+            if self.verbose: print("AUDITOR: No market prices available. Cannot determine desirability.")
+            return [], {}
+        
+        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
 
-        # --- 2. Determine "Target Value Holding" & "Attractiveness" ---
+        # --- 3. Determine "Target Value Holding" & "Attractiveness" ---
         attractiveness_scores = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): attractiveness_score}
         target_value_holding_ideal = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): ideal_cash_value_to_hold}
 
@@ -1017,6 +986,19 @@ class AuditorWithProfileAnalysis(InformationSource):
                 attractiveness_scores[dimension][agent_id] = final_attractiveness
                 if self.verbose:
                     print(f"DEBUG: Agent {agent_id}, Dim {dimension}: raw_attractiveness={attractiveness:.4f}, final_attractiveness={final_attractiveness:.4f}")
+
+                if analysis_mode:
+                    if agent_id not in analysis_data:
+                        analysis_data[agent_id] = {}
+                    analysis_data[agent_id][dimension] = {
+                        'projected_prices': projected_prices[dimension][agent_id],
+                        'projected_capital_shares': projected_capital_shares[dimension][agent_id],
+                        'p_target_effective': p_target_effective,
+                        'final_attractiveness': final_attractiveness,
+                        'pseudo_score': pseudo_score,
+                        'confidence_in_eval': confidence_in_eval,
+                        'p_current': p_current
+                    }
 
         # Normalize positive attractiveness scores for portfolio weighting
         target_portfolio_weights = defaultdict(lambda : defaultdict(float)) # {dimension: {agent_id: weight}}
@@ -1114,21 +1096,25 @@ class AuditorWithProfileAnalysis(InformationSource):
             print(f"DEBUG: Uninvested capacity: {uninvested_capacity}")
             print(f"DEBUG: Total proposed investments by dimension: {dict(total_proposed_investments)}")
         
-        for dim in delta_value_target_map.keys():
-            if total_proposed_investments[dim] > 0:
-                investment_scale = self.config.get('investment_scale', 0.2) # Scale factor for investment aggressiveness
-                investment_scale_pot = min(total_portfolio_value_potential[dim]*investment_scale / total_proposed_investments[dim], 1.0)
-                investment_scale_cap = min(uninvested_capacity[dim]/(total_proposed_investments[dim]*investment_scale_pot), 1.0)
-                final_investment_scale = investment_scale_pot * investment_scale_cap
+        # This needs to be fixed. don't need to reduce the divestments?        
+        # for dim in delta_value_target_map.keys():
+        #     if total_proposed_investments[dim] > 0:
                 
-                if self.verbose:
-                    print(f"DEBUG: Scaling for dim {dim}: base_scale={investment_scale}, scale_pot={investment_scale_pot:.4f}, scale_cap={investment_scale_cap:.4f}, final_scale={final_investment_scale:.4f}")
+        #         investment_scale = self.config.get('investment_scale', 0.2) # Scale factor for investment aggressiveness
+        #         # The agent doesn't want to invest too large a fraction of its total potential value in a single round.
+        #         investment_scale_pot = min(total_portfolio_value_potential[dim]*investment_scale / total_proposed_investments[dim], 1.0)
+        #         # The agent cannot spend more cash than it currently has available.
+        #         investment_scale_cap = min(uninvested_capacity[dim]/(total_proposed_investments[dim]*investment_scale_pot), 1.0)
+        #         final_investment_scale = investment_scale_pot * investment_scale_cap
                 
-                for agent_id, cash_amount in delta_value_target_map[dim].items():
-                    scaled_cash_amount = cash_amount * final_investment_scale
-                    delta_value_target_map[dim][agent_id] = scaled_cash_amount
-                    if self.verbose:
-                        print(f"DEBUG: Final scaling - Dim {dim}, Agent {agent_id}: {cash_amount:.4f} -> {scaled_cash_amount:.4f}")
+        #         if self.verbose:
+        #             print(f"DEBUG: Scaling for dim {dim}: base_scale={investment_scale}, scale_pot={investment_scale_pot:.4f}, scale_cap={investment_scale_cap:.4f}, final_scale={final_investment_scale:.4f}")
+                
+        #         for agent_id, cash_amount in delta_value_target_map[dim].items():
+        #             scaled_cash_amount = cash_amount * final_investment_scale
+        #             delta_value_target_map[dim][agent_id] = scaled_cash_amount
+        #             if self.verbose:
+        #                 print(f"DEBUG: Final scaling - Dim {dim}, Agent {agent_id}: {cash_amount:.4f} -> {scaled_cash_amount:.4f}")
 
         # --- 6. Prepare list of (agent_id, dimension, cash_amount_to_trade, confidence) ---
         # The TrustMarket.process_investments will convert this cash_amount to shares
@@ -1158,10 +1144,13 @@ class AuditorWithProfileAnalysis(InformationSource):
         
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
+        
+        # --- RETURN ---
+        if analysis_mode:
+            return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
+        
 
-
-    
     def _perform_base_evaluation(self, agent_id, dimensions, evaluation_round):
         """Auditor's implementation of a non-comparative evaluation."""
         return self.perform_hybrid_audit(
@@ -1212,13 +1201,17 @@ class AuditorWithProfileAnalysis(InformationSource):
         return (aid, oid, derived_scores, confidences)
 
 
-    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True):
-        """Auditor's batch evaluation delegates to the InformationSource base class."""
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False):
+        """
+        Overrides the base InformationSource method to use the Auditor's specific
+        evaluation logic (hybrid audit).
+        """
         return super().evaluate_agents_batch(
             agent_ids=agent_ids,
             dimensions=dimensions,
             evaluation_round=evaluation_round,
-            use_comparative=use_comparative
+            use_comparative=use_comparative,
+            analysis_mode=analysis_mode
         )
 
 

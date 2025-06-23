@@ -76,7 +76,7 @@ class TrustMarketSystem:
                         print(f"    Error passing profile to {source_id} for agent {agent_id}: {e}")
 
 
-    def add_information_source(self, source, is_primary=False, evaluation_frequency=1, initial_influence=None):
+    def add_information_source(self, source, is_primary=False, evaluation_frequency=1, initial_influence=None, investment_horizon=1):
         """
         Add an information source (Auditor, UserRep, etc.) to the system.
 
@@ -85,6 +85,7 @@ class TrustMarketSystem:
         - is_primary: Whether this is a primary trust source (defined in market config)
         - evaluation_frequency: How often (in rounds) this source should make investment decisions
         - initial_influence: Optional dict mapping dimensions to initial capacity
+        - investment_horizon: The number of rounds over which to spread the source's investments.
         """
         if not hasattr(source, 'source_id'):
             print("Error: Information source must have a 'source_id' attribute.")
@@ -122,7 +123,8 @@ class TrustMarketSystem:
                 influence_value = 40.0
             
         self.trust_market.add_information_source(
-            source.source_id, source.source_type, initial_influence, is_primary or is_primary_type
+            source.source_id, source.source_type, initial_influence, is_primary or is_primary_type,
+            investment_horizon=investment_horizon
         )
         print(f"Registered Information Source: {source.source_id} (Type: {source.source_type}, Freq: {evaluation_frequency}, Primary: {is_primary or is_primary_type})")
 
@@ -137,22 +139,22 @@ class TrustMarketSystem:
 
 
     # --- Registration Helpers (Syntactic Sugar) ---
-    def register_user_representative(self, representative, evaluation_frequency=1, initial_influence=None):
-        self.add_information_source(representative, False, evaluation_frequency, initial_influence)
+    def register_user_representative(self, representative, evaluation_frequency=1, initial_influence=None, investment_horizon=1):
+        self.add_information_source(representative, False, evaluation_frequency, initial_influence, investment_horizon)
 
-    def register_domain_expert(self, expert, evaluation_frequency=3, initial_influence=None):
-        self.add_information_source(expert, False, evaluation_frequency, initial_influence)
+    def register_domain_expert(self, expert, evaluation_frequency=3, initial_influence=None, investment_horizon=1):
+        self.add_information_source(expert, False, evaluation_frequency, initial_influence, investment_horizon)
 
-    def register_auditor(self, auditor, evaluation_frequency=5, initial_influence=None):
+    def register_auditor(self, auditor, evaluation_frequency=5, initial_influence=None, investment_horizon=1):
         # Auditors might be considered primary depending on config
-        self.add_information_source(auditor, False, evaluation_frequency, initial_influence)
+        self.add_information_source(auditor, False, evaluation_frequency, initial_influence, investment_horizon)
 
-    def register_red_teamer(self, red_teamer, evaluation_frequency=10, initial_influence=None):
-        self.add_information_source(red_teamer, False, evaluation_frequency, initial_influence)
+    def register_red_teamer(self, red_teamer, evaluation_frequency=10, initial_influence=None, investment_horizon=1):
+        self.add_information_source(red_teamer, False, evaluation_frequency, initial_influence, investment_horizon)
 
-    def register_regulator(self, regulator, evaluation_frequency=20, initial_influence=None):
+    def register_regulator(self, regulator, evaluation_frequency=20, initial_influence=None, investment_horizon=1):
         # Regulators are often primary
-        self.add_information_source(regulator, True, evaluation_frequency, initial_influence)
+        self.add_information_source(regulator, True, evaluation_frequency, initial_influence, investment_horizon)
     # --- End Registration Helpers ---
 
 
@@ -377,6 +379,9 @@ class TrustMarketSystem:
                 # except Exception as e:
                 #     print(f"    Error evaluating source {source_id}: {str(e)}")
                 #     # Optionally skip updating last_evaluated on error?
+        
+        # After all sources due this round have submitted their plans, apply one round of spread investments
+        self.trust_market.apply_spread_investments()
 
         if not evaluated_sources:
             print("    No information sources due for evaluation this round.")

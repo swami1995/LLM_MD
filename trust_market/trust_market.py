@@ -71,6 +71,10 @@ class TrustMarket:
         # For simplicity, we won't track individual share ownership here, but assume sellers sell back to the AMM.
         self.amm_transactions_log = []
 
+        # For spreading investments over time
+        self.source_investment_spread_horizons = {}
+        self.pending_spread_investments = []
+
         # --- Oracle Configuration for AMM ---
         # Mechanism: 'adjust_treasury', 'adjust_reserve', 'oracle_trades' ('adjust_R', 'adjust_T', 'adjust_P' are version of 'oracle_trades') # defaulting to 'adjust_reserve' for now. Others are not implemented yet.
         self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_R'), 'regulator': config.get('regulator_amm', 'adjust_R')}
@@ -120,13 +124,19 @@ class TrustMarket:
 
     def add_information_source(self, source_id: str, source_type: str,
                             initial_influence: Dict[str, float],
-                            is_primary: bool = False) -> None:
+                            is_primary: bool = False,
+                            investment_horizon: int = 1) -> None:
         """
         Add a new information source to the market with initial influence capacity.
         """
         print(f"  Adding source {source_id} (Type: {source_type}, Primary: {is_primary})")
         if source_id in self.source_available_capacity:
             print(f"  Warning: Source {source_id} already exists. Updating capacity.")
+
+        # Store the investment horizon for this source
+        self.source_investment_spread_horizons[source_id] = investment_horizon
+        if investment_horizon > 1:
+            print(f"    - Investments from this source will be spread over {investment_horizon} rounds.")
 
         # Initialize/Update influence for valid dimensions
         for dimension in self.dimensions:
@@ -162,6 +172,43 @@ class TrustMarket:
             self.agent_trust_scores[agent_id][dimension] = self.agent_amm_params[agent_id][dimension]['R'] / self.agent_amm_params[agent_id][dimension]['T']
 
 
+    def apply_spread_investments(self):
+        """
+        Processes one round of pending spread investments.
+        This should be called once per evaluation round by the system.
+        """
+        if not self.pending_spread_investments:
+            return
+
+        print(f"  Applying {len(self.pending_spread_investments)} pending spread investments...")
+        remaining_investments = []
+        affected_agents_dimensions = defaultdict(list)
+
+        for item in self.pending_spread_investments:
+            # The core logic of applying a single investment trade
+            self._execute_investment_trade(
+                source_id=item['source_id'],
+                agent_id=item['agent_id'],
+                dimension=item['dimension'],
+                amount=item['amount_per_round'],
+                confidence=item['confidence'],
+                affected_agents_dimensions=affected_agents_dimensions
+            )
+            
+            item['rounds_left'] -= 1
+            if item['rounds_left'] > 0:
+                remaining_investments.append(item)
+        
+        self.pending_spread_investments = remaining_investments
+        if self.pending_spread_investments:
+             print(f"  {len(self.pending_spread_investments)} investments still pending for future rounds.")
+        
+        # Apply correlations if enabled and scores actually changed from the spread investments
+        if self.use_dimension_correlations:
+            for agent_id in affected_agents_dimensions:
+                recalc_dims = set(affected_agents_dimensions[agent_id])
+                self.apply_dimension_correlations(agent_id, list(recalc_dims))
+
     def process_investments(self, source_id: str, investments: List[Tuple]) -> None:
         """
         Process a batch of investment/divestment decisions from a source.
@@ -177,6 +224,26 @@ class TrustMarket:
             print(f"Warning: Source {source_id} not registered. Ignoring investments.")
             return
 
+        horizon = self.source_investment_spread_horizons.get(source_id, 1)
+
+        # Oracles and sources with no horizon process immediately.
+        # Spreading logic is for non-oracle sources with a horizon > 1.
+        if horizon > 1:
+            print(f"  Queueing {len(investments)} investments from source {source_id} to be spread over {horizon} rounds.")
+            for agent_id, dimension, total_amount, confidence in investments:
+                if dimension not in self.dimensions:
+                    continue
+                amount_per_round = total_amount / horizon
+                self.pending_spread_investments.append({
+                    "source_id": source_id,
+                    "agent_id": agent_id,
+                    "dimension": dimension,
+                    "amount_per_round": amount_per_round,
+                    "rounds_left": horizon,
+                    "confidence": confidence
+                })
+            return # Return after queueing
+
         affected_agents_dimensions = defaultdict(list) # Track (agent_id, dimension) pairs needing recalc
 
         print(f"  Processing {len(investments)} investments from source {source_id}...")
@@ -185,138 +252,7 @@ class TrustMarket:
 
         # ipdb.set_trace()
         for agent_id, dimension, amount, confidence in investments:
-            # ipdb.set_trace()
-            if dimension not in self.dimensions:
-                # print(f"    Warning: Invalid dimension '{dimension}' for agent {agent_id}. Skipping.")
-                continue
-            if dimension not in self.source_available_capacity[source_id]:
-                print(f"    Warning: Source {source_id} has no capacity for dimension '{dimension}'. Skipping.")
-                continue
-
-            if source_id not in self.oracle_influence_mechanisms:
-                current_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
-                available_cap = self.source_available_capacity[source_id].get(dimension, 0.0)
-
-            change_amount = 0.0
-
-            # --- Handle Divestment (amount < 0) ---
-            if amount < 0:
-                # Amount to divest is the absolute value, capped by current investment
-                divest_request = abs(amount)
-                if source_id not in self.oracle_influence_mechanisms:
-                    actual_divestment = min(divest_request, current_investment)
-                else:
-                    actual_divestment = divest_request
-
-                if actual_divestment > 0.001: # Threshold to avoid tiny changes
-                    change_amount = -actual_divestment # Record the change
-                    y = actual_divestment
-                    agent_amm_params = self.agent_amm_params[agent_id][dimension]
-                    T, K = agent_amm_params['T'], agent_amm_params['K']
-                    R = K/T
-                    old_price = R/T
-                    y = min(y, R) # Don't divest more than the reserve
-                    if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
-                        R_new = R - y
-                        T_new = T
-                    else:
-                        num_shares_to_divest = y*T/(R - y)
-                        T_new = T + num_shares_to_divest
-                        R_new = R*T/T_new #= R- y  # = R*T/(T + num_shares_to_divest) = R*T/(T + y*T/(R - y)) = R*T*(R-y)/(R*T) = R - y
-                    new_price = R_new/T_new
-
-                    self.agent_amm_params[agent_id][dimension]['R'] = R_new
-                    self.agent_amm_params[agent_id][dimension]['T'] = T_new
-                    self.agent_amm_params[agent_id][dimension]['K'] = R_new * T_new
-
-                    # Update investments
-                    if source_id not in self.oracle_influence_mechanisms:
-                        old_source_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
-                        self.source_investments[source_id][agent_id][dimension] -= num_shares_to_divest
-                        self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investment*old_price
-                        self.source_available_capacity[source_id][dimension] += actual_divestment
-                    for s_id in self.source_investments:
-                        if self.source_investments[s_id][agent_id][dimension] > 0 and s_id != source_id:
-                            self.allocated_influence[s_id][dimension] -= self.source_investments[s_id][agent_id][dimension]*(new_price - old_price)
-                    self.agent_trust_scores[agent_id][dimension] = new_price
-                    affected_agents_dimensions[agent_id].append(dimension)
-                    
-                # else: print(f"    Divestment for Agent {agent_id} on {dimension} too small or none possible.")
-
-            # --- Handle Investment (amount > 0) ---
-            else:
-                # Amount to invest is capped by available capacity
-                if source_id not in self.oracle_influence_mechanisms:
-                    actual_investment = min(amount, available_cap)
-                else:
-                    actual_investment = amount
-
-                if actual_investment > 0.001: # Threshold
-                    change_amount = actual_investment # Record the change
-                    x = actual_investment
-                    agent_amm_params = self.agent_amm_params[agent_id][dimension]
-                    T, K = agent_amm_params['T'], agent_amm_params['K']
-                    R = K/T
-                    old_price = R/T
-                    if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
-                        R_new = R - y
-                        T_new = T
-                    else:
-                        num_shares_to_invest = x*T/(R + x)
-                        T_new = T - num_shares_to_invest
-                        R_new = K/T_new #= R + x  # = R*T/(T - num_shares_to_invest) = R*T/(T - x*T/(R + x)) = R*T*(R+x)/(R*T) = R + x
-                    new_price = R_new/T_new
-
-                    self.agent_amm_params[agent_id][dimension]['R'] = R_new
-                    self.agent_amm_params[agent_id][dimension]['T'] = T_new
-                    self.agent_amm_params[agent_id][dimension]['K'] = R_new * T_new
-
-                    # Update investments
-                    if source_id not in self.oracle_influence_mechanisms:
-                        old_source_investments = self.source_investments[source_id][agent_id].get(dimension, 0.0)
-                        self.source_investments[source_id][agent_id][dimension] += num_shares_to_invest
-                        self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investments*old_price
-                        self.source_available_capacity[source_id][dimension] -= actual_investment
-                    for s_id in self.source_investments:
-                        if self.source_investments[s_id][agent_id][dimension] > 0 and s_id != source_id:
-                            self.allocated_influence[s_id][dimension] +=  self.source_investments[s_id][agent_id][dimension]*(new_price - old_price)
-                    self.agent_trust_scores[agent_id][dimension] = new_price
-                    affected_agents_dimensions[agent_id].append(dimension)
-
-            # Log the actual change (investment or divestment)
-            if abs(change_amount) > 0.001:
-                self.temporal_db['investments'].append({
-                    'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
-                    'source_id': source_id, 'agent_id': agent_id, 'dimension': dimension,
-                    'amount': change_amount, # Positive for invest, negative for divest
-                    'confidence': confidence,
-                    'type': 'investment' if change_amount > 0 else 'divestment'
-                })
-                self.temporal_db['trust_scores'].append({
-                                'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
-                                'agent_id': agent_id, 'dimension': dimension,
-                                'old_score': old_price, 'new_score': new_price,
-                                'change_source': 'investment', 'source_id': None # Aggregate effect
-                })
-
-                # After any transaction, log the new state of the source for that dimension
-                if source_id not in self.oracle_influence_mechanisms:
-                    total_invested_value = 0
-                    for a_id, dims in self.source_investments[source_id].items():
-                        if dimension in dims:
-                            shares = dims[dimension]
-                            price = self.agent_trust_scores[a_id][dimension]
-                            total_invested_value += shares * price
-                    
-                    available_cash = self.source_available_capacity[source_id][dimension]
-                    
-                    self.temporal_db['source_states'].append({
-                        'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
-                        'source_id': source_id, 'dimension': dimension,
-                        'total_invested_value': total_invested_value,
-                        'available_cash': available_cash,
-                        'total_value': total_invested_value + available_cash
-                    })
+            self._execute_investment_trade(source_id, agent_id, dimension, amount, confidence, affected_agents_dimensions)
 
         # Apply correlations if enabled and scores actually changed
         if self.use_dimension_correlations:
@@ -324,6 +260,140 @@ class TrustMarket:
                 recalc_dims = set(affected_agents_dimensions[agent_id])
                 # print(f"    Applying correlations for Agent {agent_id} due to changes in dimensions : {recalc_dims}")
                 self.apply_dimension_correlations(agent_id, list(recalc_dims))
+
+    def _execute_investment_trade(self, source_id, agent_id, dimension, amount, confidence, affected_agents_dimensions):
+        # ipdb.set_trace()
+        if dimension not in self.dimensions:
+            # print(f"    Warning: Invalid dimension '{dimension}' for agent {agent_id}. Skipping.")
+            return
+        if dimension not in self.source_available_capacity[source_id] and source_id not in self.oracle_influence_mechanisms:
+            print(f"    Warning: Source {source_id} has no capacity for dimension '{dimension}'. Skipping.")
+            return
+
+        if source_id not in self.oracle_influence_mechanisms:
+            current_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
+            available_cap = self.source_available_capacity[source_id].get(dimension, 0.0)
+
+        change_amount = 0.0
+
+        # --- Handle Divestment (amount < 0) ---
+        if amount < 0:
+            # Amount to divest is the absolute value, capped by current investment
+            divest_request = abs(amount)
+            if source_id not in self.oracle_influence_mechanisms:
+                actual_divestment = min(divest_request, current_investment)
+            else:
+                actual_divestment = divest_request
+
+            if actual_divestment > 0.001: # Threshold to avoid tiny changes
+                change_amount = -actual_divestment # Record the change
+                y = actual_divestment
+                agent_amm_params = self.agent_amm_params[agent_id][dimension]
+                T, K = agent_amm_params['T'], agent_amm_params['K']
+                R = K/T
+                old_price = R/T
+                y = min(y, R) # Don't divest more than the reserve
+                if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
+                    R_new = R - y
+                    T_new = T
+                else:
+                    num_shares_to_divest = y*T/(R - y)
+                    T_new = T + num_shares_to_divest
+                    R_new = R*T/T_new #= R- y  # = R*T/(T + num_shares_to_divest) = R*T/(T + y*T/(R - y)) = R*T*(R-y)/(R*T) = R - y
+                new_price = R_new/T_new
+
+                self.agent_amm_params[agent_id][dimension]['R'] = R_new
+                self.agent_amm_params[agent_id][dimension]['T'] = T_new
+                self.agent_amm_params[agent_id][dimension]['K'] = R_new * T_new
+
+                # Update investments
+                if source_id not in self.oracle_influence_mechanisms:
+                    old_source_investment = self.source_investments[source_id][agent_id].get(dimension, 0.0)
+                    self.source_investments[source_id][agent_id][dimension] -= num_shares_to_divest
+                    self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investment*old_price
+                    self.source_available_capacity[source_id][dimension] += actual_divestment
+                for s_id in self.source_investments:
+                    if self.source_investments[s_id][agent_id][dimension] > 0 and s_id != source_id:
+                        self.allocated_influence[s_id][dimension] -= self.source_investments[s_id][agent_id][dimension]*(new_price - old_price)
+                self.agent_trust_scores[agent_id][dimension] = new_price
+                affected_agents_dimensions[agent_id].append(dimension)
+                
+            # else: print(f"    Divestment for Agent {agent_id} on {dimension} too small or none possible.")
+
+        # --- Handle Investment (amount > 0) ---
+        else:
+            # Amount to invest is capped by available capacity
+            if source_id not in self.oracle_influence_mechanisms:
+                actual_investment = min(amount, available_cap)
+            else:
+                actual_investment = amount
+
+            if actual_investment > 0.001: # Threshold
+                change_amount = actual_investment # Record the change
+                x = actual_investment
+                agent_amm_params = self.agent_amm_params[agent_id][dimension]
+                T, K = agent_amm_params['T'], agent_amm_params['K']
+                R = K/T
+                old_price = R/T
+                if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
+                    R_new = R - y
+                    T_new = T
+                else:
+                    num_shares_to_invest = x*T/(R + x)
+                    T_new = T - num_shares_to_invest
+                    R_new = K/T_new #= R + x  # = R*T/(T - num_shares_to_invest) = R*T/(T - x*T/(R + x)) = R*T*(R+x)/(R*T) = R + x
+                new_price = R_new/T_new
+
+                self.agent_amm_params[agent_id][dimension]['R'] = R_new
+                self.agent_amm_params[agent_id][dimension]['T'] = T_new
+                self.agent_amm_params[agent_id][dimension]['K'] = R_new * T_new
+
+                # Update investments
+                if source_id not in self.oracle_influence_mechanisms:
+                    old_source_investments = self.source_investments[source_id][agent_id].get(dimension, 0.0)
+                    self.source_investments[source_id][agent_id][dimension] += num_shares_to_invest
+                    self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*new_price - old_source_investments*old_price
+                    self.source_available_capacity[source_id][dimension] -= actual_investment
+                for s_id in self.source_investments:
+                    if self.source_investments[s_id][agent_id][dimension] > 0 and s_id != source_id:
+                        self.allocated_influence[s_id][dimension] +=  self.source_investments[s_id][agent_id][dimension]*(new_price - old_price)
+                self.agent_trust_scores[agent_id][dimension] = new_price
+                affected_agents_dimensions[agent_id].append(dimension)
+
+        # Log the actual change (investment or divestment)
+        if abs(change_amount) > 0.001:
+            self.temporal_db['investments'].append({
+                'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
+                'source_id': source_id, 'agent_id': agent_id, 'dimension': dimension,
+                'amount': change_amount, # Positive for invest, negative for divest
+                'confidence': confidence,
+                'type': 'investment' if change_amount > 0 else 'divestment'
+            })
+            self.temporal_db['trust_scores'].append({
+                            'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
+                            'agent_id': agent_id, 'dimension': dimension,
+                            'old_score': old_price, 'new_score': new_price,
+                            'change_source': 'investment', 'source_id': None # Aggregate effect
+            })
+
+            # After any transaction, log the new state of the source for that dimension
+            if source_id not in self.oracle_influence_mechanisms:
+                total_invested_value = 0
+                for a_id, dims in self.source_investments[source_id].items():
+                    if dimension in dims:
+                        shares = dims[dimension]
+                        price = self.agent_trust_scores[a_id][dimension]
+                        total_invested_value += shares * price
+                
+                available_cash = self.source_available_capacity[source_id][dimension]
+                
+                self.temporal_db['source_states'].append({
+                    'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
+                    'source_id': source_id, 'dimension': dimension,
+                    'total_invested_value': total_invested_value,
+                    'available_cash': available_cash,
+                    'total_value': total_invested_value + available_cash
+                })
 
 
     def _recalculate_agent_trust_dimension(self, agent_id, dimension) -> float:
@@ -687,7 +757,7 @@ class TrustMarket:
         """Increment the evaluation round and trigger periodic actions."""
         self.evaluation_round += increment
         # Apply decay first
-        self.decay_trust_scores()
+        # self.decay_trust_scores()
         # Then apply correlations (optional) - correlations act on scores *after* decay
         # if self.use_dimension_correlations:
         #      print(f"  Applying correlations post-decay for round {self.evaluation_round}...")
@@ -696,6 +766,25 @@ class TrustMarket:
         #           # Simplest: apply to all dimensions if any score is not neutral.
         #           all_dims = list(self.dimensions)
         #           self.apply_dimension_correlations(agent_id, all_dims) # Over-applying maybe?
+
+    def get_market_prices(self, candidate_agent_ids=None, verbose=False):
+        market_prices = {}   # {agent_id: {dimension: P_current}}
+        
+        # Determine which agents this source will evaluate
+        if candidate_agent_ids is None:
+            candidate_agent_ids = list(self.agent_trust_scores.keys())
+
+        # --- 1A. Fetch market prices (still sequential, inexpensive) ---
+        for agent_id in candidate_agent_ids:
+            market_prices[agent_id] = {}
+            for dim_to_eval in self.expertise_dimensions:
+                self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
+                amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
+                price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
+                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
+                market_prices[agent_id][dim_to_eval] = price
+                if verbose:
+                    print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
 
 
     def get_agent_trust(self, agent_id: int) -> Dict[str, float]:
@@ -751,7 +840,7 @@ class TrustMarket:
     
     def _recompute_source_influence_capacity(self, source_id: str) -> None:
         """
-        Recompute the influence capacity of a source based on current investments.
+        Recomputes the influence capacity of a source based on its performance.
         This is a placeholder for any complex logic needed to adjust capacity dynamically.
         """
         # Keep existing logic, ensure it uses self.source_influence_capacity

@@ -550,10 +550,12 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         
         # Step 4: Project steady-state prices
         projected_prices = {}
+        projected_capital_shares = {}
         
         for agent_id in expected_capital_shares:
             # Expected capital for this agent at steady state
             expected_capital = steady_state_capital * expected_capital_shares[agent_id]
+            projected_capital_shares[agent_id] = expected_capital
             
             # Project price based on AMM dynamics
             # At steady state, if R_ss is the reserve, need to estimate T_ss
@@ -573,7 +575,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             projected_price = expected_capital / projected_T if projected_T > 1e-6 else 0
             projected_prices[agent_id] = projected_price
         
-        return projected_prices, steady_state_capital / current_total_market_capital
+        return projected_prices, projected_capital_shares, steady_state_capital / current_total_market_capital
 
     def check_market_capacity(self, own_evaluations, market_prices):
         """
@@ -582,23 +584,26 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         """
         capacity_flags = {} # Collect ratios for all dimensions
         projected_prices = {} # {agent_id: projected_price}
+        projected_capital_shares = {} # {agent_id: projected_capital_share}
         for dim in self.expertise_dimensions:
-            projected_prices_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, dimension=dim)
+            projected_prices_dim, projected_capital_shares_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, dimension=dim)
             capacity_flags[dim] = steady_state_ratio>1.2 # Collect ratios for all dimensions
             projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
+            projected_capital_shares[dim] = projected_capital_shares_dim # Store projected capital shares for this dimension
 
-        return projected_prices, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
+        return projected_prices, projected_capital_shares, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
 
-    def decide_investments(self, evaluation_round=None, use_comparative=True):
+    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False):
         desirability_method = self.config.get('desirability_method', 'percentage_change') # 'percentage_change' or 'log_ratio'
         if self.verbose:
             print(f"\n=== DEBUG: {self.source_type.capitalize()} {self.source_id} deciding investments for round {evaluation_round} ===")
         
         investments_to_propose_cash_value = [] # List of (agent_id, dimension, cash_amount_to_trade, confidence)
+        analysis_data = {} if analysis_mode else None
 
         if not self.market: 
             print(f"Warning ({self.source_id}): No market access.")
-            return []
+            return [] if not analysis_mode else ([], analysis_data)
 
         # DEBUG: Check available capacity
         available_capacity = self.market.source_available_capacity.get(self.source_id, {})
@@ -621,7 +626,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         if not candidate_agent_ids: 
             print(f"DEBUG: No candidate agents to evaluate - returning empty list")
-            return []
+            return [] if not analysis_mode else ([], analysis_data)
 
         # --- 1A. Fetch market prices ---
         for agent_id in candidate_agent_ids:
@@ -640,15 +645,16 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             candidate_agent_ids,
             dimensions=self.expertise_dimensions,
             evaluation_round=evaluation_round,
-            use_comparative=use_comparative
+            use_comparative=use_comparative,
+            analysis_mode=analysis_mode
         )
 
         if not own_evaluations:
             if self.verbose:
                 print("DEBUG: No agents successfully evaluated - returning empty list")
-            return []
+            return [] if not analysis_mode else ([], analysis_data)
 
-        projected_prices, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
+        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
 
         # --- 2. Determine "Target Value Holding" & "Attractiveness" ---
         attractiveness_scores = defaultdict(lambda : defaultdict(float)) # {(agent_id, dimension): attractiveness_score}
@@ -718,6 +724,19 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 attractiveness_scores[dimension][agent_id] = final_attractiveness
                 if self.verbose:
                     print(f"DEBUG: Agent {agent_id}, Dim {dimension}: raw_attractiveness={attractiveness:.4f}, final_attractiveness={final_attractiveness:.4f}")
+
+                if analysis_mode:
+                    if agent_id not in analysis_data:
+                        analysis_data[agent_id] = {}
+                    analysis_data[agent_id][dimension] = {
+                        'projected_prices': projected_prices[dimension][agent_id],
+                        'projected_capital_shares': projected_capital_shares[dimension][agent_id],
+                        'p_target_effective': p_target_effective,
+                        'final_attractiveness': final_attractiveness,
+                        'pseudo_score': pseudo_score,
+                        'confidence_in_eval': confidence_in_eval,
+                        'p_current': p_current
+                    }
 
         # Normalize positive attractiveness scores for portfolio weighting
         target_portfolio_weights = defaultdict(lambda : defaultdict(float)) # {dimension: {agent_id: weight}}
@@ -796,19 +815,19 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             print(f"DEBUG: Uninvested capacity: {uninvested_capacity}")
             print(f"DEBUG: Total proposed investments by dimension: {dict(total_proposed_investments)}")
         
-        for dim in delta_value_target_map.keys():
-            if total_proposed_investments[dim] > 0:
-                investment_scale = self.config.get('invest_multiplier', 0.2) # Scale factor for investment aggressiveness
-                investment_scale_pot = min(total_portfolio_value_potential.get(dim, 0.0)*investment_scale / total_proposed_investments[dim], 1.0) if total_proposed_investments[dim] > 0 else 1.0
-                investment_scale_cap = min(uninvested_capacity.get(dim, 0.0)/(total_proposed_investments[dim]*investment_scale_pot), 1.0) if total_proposed_investments[dim]*investment_scale_pot > 0 else 1.0
-                final_investment_scale = investment_scale_pot * investment_scale_cap
+        # for dim in delta_value_target_map.keys():
+        #     if total_proposed_investments[dim] > 0:
+        #         investment_scale = self.config.get('invest_multiplier', 0.2) # Scale factor for investment aggressiveness
+        #         investment_scale_pot = min(total_portfolio_value_potential.get(dim, 0.0)*investment_scale / total_proposed_investments[dim], 1.0) if total_proposed_investments[dim] > 0 else 1.0
+        #         investment_scale_cap = min(uninvested_capacity.get(dim, 0.0)/(total_proposed_investments[dim]*investment_scale_pot), 1.0) if total_proposed_investments[dim]*investment_scale_pot > 0 else 1.0
+        #         final_investment_scale = investment_scale_pot * investment_scale_cap
                 
-                # print(f"DEBUG: Scaling for dim {dim}: base_scale={investment_scale}, scale_pot={investment_scale_pot:.4f}, scale_cap={investment_scale_cap:.4f}, final_scale={final_investment_scale:.4f}")
+        #         # print(f"DEBUG: Scaling for dim {dim}: base_scale={investment_scale}, scale_pot={investment_scale_pot:.4f}, scale_cap={investment_scale_cap:.4f}, final_scale={final_investment_scale:.4f}")
                 
-                for agent_id, cash_amount in delta_value_target_map[dim].items():
-                    scaled_cash_amount = cash_amount * final_investment_scale
-                    delta_value_target_map[dim][agent_id] = scaled_cash_amount
-                    # print(f"DEBUG: Final scaling - Dim {dim}, Agent {agent_id}: {cash_amount:.4f} -> {scaled_cash_amount:.4f}")
+        #         for agent_id, cash_amount in delta_value_target_map[dim].items():
+        #             scaled_cash_amount = cash_amount * final_investment_scale
+        #             delta_value_target_map[dim][agent_id] = scaled_cash_amount
+        #             # print(f"DEBUG: Final scaling - Dim {dim}, Agent {agent_id}: {cash_amount:.4f} -> {scaled_cash_amount:.4f}")
 
         # --- 6. Prepare list of (agent_id, dimension, cash_amount_to_trade, confidence) ---
         # The TrustMarket.process_investments will convert this cash_amount to shares
@@ -834,13 +853,16 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
+        if analysis_mode:
+            return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
 
-    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True):
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False):
         """Parallel batch evaluation wrapper for UserRep."""
         return super().evaluate_agents_batch(
             agent_ids=agent_ids,
             dimensions=dimensions,
             evaluation_round=evaluation_round,
-            use_comparative=use_comparative
+            use_comparative=use_comparative,
+            analysis_mode=analysis_mode
         )

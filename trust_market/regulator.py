@@ -16,7 +16,7 @@ from trust_market.auditor import BatchEvaluator
 class Regulator(InformationSource):
     """Regulator evaluates using profile analysis and conversation history."""
 
-    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=True, api_provider='gemini', openai_api_key=None):
+    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None):
         expertise_dimensions = [
             "Factual_Correctness", "Process_Reliability", "Value_Alignment",
             "Communication_Quality", "Problem_Resolution", "Safety_Security",
@@ -436,7 +436,7 @@ class Regulator(InformationSource):
         # return max(total_potential, self.config.get('min_portfolio_value_potential', 100.0))
         return total_potential
 
-    def _project_steady_state_prices(self, own_evaluations, market_prices, regulatory_capacity, dimension):
+    def _project_steady_state_prices(self, own_evaluations, market_prices, regulatory_capacity, dimension, include_source_capacity=False):
         """
         Project what market prices will be at steady state based on:
         1. Expected total capital deployment
@@ -446,10 +446,11 @@ class Regulator(InformationSource):
         # Step 1: Estimate total capital at steady state
         # Consider all potential investors and their capacity
         total_potential_capital = regulatory_capacity
-        # for source_id, _ in self.market.source_available_capacity.items():
-        #     # Each source's total capacity across all dimensions
-        #     source_capacity = self.market.source_available_capacity[source_id].get(dimension, 0)
-        #     total_potential_capital += source_capacity
+        if include_source_capacity:
+            for source_id, _ in self.market.source_available_capacity.items():
+                # Each source's total capacity across all dimensions
+                source_capacity = self.market.source_available_capacity[source_id].get(dimension, 0)
+                total_potential_capital += source_capacity
         
         # Add expected growth factor (new investors, increased allocations)
         # growth_factor = self.config.get('market_growth_factor', 1.5)
@@ -559,7 +560,7 @@ class Regulator(InformationSource):
 
         return projected_prices, projected_capital_shares, steady_state_capital / current_total_market_capital
 
-    def check_market_capacity(self, own_evaluations, market_prices, regulatory_capacity=0.0):
+    def check_market_capacity(self, own_evaluations, market_prices, regulatory_capacity=0.0, include_source_capacity=False):
         """
         Checks if the source has enough capacity to invest based on its evaluations and market prices.
         If not, it will print a warning and return False.
@@ -568,7 +569,7 @@ class Regulator(InformationSource):
         projected_prices = {} # {agent_id: projected_price}
         projected_capital_shares = {} # {agent_id: projected_capital_share}
         for dim in self.expertise_dimensions:
-            projected_prices_dim, projected_capital_shares_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, regulatory_capacity, dimension=dim)
+            projected_prices_dim, projected_capital_shares_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, regulatory_capacity, dimension=dim, include_source_capacity=include_source_capacity)
             capacity_flags[dim] = True # regulator always has capacity
             projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
             projected_capital_shares[dim] = projected_capital_shares_dim # Store projected capital shares for this dimension
@@ -614,88 +615,41 @@ class Regulator(InformationSource):
         """
         return super()._aggregate_confidences(new_confidences_list, base_aggregated_confidence, weight_for_new_info_block)
 
-    def decide_investments(self, evaluation_round=None, use_comparative=True):
+    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False):
         desirability_method = self.config.get('desirability_method', 'percentage_change')
         if self.verbose:
             print(f"\n=== DEBUG: {self.source_type.capitalize()} {self.source_id} deciding investments for round {evaluation_round} ===")
             print(f"DEBUG: Desirability method: {desirability_method}")
             print(f"DEBUG: Config values: {self.config}")
         investments_to_propose_cash_value = [] # List of (agent_id, dimension, cash_amount_to_trade, confidence)
+        analysis_data = defaultdict(lambda : defaultdict(dict)) if analysis_mode else None
+        candidate_agent_ids = list(self.agent_profiles.keys())
 
-        if not self.market:
+        own_evaluations = self.evaluate_agents_batch(
+            agent_ids=candidate_agent_ids,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative,
+            analysis_mode=analysis_mode
+        )
+
+        # If no evaluations, do nothing.
+        if not own_evaluations:
             if self.verbose:
-                print(f"Warning ({self.source_id}): No market access.")
-            return []
+                print(f"Warning ({self.source_id}): No agents successfully evaluated - returning empty list")
+            return [], {}
+
+        # --- 1. Evaluations & Price Targets ---
+        market_prices = self.market.get_market_prices(candidate_agent_ids=candidate_agent_ids, verbose=self.verbose)
+        if not market_prices:
+            if self.verbose: print("AUDITOR: No market prices available. Cannot determine desirability.")
+            return [], {}            
+
+        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices, regulatory_capacity=self.config.get('regulatory_capacity', 0.0))
 
         # --- Get accumulated user influence since last run ---
         # This is the core of the reactive balancing mechanism
         user_influence_by_dim = self.market.get_and_reset_cumulative_user_influence()
         desired_influence_ratio = self.config.get('regulator_influence_ratio', 0.5) # How much to match user influence
-
-        # DEBUG: Check available capacity
-        available_capacity = self.market.source_available_capacity.get(self.source_id, {})
-        if self.verbose:
-            print(f"DEBUG: Available capacity: {available_capacity}")
-
-        # --- 1. Evaluations & Price Targets ---
-        own_evaluations = {} # {agent_id: {dimension: (pseudo_score, confidence_in_eval)}}
-        market_prices = {}   # {agent_id: {dimension: P_current}}
-        
-        # Determine which agents this source will evaluate
-        candidate_agent_ids = []
-        if self.source_type == 'regulator' or self.source_type == 'auditor':
-            candidate_agent_ids = list(self.agent_profiles.keys())
-        elif self.source_type == 'user_representative': # Assuming UserRep uses this structure
-            candidate_agent_ids = list(self.agent_conversations.keys()) 
-        else: # Fallback for other types if they use this method
-            # This might need adjustment based on how other source types store their candidates
-            candidate_agent_ids = list(self.market.agent_amm_params.keys())
-
-        if self.verbose:
-            print(f"DEBUG: Found {len(candidate_agent_ids)} candidate agents: {candidate_agent_ids}")
-
-        if not candidate_agent_ids: 
-            if self.verbose:
-                print(f"DEBUG: No candidate agents to evaluate - returning empty list")
-            return []
-
-        for agent_id in candidate_agent_ids:
-            market_prices[agent_id] = {} # Initialize for the agent
-            # Ensure AMM is initialized and fetch current prices for all expertise dimensions
-            for dim_to_eval in self.expertise_dimensions:
-                self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
-                amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
-                price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
-                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5) # Fallback if T is 0
-                market_prices[agent_id][dim_to_eval] = price
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
-            
-            # Perform evaluation for this agent
-            if self.verbose:
-                print(f"DEBUG: Evaluating agent {agent_id}...")
-            eval_result = self.evaluate_agent( # This is the method within Regulator or Auditor or UserRep
-                agent_id, 
-                dimensions=self.expertise_dimensions, 
-                evaluation_round=evaluation_round, 
-                use_comparative=use_comparative 
-            )
-            if eval_result:
-                own_evaluations[agent_id] = eval_result
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id} evaluation results: {eval_result}")
-            else:
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id} evaluation returned empty/None")
-        
-        if self.verbose:
-            print(f"DEBUG: Total agents successfully evaluated: {len(own_evaluations)}")
-        if not own_evaluations: 
-            if self.verbose:
-                print(f"DEBUG: No agents successfully evaluated - returning empty list")
-            return []
-
-        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices, regulatory_capacity=self.config.get('regulatory_capacity', 0.0))
 
         # --- 2. Determine "Target Value Holding" & "Attractiveness" ---
         rebalance_aggressiveness = {}
@@ -827,6 +781,18 @@ class Regulator(InformationSource):
         if self.verbose:
             print(f"DEBUG: Delta value target map: {dict(delta_value_target_map)}")
 
+        if analysis_mode:
+            for dim in self.expertise_dimensions:
+                for agent_id, cash_amount in delta_value_target_map[dim].items():
+                    analysis_data[agent_id][dim] = {
+                        'cash_amount': cash_amount,
+                        'confidence': own_evaluations[agent_id][dim][1],
+                        'projected_price': projected_prices[dim][agent_id],
+                        'projected_capital_share': projected_capital_shares[dim][agent_id],
+                        'market_price': market_prices[agent_id][dim],
+                        'own_evaluation': own_evaluations[agent_id][dim][0],
+                    }
+
         # --- Prepare list of (agent_id, dimension, cash_amount_to_trade, confidence) ---
         # The TrustMarket.process_investments will convert this cash_amount to shares
         # and handle actual cash availability for buys.
@@ -855,13 +821,56 @@ class Regulator(InformationSource):
         
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
+        
+        if analysis_mode:
+            return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
 
+    def get_target_capital_distribution(self, evaluation_round=None, use_comparative=True):
+        """
+        Evaluates agents and returns the ideal capital distribution from the regulator's perspective.
+        This is a utility function for analysis and state initialization.
+        """
+        # This logic is mostly copied from the start of decide_investments
+        own_evaluations = {}
+        market_prices = {}
+        
+        candidate_agent_ids = list(self.agent_profiles.keys())
+        if not candidate_agent_ids:
+            return {}
+
+        for agent_id in candidate_agent_ids:
+            market_prices[agent_id] = {}
+            for dim_to_eval in self.expertise_dimensions:
+                self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
+                amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
+                price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
+                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
+                market_prices[agent_id][dim_to_eval] = price
+        
+        own_evaluations = self.evaluate_agents_batch(
+            candidate_agent_ids,
+            dimensions=self.expertise_dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )
+
+        if not own_evaluations:
+            return {}
+
+        # This is the key call
+        _projected_prices, projected_capital_shares, _capacity_flags = self.check_market_capacity(
+            own_evaluations, 
+            market_prices, 
+            regulatory_capacity=self.config.get('regulatory_capacity', 0.0),
+            include_source_capacity=True
+        )
+
+        return projected_capital_shares
+
     def _perform_base_evaluation(self, agent_id, dimensions, evaluation_round):
-        """Regulator's implementation of a non-comparative evaluation is not standard."""
-        # The regulator's main evaluation is comparative. A non-comparative score
-        # is not its primary function. Returning a neutral score.
-        # A more sophisticated implementation could perhaps run a single-agent evaluation.
+        """The Regulator's base evaluation can be a simple profile check."""
+        # For simplicity, we'll make this a neutral score, as comparison is key.
         return {dim: (0.5, 0.3) for dim in dimensions}
 
     def _compare_pair(self, aid, oid, dimensions):
@@ -901,21 +910,23 @@ class Regulator(InformationSource):
         confidences = self._extract_comparison_confidences(comparison_call_results, aid, oid)
         return (aid, oid, derived_scores, confidences)
 
-    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True):
-        """Regulator's batch evaluation delegates to the InformationSource base class."""
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False):
+        """
+        Regulator's batch evaluation delegates to the InformationSource base class.
+        This allows it to leverage the parallel, cached comparison framework.
+        """
         return super().evaluate_agents_batch(
             agent_ids=agent_ids,
             dimensions=dimensions,
             evaluation_round=evaluation_round,
-            use_comparative=use_comparative
+            use_comparative=use_comparative,
+            analysis_mode=analysis_mode
         )
 
-    # Helper to know if an agent can be compared via profile or convs
     def _agent_has_comparable_data(self, aid):
-        min_convs = self.config.get('min_conversations_required', 3)
-        prof = self.agent_profiles.get(aid)
-        convs = self.get_agent_conversations(aid)
-        if prof is not None and len(convs) >= min_convs:
-            return True
-        return False
+        """Checks if an agent has enough data for the Regulator's comparison."""
+        # This can be the same as the Auditor's check.
+        profile_exists = aid in self.agent_profiles
+        convs_exist = len(self.get_agent_conversations(aid)) >= self.config.get('min_conversations_required', 3)
+        return profile_exists or convs_exist
 
