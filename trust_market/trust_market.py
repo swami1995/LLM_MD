@@ -767,7 +767,7 @@ class TrustMarket:
         #           all_dims = list(self.dimensions)
         #           self.apply_dimension_correlations(agent_id, all_dims) # Over-applying maybe?
 
-    def get_market_prices(self, candidate_agent_ids=None, verbose=False):
+    def get_market_prices(self, candidate_agent_ids=None, dimensions=None, verbose=False):
         market_prices = {}   # {agent_id: {dimension: P_current}}
         
         # Determine which agents this source will evaluate
@@ -777,15 +777,16 @@ class TrustMarket:
         # --- 1A. Fetch market prices (still sequential, inexpensive) ---
         for agent_id in candidate_agent_ids:
             market_prices[agent_id] = {}
-            for dim_to_eval in self.expertise_dimensions:
-                self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
-                amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
+            for dim_to_eval in dimensions:
+                self.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
+                amm_p = self.agent_amm_params[agent_id][dim_to_eval]
                 price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
-                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
+                        self.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
                 market_prices[agent_id][dim_to_eval] = price
                 if verbose:
                     print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
 
+        return market_prices
 
     def get_agent_trust(self, agent_id: int) -> Dict[str, float]:
         """Get current trust scores for an agent, returning a copy."""

@@ -639,7 +639,7 @@ class Regulator(InformationSource):
             return [], {}
 
         # --- 1. Evaluations & Price Targets ---
-        market_prices = self.market.get_market_prices(candidate_agent_ids=candidate_agent_ids, verbose=self.verbose)
+        market_prices = self.market.get_market_prices(candidate_agent_ids=candidate_agent_ids, dimensions=self.expertise_dimensions, verbose=self.verbose)
         if not market_prices:
             if self.verbose: print("AUDITOR: No market prices available. Cannot determine desirability.")
             return [], {}            

@@ -487,7 +487,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         total_potential = {dim: total_value_of_holdings[dim] + total_available_cash[dim] for dim in self.market.source_available_capacity[self.source_id]}
         if self.verbose:
-            print(total_potential)
+            print(f"USER REP ({self.source_id}): Total potential: {total_potential}")
         # Ensure a minimum potential to avoid issues if source starts with no cash/shares
         # return max(total_potential, self.config.get('min_portfolio_value_potential', 100.0))
         return total_potential
@@ -629,16 +629,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             return [] if not analysis_mode else ([], analysis_data)
 
         # --- 1A. Fetch market prices ---
-        for agent_id in candidate_agent_ids:
-            market_prices[agent_id] = {}
-            for dim_to_eval in self.expertise_dimensions:
-                self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
-                amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
-                price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
-                        self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
-                market_prices[agent_id][dim_to_eval] = price
-                if self.verbose:
-                    print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
+        market_prices = self.market.get_market_prices(candidate_agent_ids=candidate_agent_ids, dimensions=self.expertise_dimensions, verbose=self.verbose)
 
         # --- 1B. Batch evaluate all agents ---
         own_evaluations = self.evaluate_agents_batch(

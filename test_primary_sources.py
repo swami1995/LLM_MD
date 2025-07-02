@@ -517,14 +517,17 @@ def load_and_recreate(saved_data_path: str):
     print("System state recreated successfully.")
 
     # NEW STEP: Set the initial market state to the regulator's target
-    set_market_state_from_regulator(trust_market_system)
+    # Path for caching the regulator's plan.
+    regulator_plan_path = os.path.join(os.path.dirname(saved_data_path), "regulator_plan.pkl")
+    set_market_state_from_regulator(trust_market_system, regulator_plan_path)
 
     return trust_market_system, customer_support_sim
 
-def set_market_state_from_regulator(trust_market_system):
+def set_market_state_from_regulator(trust_market_system, regulator_plan_path=None):
     """
     Initializes the market by setting source investments proportionally
     based on the regulator's ideal total capital distribution.
+    Optionally saves/loads the regulator's plan to avoid re-computation.
     """
     print("\n--- Initializing Market State to Regulator's Target Distribution ---")
     
@@ -541,18 +544,33 @@ def set_market_state_from_regulator(trust_market_system):
         print("Warning: No Regulator found in the system. Cannot set market state.")
         return
 
+    target_total_capital_dist = None
     # 1. Get the regulator's "grand plan" for total capital in each asset
-    target_total_capital_dist = regulator.get_target_capital_distribution(evaluation_round=1)
-    
+    if regulator_plan_path and os.path.exists(regulator_plan_path):
+        print(f"Loading regulator plan from {regulator_plan_path}...")
+        with open(regulator_plan_path, 'rb') as f:
+            target_total_capital_dist = pickle.load(f)
+        print("Regulator plan loaded.")
+    else:
+        print("Generating new regulator plan...")
+        target_total_capital_dist = regulator.get_target_capital_distribution(evaluation_round=1)
+        if regulator_plan_path and target_total_capital_dist:
+            print(f"Saving new regulator plan to {regulator_plan_path}...")
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(regulator_plan_path), exist_ok=True)
+            with open(regulator_plan_path, 'wb') as f:
+                pickle.dump(target_total_capital_dist, f)
+            print("Regulator plan saved.")
+
     if not target_total_capital_dist:
-        print("Warning: Regulator did not produce a target capital distribution.")
+        print("Warning: Regulator did not produce a target capital distribution. Cannot set market state.")
         return
         
     # 2. Calculate the proportional investments for each source
     investments = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
     all_agents_in_projection = set()
     for dim_capital in target_total_capital_dist.values():
-        all_agents_in_projection.update(int(aid) for aid in dim_capital.keys())
+        all_agents_in_projection.update(dim_capital.keys())
 
     for source in all_sources:
         if isinstance(source, Regulator):
@@ -564,7 +582,7 @@ def set_market_state_from_regulator(trust_market_system):
             if total_capital_dim > 0:
                 for agent_id in all_agents_in_projection:
                     agent_capital_in_dim = target_total_capital_dist.get(dim, {}).get(agent_id, 0)
-                    agent_frac = agent_capital_in_dim / total_capital_dim
+                    agent_frac = agent_capital_in_dim / total_capital_dim if total_capital_dim else 0
                     investments[source.source_id][agent_id][dim] = capacity * agent_frac
     # ipdb.set_trace()
     # 3. For each source, calculate the delta from current holdings and process the trades

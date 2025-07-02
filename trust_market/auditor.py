@@ -736,7 +736,8 @@ class AuditorWithProfileAnalysis(InformationSource):
         total_available_cash = self.market.source_available_capacity.get(self.source_id, {})
 
         total_potential = {dim: total_value_of_holdings[dim] + total_available_cash[dim] for dim in self.market.source_available_capacity[self.source_id]}
-        print(total_potential)
+        if self.verbose:
+            print(f"AUDITOR ({self.source_id}): Total potential: {total_potential}")
         # Ensure a minimum potential to avoid issues if source starts with no cash/shares
         # return max(total_potential, self.config.get('min_portfolio_value_potential', 100.0))
         return total_potential
@@ -898,15 +899,13 @@ class AuditorWithProfileAnalysis(InformationSource):
             use_comparative=use_comparative,
             analysis_mode=analysis_mode
         )
-        if own_evaluations:
-            self.own_evaluations_cache[evaluation_round] = own_evaluations
         
         if not own_evaluations:
             print("AUDITOR: No evaluations were generated. Cannot decide investments.")
             return [], {}
 
         # --- 2. Get Current Market State ---
-        market_prices = self.market.get_market_prices(candidate_agent_ids=all_agent_ids, verbose=self.verbose)
+        market_prices = self.market.get_market_prices(candidate_agent_ids=all_agent_ids, dimensions=self.expertise_dimensions, verbose=self.verbose)
         if not market_prices:
             if self.verbose: print("AUDITOR: No market prices available. Cannot determine desirability.")
             return [], {}
