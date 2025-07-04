@@ -295,6 +295,9 @@ class AuditorWithProfileAnalysis(InformationSource):
         # Track agent profiles received
         self.agent_profiles = {}
         self.verbose = verbose
+        
+        # Flag to track if detailed analysis is currently active
+        self._detailed_analysis_active = False
 
         # Configuration for hybrid approach and investment
         # These could be loaded from an external config file
@@ -875,7 +878,7 @@ class AuditorWithProfileAnalysis(InformationSource):
         """
         return super()._aggregate_confidences(new_confidences_list, base_aggregated_confidence, weight_for_new_info_block)
 
-    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False):
+    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         """
         The main decision-making loop for the auditor.
         1. Evaluates all agents to get up-to-date scores.
@@ -889,16 +892,27 @@ class AuditorWithProfileAnalysis(InformationSource):
         all_agent_ids = list(self.agent_profiles.keys())
         analysis_data = defaultdict(lambda : defaultdict(dict)) # {(agent_id, dimension): (pseudo_score, confidence_in_eval)}
         investments_to_propose_cash_value = [] # {(agent_id, dimension): cash_value_to_trade}
+
+        # Store detailed_analysis flag for use in _compare_pair
+        self._detailed_analysis_active = detailed_analysis
         
         # In analysis mode, we want to see the raw evaluation output.
         # Otherwise, we might use cached evaluations.
-        own_evaluations = self.evaluate_agents_batch(
+        evaluation_result = self.evaluate_agents_batch(
             agent_ids=all_agent_ids,
             dimensions=self.expertise_dimensions,
             evaluation_round=evaluation_round,
             use_comparative=use_comparative,
-            analysis_mode=analysis_mode
+            analysis_mode=analysis_mode,
+            detailed_analysis=detailed_analysis
         )
+                
+        # Handle different return formats based on detailed_analysis flag
+        if detailed_analysis:
+            own_evaluations, comparison_log = evaluation_result
+        else:
+            own_evaluations = evaluation_result
+            comparison_log = []
         
         if not own_evaluations:
             print("AUDITOR: No evaluations were generated. Cannot decide investments.")
@@ -1144,8 +1158,15 @@ class AuditorWithProfileAnalysis(InformationSource):
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
         
+        # --- CLEANUP ---
+        # Reset detailed analysis flag after evaluation
+        self._detailed_analysis_active = False
+        
         # --- RETURN ---
-        if analysis_mode:
+        if analysis_mode or detailed_analysis:
+            if detailed_analysis:
+                # Include comparison_log in analysis_data for detailed analysis
+                analysis_data['comparison_log'] = comparison_log
             return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
         
@@ -1178,7 +1199,11 @@ class AuditorWithProfileAnalysis(InformationSource):
         other_convs = self.get_agent_conversations(oid)
         min_convs = self.config.get('min_conversations_required', 3)
 
+        # Check if detailed analysis is requested
+        return_raw = self._detailed_analysis_active
+
         comparison_call_results = None
+        
         # Prefer profile–profile
         if agent_profile and other_profile:
             comparison_call_results = self.batch_evaluator.compare_agent_profiles(
@@ -1197,10 +1222,15 @@ class AuditorWithProfileAnalysis(InformationSource):
 
         derived_scores = self.batch_evaluator.get_agent_scores(comparison_call_results, aid, oid)
         confidences = super()._extract_comparison_confidences(comparison_call_results, aid, oid)
-        return (aid, oid, derived_scores, confidences)
+        
+        # Return 5-tuple if detailed analysis is active, 4-tuple otherwise
+        if return_raw:
+            return (aid, oid, derived_scores, confidences, comparison_call_results)
+        else:
+            return (aid, oid, derived_scores, confidences)
 
 
-    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False):
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         """
         Overrides the base InformationSource method to use the Auditor's specific
         evaluation logic (hybrid audit).
@@ -1210,7 +1240,8 @@ class AuditorWithProfileAnalysis(InformationSource):
             dimensions=dimensions,
             evaluation_round=evaluation_round,
             use_comparative=use_comparative,
-            analysis_mode=analysis_mode
+            analysis_mode=analysis_mode,
+            detailed_analysis=detailed_analysis
         )
 
 
@@ -1253,7 +1284,7 @@ class BatchEvaluator:
                     model=self.api_model_name,
                     contents=[prompt],
                     config=types.GenerateContentConfig(
-                        temperature=0.8
+                        temperature=0.2
                     )
                 )
                 if not response.candidates:
@@ -1298,7 +1329,7 @@ class BatchEvaluator:
                     "messages": [{"role": "user", "content": prompt}],
                 }
                 if not self.api_model_name.startswith('o'):
-                    completion_params["temperature"] = 0.8
+                    completion_params["temperature"] = 0.2
                 
                 response = self.openai_client.chat.completions.create(**completion_params)
 

@@ -87,6 +87,8 @@ class InformationSource:
         Useful for ensuring independent analysis runs.
         """
         self._invalidate_cache()
+        self.derived_agent_scores.clear()
+        self.derived_agent_confidences.clear()
 
     def _invalidate_cache(self, agent_id=None):
         """Invalidates cached evaluations."""
@@ -101,12 +103,13 @@ class InformationSource:
             self.conversation_audit_cache.clear()
             self.comparison_evaluation_cache.clear()
             self.hybrid_evaluation_cache.clear()
-            self.derived_agent_scores.clear()
-            self.derived_agent_confidences.clear()
             self.compared_pairs.clear()
             self.comparison_results_cache.clear()
             self.agent_comparison_counts.clear()
 
+            # self.derived_agent_scores.clear()
+            # self.derived_agent_confidences.clear()
+            
     def _perform_base_evaluation(self, agent_id, dimensions, evaluation_round):
         """
         Placeholder for subclasses to perform a non-comparative evaluation.
@@ -133,10 +136,12 @@ class InformationSource:
 
     def evaluate_agents_batch(self, agent_ids: List[int], dimensions: Optional[List[str]] = None, 
                               evaluation_round: Optional[int] = None, use_comparative: bool = True,
-                              analysis_mode: bool = False):
+                              analysis_mode: bool = False, detailed_analysis: bool = False):
         """Batch variant of evaluate_agent that pairs agents globally and evaluates in parallel.
 
-        Returns: {agent_id: {dimension: (score, confidence)}}
+        Returns: 
+          - if detailed_analysis is False: {agent_id: {dimension: (score, confidence)}}
+          - if detailed_analysis is True: ({agent_id: ...}, comparison_log_list)
         """
         if dimensions is None:
             dimensions = self.expertise_dimensions
@@ -147,6 +152,10 @@ class InformationSource:
                 print(f"INFO ({self.source_id}): New evaluation round {evaluation_round}. Clearing caches.")
             self._invalidate_cache() # Clears all caches
             self.last_evaluation_round = evaluation_round
+
+        # --- For detailed analysis mode ---
+        if detailed_analysis:
+            comparison_log = []
 
         # ------------------------------------------------------------
         # Phase 1 – base (non-comparative) evaluation
@@ -221,9 +230,24 @@ class InformationSource:
                     if result is None:
                         continue
                     
-                    aid, oid, derived_scores, confidences = result
+                    # Unpack result, which may or may not include raw_reasoning
+                    if len(result) == 4:
+                        aid, oid, derived_scores, confidences = result
+                        raw_results = "Not provided by source."
+                    else:
+                        aid, oid, derived_scores, confidences, raw_results = result
+
                     cache_key = (min(aid, oid), max(aid, oid), evaluation_round)
                     self.comparison_results_cache[cache_key] = (derived_scores, confidences)
+
+                    # Log for detailed analysis if enabled
+                    if detailed_analysis:
+                        comparison_log.append({
+                            'pair': (aid, oid),
+                            'derived_scores': derived_scores,
+                            'confidences': confidences,
+                            'raw_results': raw_results
+                        })
 
                     # Single-thread update of derived scores/confidences to avoid race conditions
                     self._update_agent_derived_scores(aid, derived_scores.get(aid, {}), dimensions, confidences.get(aid, {}))
@@ -288,9 +312,11 @@ class InformationSource:
                 
                 # Persist the final score for the next round
                 ### TODO :  We probably don't want to do this since we are already updating derived_agent_scores above.
-                if aid not in self.derived_agent_scores: self.derived_agent_scores[aid] = {}
-                self.derived_agent_scores[aid][dim] = final_evals[aid][dim][0]
+                # if aid not in self.derived_agent_scores: self.derived_agent_scores[aid] = {}
+                # self.derived_agent_scores[aid][dim] = final_evals[aid][dim][0]
 
+        if detailed_analysis:
+            return final_evals, comparison_log
         return final_evals
 
     def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
