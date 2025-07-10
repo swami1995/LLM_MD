@@ -286,8 +286,8 @@ class InformationSource:
                     avg_new_confidence = 0.3
                     avg_new_score = sum(new_scores) / len(new_scores)
                     if sum(new_confs) > 1e-6:
-                        # avg_new_score = sum(s*c for s,c in zip(new_scores, new_confs)) / sum(new_confs)
-                        avg_new_confidence = sum(new_confs) / len(new_confs)
+                        avg_new_score = sum(s*c for s,c in zip(new_scores, new_confs)) / sum(new_confs)
+                        # avg_new_confidence = sum(new_confs) / len(new_confs)
                     elif new_scores: # Fallback if all confidences are zero
                         avg_new_score = sum(new_scores) / len(new_scores)
 

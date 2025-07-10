@@ -27,8 +27,8 @@ class UserRepresentative(InformationSource):
             expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment"]
             confidence = {"Communication_Quality": 0.9, "Problem_Resolution": 0.8, "Value_Alignment": 0.7}
         else: # balanced
-            expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment", "Transparency"]
-            confidence = {"Communication_Quality": 0.8, "Problem_Resolution": 0.8, "Value_Alignment": 0.7, "Transparency": 0.7}
+            expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment", "Manipulation_Resistance"]
+            confidence = {"Communication_Quality": 0.8, "Problem_Resolution": 0.8, "Value_Alignment": 0.7, "Manipulation_Resistance": 0.7}
 
         super().__init__(source_id, "user_representative", expertise_dimensions,
                          confidence, market)
@@ -141,6 +141,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         # Cache for the single-agent evaluation method
         self.agent_evaluation_cache = {}
+        
+        # Flag to track if detailed analysis is currently active
+        self._detailed_analysis_active = False
 
         # Configuration specific to this Rep's strategy
         self.config = {
@@ -190,6 +193,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         if not (self._agent_has_comparable_data(aid) and self._agent_has_comparable_data(oid)):
             return None # Incomparable
 
+        # Check if detailed analysis is requested
+        return_raw = self._detailed_analysis_active
+
         comparison_results = self.evaluator.compare_agent_batches(
             self.get_agent_conversations(aid), aid,
             self.get_agent_conversations(oid), oid,
@@ -199,10 +205,14 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         if not comparison_results:
             return None
 
-        derived_scores = self.evaluator.get_agent_scores(comparison_results, aid, oid)
-        confidences = super()._extract_comparison_confidences(comparison_results, aid, oid)
+        derived_scores, confidences = self.evaluator.get_agent_scores_new(comparison_results, aid, oid)
+        # confidences = super()._extract_comparison_confidences(comparison_results, aid, oid)
         
-        return (aid, oid, derived_scores, confidences)
+        # Return 5-tuple if detailed analysis is active, 4-tuple otherwise
+        if return_raw:
+            return (aid, oid, derived_scores, confidences, comparison_results)
+        else:
+            return (aid, oid, derived_scores, confidences)
 
     # Override evaluate_agent to use the holistic comparison method
     def evaluate_agent(self, agent_id, dimensions=None, evaluation_round=None, use_comparative=True):
@@ -593,10 +603,13 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 
         return projected_prices, projected_capital_shares, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
 
-    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False):
+    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         desirability_method = self.config.get('desirability_method', 'percentage_change') # 'percentage_change' or 'log_ratio'
         if self.verbose:
             print(f"\n=== DEBUG: {self.source_type.capitalize()} {self.source_id} deciding investments for round {evaluation_round} ===")
+        
+        # Store detailed_analysis flag for use in _compare_pair
+        self._detailed_analysis_active = detailed_analysis
         
         investments_to_propose_cash_value = [] # List of (agent_id, dimension, cash_amount_to_trade, confidence)
         analysis_data = {} if analysis_mode else None
@@ -632,13 +645,21 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         market_prices = self.market.get_market_prices(candidate_agent_ids=candidate_agent_ids, dimensions=self.expertise_dimensions, verbose=self.verbose)
 
         # --- 1B. Batch evaluate all agents ---
-        own_evaluations = self.evaluate_agents_batch(
+        evaluation_result = self.evaluate_agents_batch(
             candidate_agent_ids,
             dimensions=self.expertise_dimensions,
             evaluation_round=evaluation_round,
             use_comparative=use_comparative,
-            analysis_mode=analysis_mode
+            analysis_mode=analysis_mode,
+            detailed_analysis=detailed_analysis
         )
+
+        # Handle different return formats based on detailed_analysis flag
+        if detailed_analysis:
+            own_evaluations, comparison_log = evaluation_result
+        else:
+            own_evaluations = evaluation_result
+            comparison_log = []
 
         if not own_evaluations:
             if self.verbose:
@@ -844,16 +865,26 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
-        if analysis_mode:
+            
+        # --- CLEANUP ---
+        # Reset detailed analysis flag after evaluation
+        self._detailed_analysis_active = False
+        
+        # --- RETURN ---
+        if analysis_mode or detailed_analysis:
+            if detailed_analysis:
+                # Include comparison_log in analysis_data for detailed analysis
+                analysis_data['comparison_log'] = comparison_log
             return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
 
-    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False):
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         """Parallel batch evaluation wrapper for UserRep."""
         return super().evaluate_agents_batch(
             agent_ids=agent_ids,
             dimensions=dimensions,
             evaluation_round=evaluation_round,
             use_comparative=use_comparative,
-            analysis_mode=analysis_mode
+            analysis_mode=analysis_mode,
+            detailed_analysis=detailed_analysis
         )

@@ -9,6 +9,7 @@ import numpy as np
 # To load saved simulation data
 from test_primary_sources import load_and_recreate
 from trust_market.info_sources import InformationSource
+from analyze_detailed_logs import analyze_and_print_results as print_analysis
 
 def run_detailed_source_evaluation(source: InformationSource, simulation_data: dict, n_runs: int):
     """
@@ -69,7 +70,7 @@ def run_detailed_source_evaluation(source: InformationSource, simulation_data: d
             'comparison_details': []
         }
 
-        agent_profiles_map = {p['id']: p for p in simulation_data['agent_profiles_used']} if 'id' in simulation_data['agent_profiles_used'][0] else {i: p for i, p in enumerate(simulation_data['agent_profiles_used'])}
+        agent_profiles_map = {p['id']: p for p in simulation_data['agent_profiles_used']} if simulation_data['agent_profiles_used'] and 'id' in simulation_data['agent_profiles_used'][0] else {i: p for i, p in enumerate(simulation_data['agent_profiles_used'])}
 
 
         # The `comparison_log` will be populated by the modified `evaluate_agents_batch`
@@ -79,7 +80,14 @@ def run_detailed_source_evaluation(source: InformationSource, simulation_data: d
                 try:
                     reasoning = [log_entry['raw_results'][dim]['reasoning'] for dim in log_entry['raw_results'].keys()]
                     raw_confidence = [log_entry['raw_results'][dim]['confidence'] for dim in log_entry['raw_results'].keys()]
-                    raw_winner = [log_entry['raw_results'][dim]['winner'] for dim in log_entry['raw_results'].keys()]
+                    if 'winner' in log_entry['raw_results']['Communication_Quality']:
+                        raw_winner = [log_entry['raw_results'][dim]['winner'] for dim in log_entry['raw_results'].keys()]
+                    else:
+                        raw_winner = None
+                    if 'rating' in log_entry['raw_results']['Communication_Quality']:
+                        raw_scores = [log_entry['raw_results'][dim]['rating'] for dim in log_entry['raw_results'].keys()]
+                    else:   
+                        raw_scores = None
                 except:
                     import ipdb; ipdb.set_trace()
                 run_summary['comparison_details'].append({
@@ -90,6 +98,7 @@ def run_detailed_source_evaluation(source: InformationSource, simulation_data: d
                     'confidences': log_entry['confidences'],
                     'raw_reasoning': reasoning,
                     'raw_confidence': raw_confidence,
+                    'raw_scores': raw_scores,
                     'raw_winner': raw_winner,
                 })
         
@@ -146,11 +155,14 @@ def main():
     output_filename = args.output_file
     if 'analysis_results.json' in output_filename: # Use a more descriptive default name
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_filename = f"outputs/detailed_analysis/{args.source_to_test}_analysis_{timestamp}.json"
+        output_filename = f"outputs/detailed_analysis/{args.source_to_test}_analysis_v2_ratingsconfidence_dimdescfixed_{timestamp}.json"
 
     save_detailed_analysis(detailed_data, output_filename)
-    
-    print(f"\nDetailed analysis complete. Results saved to {output_filename}")
+
+    text_output_path = os.path.splitext(output_filename)[0] + ".txt"
+
+    print_analysis(output_filename, text_output_path)
+    print(f"\nDetailed analysis complete. Results saved to {output_filename} and {text_output_path}")
 
 
 if __name__ == '__main__':

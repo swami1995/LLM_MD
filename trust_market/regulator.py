@@ -24,22 +24,21 @@ class Regulator(InformationSource):
             "Manipulation_Resistance"
         ]
 
-        # Confidence varies by dimension
-        confidence = {
-            "Factual_Correctness": 0.8, "Process_Reliability": 0.85, "Value_Alignment": 0.7,
-            "Communication_Quality": 0.75, "Problem_Resolution": 0.8, "Safety_Security": 0.8,
-            "Transparency": 0.75, "Adaptability": 0.7, "Trust_Calibration": 0.75,
-            "Manipulation_Resistance": 0.75
-        }
+        # Moderate confidence across all dimensions
+        confidence = {dim: 0.7 for dim in expertise_dimensions}
 
-        super().__init__(source_id, "auditor", expertise_dimensions,
+        super().__init__(source_id, "regulator", expertise_dimensions,
                          confidence, market)
 
-        self.audit_results = defaultdict(dict) # Stores {agent_id: {dimension: (rating, confidence)}}
-        self.agent_conversations = defaultdict(list) # Stores {agent_id: [conversation_history, ...]}
-        self.direct_feedback = defaultdict(lambda: defaultdict(list)) # Stores {user_id: {agent_id: {dimension: rating}}}
+        self.agent_profiles = {}
+        self.agent_conversations = defaultdict(list)
+        self.direct_feedback = defaultdict(lambda: defaultdict(list))
+        self.verbose = verbose
+        
+        # Flag to track if detailed analysis is currently active
+        self._detailed_analysis_active = False
 
-        # Initialize LLM-based analyzers
+        # Initialize LLM-based evaluator
         self.batch_evaluator = BatchEvaluator(
             api_key=api_key,
             api_model_name=api_model_name,
@@ -47,12 +46,7 @@ class Regulator(InformationSource):
             openai_api_key=openai_api_key
         )
 
-        # Track agent profiles received
-        self.agent_profiles = {}
-        self.verbose = verbose
-
         # Configuration for hybrid approach and investment
-        # These could be loaded from an external config file
         self.config = {
             'profile_weight': 0.4, # Weight for profile-based score
             'conversation_weight': 0.6, # Weight for conversation-based score
@@ -615,34 +609,47 @@ class Regulator(InformationSource):
         """
         return super()._aggregate_confidences(new_confidences_list, base_aggregated_confidence, weight_for_new_info_block)
 
-    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False):
+    def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         desirability_method = self.config.get('desirability_method', 'percentage_change')
         if self.verbose:
-            print(f"\n=== DEBUG: {self.source_type.capitalize()} {self.source_id} deciding investments for round {evaluation_round} ===")
-            print(f"DEBUG: Desirability method: {desirability_method}")
-            print(f"DEBUG: Config values: {self.config}")
-        investments_to_propose_cash_value = [] # List of (agent_id, dimension, cash_amount_to_trade, confidence)
-        analysis_data = defaultdict(lambda : defaultdict(dict)) if analysis_mode else None
-        candidate_agent_ids = list(self.agent_profiles.keys())
+            print(f"REGULATOR ({self.source_id}): Starting investment decisions for round {evaluation_round}.")
 
-        own_evaluations = self.evaluate_agents_batch(
-            agent_ids=candidate_agent_ids,
+        # Store detailed_analysis flag for use in _compare_pair
+        self._detailed_analysis_active = detailed_analysis
+
+        # --- 1. Evaluate Agents ---
+        # Get evaluations for all agents the regulator is aware of.
+        all_agent_ids = list(self.agent_profiles.keys())
+        analysis_data = defaultdict(lambda : defaultdict(dict)) # {(agent_id, dimension): (pseudo_score, confidence_in_eval)}
+        investments_to_propose_cash_value = [] # {(agent_id, dimension): cash_value_to_trade}
+
+        # In analysis mode, we want to see the raw evaluation output.
+        # Otherwise, we might use cached evaluations.
+        evaluation_result = self.evaluate_agents_batch(
+            agent_ids=all_agent_ids,
+            dimensions=self.expertise_dimensions,
             evaluation_round=evaluation_round,
             use_comparative=use_comparative,
-            analysis_mode=analysis_mode
+            analysis_mode=analysis_mode,
+            detailed_analysis=detailed_analysis
         )
-
-        # If no evaluations, do nothing.
+                
+        # Handle different return formats based on detailed_analysis flag
+        if detailed_analysis:
+            own_evaluations, comparison_log = evaluation_result
+        else:
+            own_evaluations = evaluation_result
+            comparison_log = []
+        
         if not own_evaluations:
-            if self.verbose:
-                print(f"Warning ({self.source_id}): No agents successfully evaluated - returning empty list")
+            print("REGULATOR: No evaluations were generated. Cannot decide investments.")
             return [], {}
 
-        # --- 1. Evaluations & Price Targets ---
-        market_prices = self.market.get_market_prices(candidate_agent_ids=candidate_agent_ids, dimensions=self.expertise_dimensions, verbose=self.verbose)
+        # --- 2. Get Current Market State ---
+        market_prices = self.market.get_market_prices(candidate_agent_ids=all_agent_ids, dimensions=self.expertise_dimensions, verbose=self.verbose)
         if not market_prices:
-            if self.verbose: print("AUDITOR: No market prices available. Cannot determine desirability.")
-            return [], {}            
+            if self.verbose: print("REGULATOR: No market prices available. Cannot determine desirability.")
+            return [], {}
 
         projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices, regulatory_capacity=self.config.get('regulatory_capacity', 0.0))
 
@@ -822,7 +829,11 @@ class Regulator(InformationSource):
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
         
-        if analysis_mode:
+        # --- RETURN ---
+        if analysis_mode or detailed_analysis:
+            if detailed_analysis:
+                # Include comparison_log in analysis_data for detailed analysis
+                analysis_data['comparison_log'] = comparison_log
             return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
 
@@ -874,7 +885,7 @@ class Regulator(InformationSource):
         return {dim: (0.5, 0.3) for dim in dimensions}
 
     def _compare_pair(self, aid, oid, dimensions):
-        """Regulator's implementation of a pairwise comparison."""
+        """Regulator's implementation of pairwise comparison using profiles and conversations."""
         agent_profile = self.agent_profiles.get(aid)
         other_profile = self.agent_profiles.get(oid)
         agent_convs = self.get_agent_conversations(aid)
@@ -883,6 +894,7 @@ class Regulator(InformationSource):
 
         can_compare_convs_aid = len(agent_convs) >= min_convs
         can_compare_convs_oid = len(other_convs) >= min_convs
+        return_raw = self._detailed_analysis_active
 
         comparison_call_results = None
         # Prefer hybrid comparison if all data is available
@@ -901,16 +913,21 @@ class Regulator(InformationSource):
                 agent_convs, aid, other_convs, oid, dimensions
             )
         else:
-            return None  # Incomparable
-
+            raise ValueError(f"Cannot compare agents {aid} and {oid} with the given data.")
+        
         if not comparison_call_results:
             return None
 
-        derived_scores = self.batch_evaluator.get_agent_scores(comparison_call_results, aid, oid)
-        confidences = self._extract_comparison_confidences(comparison_call_results, aid, oid)
-        return (aid, oid, derived_scores, confidences)
+        derived_scores, confidences = self.batch_evaluator.get_agent_scores_new(comparison_call_results, aid, oid)
+        # confidences = super()._extract_comparison_confidences(comparison_call_results, aid, oid)
+        
+        # Return 5-tuple if detailed analysis is active, 4-tuple otherwise
+        if return_raw:
+            return (aid, oid, derived_scores, confidences, comparison_call_results)
+        else:
+            return (aid, oid, derived_scores, confidences)
 
-    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False):
+    def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         """
         Regulator's batch evaluation delegates to the InformationSource base class.
         This allows it to leverage the parallel, cached comparison framework.
@@ -920,7 +937,8 @@ class Regulator(InformationSource):
             dimensions=dimensions,
             evaluation_round=evaluation_round,
             use_comparative=use_comparative,
-            analysis_mode=analysis_mode
+            analysis_mode=analysis_mode,
+            detailed_analysis=detailed_analysis
         )
 
     def _agent_has_comparable_data(self, aid):

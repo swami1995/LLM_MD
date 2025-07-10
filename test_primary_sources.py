@@ -631,8 +631,8 @@ def test_individual_sources():
     # Add arguments from info_main.py that are relevant
     parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3-8B-Instruct")
     parser.add_argument("--llm_source", type=str, choices=["local", "api"], default="api")
-    parser.add_argument("--max_dialog_rounds", type=int, default=1)
-    parser.add_argument("--num_steps", type=int, default=2, help="Number of simulation steps (evaluation rounds) to run. Default is 5.")
+    parser.add_argument("--max_dialog_rounds", type=int, default=5)
+    parser.add_argument("--num_steps", type=int, default=20, help="Number of simulation steps (evaluation rounds) to run. Default is 5.")
     parser.add_argument("--batch_size", type=int, default=3)
     parser.add_argument("--use_static_kb", action="store_true")
     parser.add_argument("--use_chat_api", action="store_true")
@@ -651,7 +651,7 @@ def test_individual_sources():
     # Define where to save the debug file
     output_dir = "run_logs/debug_runs"
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_filepath = os.path.join(output_dir, f"primary_source_test_{timestamp}.json")
+    output_filepath = os.path.join(output_dir, f"primary_source_test_rounds5_{timestamp}.json")
 
     # --- Run Step 1: Simulate and Save ---
     simulate_and_save(args, output_filepath)
