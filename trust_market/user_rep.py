@@ -10,6 +10,7 @@ from google import genai
 from google.genai import types
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 
 # --- Base UserRepresentative (Simplified Logic) ---
 class UserRepresentative(InformationSource):
@@ -126,8 +127,10 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     User representative that evaluates agents holistically across batches of conversations using LLM.
     """
 
-    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None):
+    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None, memory_length_n: int = 3):
         super().__init__(source_id, user_segment, representative_profile, market, verbose=verbose)
+        # ensure base InformationSource memory length set
+        self.memory_length_n = memory_length_n
 
         # Initialize holistic evaluator (using BatchEvaluator from auditor.py)
         self.api_model_name = api_model_name
@@ -150,6 +153,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'comparison_agents_per_target': 3, # Compare against fewer agents than auditor?
             'min_conversations_required': 3,   # Min conversations needed for comparison
             'new_evaluation_weight': 0.7,      # Weight for new comparative scores vs prior derived score
+            'memory_length_n': memory_length_n,              # How many past evaluations to remember
             'invest_multiplier': 0.2,         # Investment aggressiveness
             'divest_multiplier': 0.15,        # Divestment aggressiveness
             'precision_scale_factor': 0.6,     # Controls how fast confidence grows. Lower is slower.
@@ -187,8 +191,51 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     def _perform_base_evaluation(self, agent_id, dimensions, evaluation_round):
         """UserRep's non-comparative evaluation returns a neutral score, as its strength is comparison."""
         return {dim: (0.5, 0.3) for dim in dimensions}
+    
+    def _get_additional_context(self, agent_a_id, agent_b_id, evaluation_round):
+        """
+        UserRep context includes its own past evaluations and the regulator's last evaluation.
+        """
+        # 1. Get own past evaluations (from super)
+        own_context = super()._get_additional_context(agent_a_id, agent_b_id, evaluation_round)
 
-    def _compare_pair(self, aid, oid, dimensions) -> Optional[Tuple[int, int, dict, dict]]:
+        # 2. Get regulator evaluations for these agents
+        regulator_context = ""
+        try:
+            if self.market and 'regulator' in self.market.sources:
+                regulator = self.market.sources['regulator']
+                reg_evals = regulator._get_recent_pair_evaluations(agent_a_id, agent_b_id)[:1] # Only the most recent one
+                if reg_evals:
+                    eval_snippets = []
+                    for ev in reg_evals:
+                        rnd = ev.get('round', 'N/A')
+                        relative_round_str = ""
+                        if isinstance(rnd, int) and isinstance(evaluation_round, int):
+                            diff = evaluation_round - rnd
+                            if diff == 0: relative_round_str = " (this round)"
+                            elif diff == 1: relative_round_str = " (last round)"
+                            else: relative_round_str = f" ({diff} rounds ago)"
+
+                        reasoning = ev.get('reasoning', {})
+                        rating = ev.get('derived_scores', {}).get(agent_a_id, {})
+                        confidence = ev.get('confidence', 0)
+                        ratings_and_reasoning = {dim: {
+                            'rating': (rating.get(dim, 0.5) - 0.5) * self.batch_evaluator.rating_scale * 2,
+                            'reasoning': reasoning.get(dim, "N/A"),
+                            'confidence': confidence
+                        } for dim in rating.keys()}
+
+                        eval_snippets.append(f"Round {rnd}{relative_round_str}: {json.dumps(ratings_and_reasoning)}")
+                    
+                    if eval_snippets:
+                        regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, a trusted source, and has more information than you while evaluating (such as the agent prompts and profiles). However, the regulator evaluations are typically old (reflected by the round number) and may not reflect the current state of the agents. Consider these alongside your own analysis. And remember that the agent's behavior can change over time so trust your own judgment in case you feel the agent interactions/profile you see above are in contradiction with these evaluations:\n" + "\n".join(eval_snippets)
+        except Exception as e:
+            if self.verbose:
+                print(f"DEBUG ({self.source_id}): Could not fetch regulator context. Error: {e}")
+
+        return f"{own_context}{regulator_context}".strip()
+
+    def _compare_pair(self, aid, oid, dimensions, additional_context: str = "") -> Optional[Tuple[int, int, dict, dict]]:
         """UserRep's implementation of a pairwise comparison based on conversations."""
         if not (self._agent_has_comparable_data(aid) and self._agent_has_comparable_data(oid)):
             return None # Incomparable
@@ -199,8 +246,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         comparison_results = self.evaluator.compare_agent_batches(
             self.get_agent_conversations(aid), aid,
             self.get_agent_conversations(oid), oid,
-            dimensions
-        )
+            dimensions,
+            additional_context=additional_context)
 
         if not comparison_results:
             return None

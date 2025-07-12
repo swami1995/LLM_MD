@@ -204,7 +204,24 @@ if __name__ == "__main__":
     print(json.dumps(agent_profiles, indent=2))
 
 
-    # --- 1. Initialize Customer Support Simulation Model ---
+    # --- 1. Initialize Trust Market System ---
+    print("Initializing Trust Market System...")
+    trust_market_config = {
+        'dimensions': [ # Ensure these match the rating dimensions used in UserAgentSet
+                "Factual_Correctness", "Process_Reliability", "Value_Alignment",
+                "Communication_Quality", "Problem_Resolution", "Safety_Security",
+                "Transparency", "Adaptability", "Trust_Calibration", "Manipulation_Resistance"
+            ],
+        'trust_decay_rate': args.trust_decay_rate,
+        'rating_scale': args.rating_scale, # Pass rating scale to market system for normalization
+        'user_feedback_strength': 0.1, # Example: How much direct user ratings impact score
+        'comparative_feedback_strength': 0.05, # Example: How much comparative wins impact score
+         # Add other market config if needed (e.g., primary_sources)
+    }
+    trust_market_system = TrustMarketSystem(config=trust_market_config)
+
+
+    # --- 2. Initialize Customer Support Simulation Model ---
     # Note: We remove alpha, as trust updates are handled by the market
     print("Initializing Customer Support Simulation Model...")
     customer_support_sim = CustomerSupportModel(
@@ -226,23 +243,8 @@ if __name__ == "__main__":
         max_dialog_rounds=args.max_dialog_rounds,
         use_chat_api=args.use_chat_api,
         api_model_name=args.api_model_name,
+        market=trust_market_system.trust_market # Pass the market instance
     )
-
-    # --- 2. Initialize Trust Market System ---
-    print("Initializing Trust Market System...")
-    trust_market_config = {
-        'dimensions': [ # Ensure these match the rating dimensions used in UserAgentSet
-                "Factual_Correctness", "Process_Reliability", "Value_Alignment",
-                "Communication_Quality", "Problem_Resolution", "Safety_Security",
-                "Transparency", "Adaptability", "Trust_Calibration", "Manipulation_Resistance"
-            ],
-        'trust_decay_rate': args.trust_decay_rate,
-        'rating_scale': args.rating_scale, # Pass rating scale to market system for normalization
-        'user_feedback_strength': 0.1, # Example: How much direct user ratings impact score
-        'comparative_feedback_strength': 0.05, # Example: How much comparative wins impact score
-         # Add other market config if needed (e.g., primary_sources)
-    }
-    trust_market_system = TrustMarketSystem(config=trust_market_config)
 
     # --- 3. Pass Simulation Model to Trust Market System ---
     trust_market_system.register_simulation_module(customer_support_sim)

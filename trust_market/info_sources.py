@@ -3,12 +3,14 @@ from collections import defaultdict, Counter
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Set, Optional, Union, Any
+import re
+import json
 
 class InformationSource:
     """Base class for all information sources in the trust market."""
     
-    def __init__(self, source_id, source_type, expertise_dimensions, 
-                 evaluation_confidence=None, market=None):
+    def __init__(self, source_id, source_type, expertise_dimensions,
+                 evaluation_confidence=None, market=None, memory_length_n: int = 3):
         """
         Initialize an information source.
         
@@ -47,12 +49,87 @@ class InformationSource:
         self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
         self.comparison_results_cache = {}       # {(aid1,aid2,round): (derived_scores_dict, comparison_confidences_dict)}
         self.agent_comparison_counts = defaultdict(int)
+
+        # --- NEW: Persistent memory of this source's past pairwise evaluations ---
+        # key: (min_agent_id, max_agent_id) -> List[Dict] of evaluation summaries (most recent last)
+        self.pair_evaluation_memory: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
+        self.memory_length_n = max(1, memory_length_n)
+        self.rating_scale = 5.0
         
         # To be configured by subclasses
         self.verbose = False 
         self.config = {}
         self.batch_evaluator = None
+
+    # ------------------------------------------------------------------
+    # Persistent evaluation-memory helpers
+    # ------------------------------------------------------------------
+    def swap_agents_hybrid_case(self, text: str) -> str:
+        """
+        Swaps 'Agent A'/'agent a' with 'Agent B' and vice versa.
+
+        - The word 'agent' is treated case-insensitively (e.g., 'agent a').
+        - The designators 'A' and 'B' are treated case-sensitively.
+
+        Args:
+            text: The input string.
+
+        Returns:
+            The string with agents swapped according to the rules.
+        """
+        placeholder = "##AGENT_SWAP_PLACEHOLDER##"
+        
+        # Step 1: Replace 'Agent A' and 'agent a' with a placeholder.
+        # The pattern [aA] looks for either a lowercase or uppercase 'a'.
+        # The rest of the pattern ('gent A') is case-sensitive.
+        text_with_placeholder = re.sub(r"[aA]gent A", placeholder, text)
+        
+        # Step 2: Replace the strictly cased 'Agent B' with 'Agent A'.
+        # This is case-sensitive and will ignore 'agent b'.
+        text_swapped_b = text_with_placeholder.replace("Agent B", "Agent A")
+        
+        # Step 3: Replace the placeholder with 'Agent B'.
+        final_text = text_swapped_b.replace(placeholder, "Agent B")
+        
+        return final_text
     
+    def _store_pair_evaluation(self, agent_a_id: int, agent_b_id: int,
+                               derived_scores: Dict[int, Dict[str, float]],
+                               confidences: Dict[int, Dict[str, float]],
+                               raw_results: Any = None,
+                               evaluation_round: int = None):
+        """Save this source's evaluation of a pair of agents for future prompt context."""
+        key = (min(agent_a_id, agent_b_id), max(agent_a_id, agent_b_id))
+        confidences = {dim: raw_results[agent_a_id][dim]['confidence'] for dim in confidences[agent_a_id].keys()}
+        if agent_a_id > agent_b_id:
+            # replace all mentions of "Agent A" with "Agent B" and vice versa in a non case sensitive way
+            reasoning = {dim: self.swap_agents_hybrid_case(raw_results[dim]['reasoning']) for dim in derived_scores[agent_a_id].keys()}
+        else:
+            reasoning = {dim: raw_results[dim]['reasoning'] for dim in derived_scores[agent_a_id].keys()}
+        entry = {
+            'round': evaluation_round,
+            'timestamp': time.time(),
+            'derived_scores': derived_scores,
+            'confidences': confidences,
+            'reasoning': reasoning,
+            'raw_results': raw_results,
+        }
+        self.pair_evaluation_memory[key].append(entry)
+        # Keep only the most recent N
+        if len(self.pair_evaluation_memory[key]) > self.memory_length_n:
+            self.pair_evaluation_memory[key] = self.pair_evaluation_memory[key][-self.memory_length_n:]
+
+    def _get_recent_pair_evaluations(self, agent_a_id: int, agent_b_id: int) -> List[Dict[str, Any]]:
+        """Return up to the last N stored evaluations (most recent first)."""
+        key = (min(agent_a_id, agent_b_id), max(agent_a_id, agent_b_id))
+        # Return reversed copy so most recent first
+        # return list(reversed(self.pair_evaluation_memory.get(key, [])))
+        pair_eval_memory = list(reversed(self.pair_evaluation_memory.get(key, [])))
+        if len(pair_eval_memory) > 0 and agent_a_id > agent_b_id:
+            for eval in pair_eval_memory:
+                eval['reasoning'] = {dim: self.swap_agents_hybrid_case(eval['reasoning'][dim]) for dim in eval['reasoning'].keys()}
+        return pair_eval_memory
+
     def can_evaluate_dimension(self, dimension):
         """Check if this source can evaluate a given dimension."""
         return dimension in self.expertise_dimensions
@@ -117,7 +194,59 @@ class InformationSource:
         """
         return {dim: (0.5, 0.3) for dim in dimensions}
     
-    def _compare_pair(self, aid1, aid2, dimensions) -> Optional[Tuple[int, int, dict, dict]]:
+    def _get_additional_context(self, agent_a_id: int, agent_b_id: int, evaluation_round: int) -> str:
+        """
+        Constructs a string of additional context for an LLM prompt, based on
+        this source's past evaluations of a given pair.
+        This can be overridden by subclasses to add more context (e.g. from regulator).
+        """
+        recent_evals = self._get_recent_pair_evaluations(agent_a_id, agent_b_id)
+        if not recent_evals:
+            return ""
+
+        import json
+
+        snippets = []
+        for ev in recent_evals:
+            rnd = ev.get('round', 'N/A')
+            # Add relative round information
+            relative_round_str = ""
+            if isinstance(rnd, int) and isinstance(evaluation_round, int):
+                diff = evaluation_round - rnd
+                if diff == 0:
+                    relative_round_str = " (this round)"
+                elif diff == 1:
+                    relative_round_str = " (last round)"
+                else:
+                    relative_round_str = f" ({diff} rounds ago)"
+
+            reasoning = ev.get('reasoning', {})
+            if agent_a_id > agent_b_id:
+                reasoning = {dim: self.swap_agents_hybrid_case(reasoning[dim]) for dim in reasoning.keys()}
+            # Correctly get scores for agent_a_id
+            # Note: reasoning is already swapped if needed by _get_recent_pair_evaluations
+            scores_a = ev.get('derived_scores', {}).get(agent_a_id, {})
+            confidence = ev.get('confidence', 0)
+            ratings_and_reasoning = {
+                dim: {
+                    'rating': f"{(scores_a.get(dim, 0.0)-0.5)*self.batch_evaluator.rating_scale*2:.2f}",
+                    'reasoning': reasoning.get(dim, "N/A"),
+                    'confidence': confidence
+                } for dim in reasoning.keys()
+            }
+
+            summary_str = json.dumps(ratings_and_reasoning)
+            if len(summary_str) > 600:
+                summary_str = summary_str[:595] + "...}}"
+
+            snippets.append(f"{relative_round_str}: {summary_str}")
+
+        header = "For context, here are your past evaluations for this pair (most recent first).\n" \
+                 "Use these to inform your judgment, but be aware that agent behavior can change over time. Trust your own judgment in case you feel the agent interactions/profile you see above are in contradiction with these evaluations.\n"
+
+        return header + "\n".join(snippets)
+
+    def _compare_pair(self, aid1, aid2, dimensions, additional_context: str = "") -> Optional[Tuple[int, int, dict, dict]]:
         """
         Placeholder for subclasses to perform a pairwise comparison between two agents.
         Should return a tuple of (aid1, aid2, derived_scores, confidences) or None if incomparable.
@@ -133,7 +262,7 @@ class InformationSource:
     def _agent_has_comparable_data(self, aid):
         """Placeholder for subclasses to implement."""
         return False
-
+    
     def evaluate_agents_batch(self, agent_ids: List[int], dimensions: Optional[List[str]] = None, 
                               evaluation_round: Optional[int] = None, use_comparative: bool = True,
                               analysis_mode: bool = False, detailed_analysis: bool = False):
@@ -216,6 +345,7 @@ class InformationSource:
                 continue
             pairs_to_eval.append((a, b))
 
+
         # ------------------------------------------------------------
         # Phase 3 – parallel LLM comparison calls for those pairs
         # ------------------------------------------------------------
@@ -223,8 +353,12 @@ class InformationSource:
         accumulated_confs_for_target = defaultdict(lambda : defaultdict(list))
         
         if pairs_to_eval:
+            contexts_for_pairs = {
+                (a, b): self._get_additional_context(a, b, evaluation_round)
+                for a, b in pairs_to_eval
+            }
             with ThreadPoolExecutor(max_workers=min(8, len(pairs_to_eval))) as exe:
-                fut_to_pair = {exe.submit(self._compare_pair, a, b, dimensions): (a, b) for (a, b) in pairs_to_eval}
+                fut_to_pair = {exe.submit(self._compare_pair, a, b, dimensions, contexts_for_pairs.get((a,b), "")): (a, b) for (a, b) in pairs_to_eval}
                 for fut in as_completed(fut_to_pair):
                     result = fut.result()
                     if result is None:
@@ -239,6 +373,9 @@ class InformationSource:
 
                     cache_key = (min(aid, oid), max(aid, oid), evaluation_round)
                     self.comparison_results_cache[cache_key] = (derived_scores, confidences)
+
+                    # --- NEW: persist evaluation memory ---
+                    self._store_pair_evaluation(aid, oid, derived_scores, confidences, raw_results=raw_results, evaluation_round=evaluation_round)
 
                     # Log for detailed analysis if enabled
                     if detailed_analysis:

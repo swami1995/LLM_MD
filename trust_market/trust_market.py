@@ -34,7 +34,13 @@ class TrustMarket:
     (direct feedback, comparisons, source investments).
     """
     def __init__(self, config: Dict[str, Any]):
-        """Initialize the trust market."""
+        """
+        Initialize the trust market.
+
+        Parameters:
+        - config: Configuration dictionary
+        """
+        # --- Core Configuration ---
         self.config = config
         self.dimensions = config.get('dimensions', [ # Default dimensions if not provided
         "Factual_Correctness", "Process_Reliability", "Value_Alignment",
@@ -43,9 +49,9 @@ class TrustMarket:
         ])
         self.dimension_weights = config.get('dimension_weights', {dim: 1.0 for dim in self.dimensions})
 
-        # --- Core State ---
-        # Agent scores: agent_id -> dimension -> score (0.0 to 1.0)
-        self.agent_trust_scores = defaultdict(lambda: {dim: 0.5 for dim in self.dimensions})
+        # --- Data Storage ---
+        # Agent-specific data
+        self.agent_trust_scores = defaultdict(lambda: defaultdict(lambda: 0.5)) # agent_id -> dim -> score
         # Source investments: source_id -> agent_id -> dimension -> amount
         self.source_investments = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: 0.0)))
         # Source capacity: source_id -> dimension -> total capacity

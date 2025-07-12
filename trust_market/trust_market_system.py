@@ -28,6 +28,7 @@ class TrustMarketSystem:
 
         # --- Data Storage & Tracking ---
         self.information_sources = {} # Stores registered Auditor, UserRep, etc. instances
+        self.trust_market.information_sources = self.information_sources
         self.agent_profiles = {}      # Cache profiles from simulation module
         self.user_profiles = {}       # Cache profiles from simulation module
         self.conversation_histories = {} # Store conversation logs {conv_id: history_list}
@@ -263,11 +264,10 @@ class TrustMarketSystem:
         if self.simulation_module:
             print("  Running simulation batch...")
             # try:
-            simulation_output = self.simulation_module.multi_turn_dialog()
+            simulation_output = self.simulation_module.multi_turn_dialog(evaluation_round=self.evaluation_round)
             print("  Simulation batch finished. Processing output...")
             self._process_simulation_output(simulation_output)
             # except Exception as e:
-            #     print(f"  Error during simulation run or processing: {e}")
                 # Optionally add more robust error handling (e.g., skip round?)
         else:
             print("  Warning: No simulation module registered. Skipping simulation step.")
