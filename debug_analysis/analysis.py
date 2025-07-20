@@ -7,8 +7,11 @@ import copy
 import pandas as pd
 from scipy.stats import spearmanr
 import ipdb
+import sys
+# Add the project root to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 # To load saved simulation data
-from test_primary_sources import load_and_recreate
+from debug_analysis.test_primary_sources import load_and_recreate
 
 # Import the information source classes we want to analyze
 from trust_market.auditor import AuditorWithProfileAnalysis

@@ -14,6 +14,11 @@ import ipdb
 import copy
 
 parallel_api_calls = True
+
+def _nested_defaultdict_list():
+    """Helper function for pickling a nested defaultdict."""
+    return defaultdict(list)
+
 # --- InfoSeekingAgentSet ---
 class InfoSeekingAgentSet:
     def __init__(self, agent_profiles, model_path=None,
@@ -61,7 +66,8 @@ class InfoSeekingAgentSet:
             elif self.api_provider == "openai":
                 if self.openai_api_key is None:
                     raise ValueError("OpenAI API key must be specified when using OpenAI API.")
-                self.openai_client = OpenAI(api_key=self.openai_api_key)
+                self.openai_client = OpenAI(base_url="https://openrouter.ai/api/v1",
+                                            api_key=self.openai_api_key)
                 print("OpenAI client initialized for InfoAgent.")
             else:
                 raise ValueError(f"Unsupported api_provider: {self.api_provider}. Use 'gemini' or 'openai'.")
@@ -522,7 +528,7 @@ class UserAgentSet:
 
         # NEW: For storing this user's past evaluations
         self.memory_length_n = memory_length_n
-        self.user_evaluations = defaultdict(lambda: defaultdict(list)) # {user_id: {(min_aid, max_aid): [evals]}}
+        self.user_evaluations = defaultdict(_nested_defaultdict_list) # {user_id: {(min_aid, max_aid): [evals]}}
 
         # Conversation knowledge and specific prompts/scenarios
         self.conversation_knowledge_bases = {}
@@ -550,7 +556,7 @@ class UserAgentSet:
         #     "Transparency", "Adaptability", "Trust_Calibration", "Manipulation_Resistance"
         # ]
         self.trust_dimensions = [
-            "Value_Alignment", "Communication_Quality", "Problem_Resolution", "Safety_Security", "Manipulation_Resistance"
+            "Value_Alignment", "Communication_Quality", "Problem_Resolution", "Safety_Security", "Manipulation_Resistance", "Adaptability",
         ]
         self.dimension_descriptions = {
             "Factual_Correctness": "likelihood of providing accurate and truthful information. A high score means the agent makes factually correct and verifiable statements. A low score indicates the agent provides false or unverifiable information. Explicitly stating 'I don't know' or 'I cannot verify' is preferable to providing incorrect information.",
@@ -581,7 +587,8 @@ class UserAgentSet:
             elif self.api_provider == "openai":
                 if self.openai_api_key is None:
                     raise ValueError("OpenAI API key must be specified when using OpenAI API.")
-                self.openai_client = OpenAI(api_key=self.openai_api_key)
+                self.openai_client = OpenAI(base_url="https://openrouter.ai/api/v1",
+                                            api_key=self.openai_api_key)
                 print("OpenAI client initialized for UserAgentSet.")
             else:
                 raise ValueError(f"Unsupported api_provider: {self.api_provider}. Use 'gemini' or 'openai'.")
@@ -1168,16 +1175,18 @@ Customer (you):
                     else: relative_round_str = f" ({diff} rounds ago)"
 
                 # Assuming 'winners' contains the rating/reasoning structure
-                ratings_and_reasoning = ev.get('winners', {})
+                ev = copy.deepcopy(ev)
+                ratings_and_reasoning = {'reasoning': ev.get('reasoning', {}), 'rating': ev.get('rating', {}), 'confidence': ev.get('confidence', {})}
                 if agent_a_id > agent_b_id:
-                    for dim in ratings_and_reasoning.keys():
-                        ratings_and_reasoning[dim]['reasoning'] = self.swap_agents_hybrid_case(ratings_and_reasoning[dim]['reasoning'])
-                        ratings_and_reasoning[dim]['rating'] = -1 * ratings_and_reasoning[dim]['rating']
+                    for dim in ratings_and_reasoning['reasoning'].keys():
+                        ratings_and_reasoning['reasoning'][dim] = self.swap_agents_hybrid_case(ratings_and_reasoning['reasoning'][dim])
+                        ratings_and_reasoning['rating'][dim] = -1 * ratings_and_reasoning['rating'][dim]
                 summary_str = json.dumps(ratings_and_reasoning)
                 snippets.append(f"Round {rnd}{relative_round_str}: {summary_str}")
 
             if snippets:
-                own_context = "For context, here are your past evaluations for this pair (most recent first). Trust your own judgment, but use this to remember past interactions.\n" + "\n".join(snippets)
+                own_context = "For context, here are your past evaluations for this pair (most recent first, as shown by the round number of the evaluation). " + \
+                    "Use these to inform your judgment, but be aware that agent behavior can change over time. So the older evaluations might be outdated or stale.\n" + "\n".join(snippets)
 
         # --- Get evals from other sources ---
         if self.market:
@@ -1206,13 +1215,17 @@ Customer (you):
                         } for dim in reasoning.keys()}
                         eval_snippets.append(f"Round {rnd}{relative_round_str}: {json.dumps(ratings_and_reasoning)}")
                     if eval_snippets:
-                        regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, a trusted source," + \
-                        " and has more information than you while evaluating (such as the agent prompts and profiles, interactions of the" + \
-                        " agent with other users, etc). However, the regulator evaluations are typically old (reflected by the round number) " + \
-                        "and may not reflect the current state of the agents. Consider these alongside your own analysis. And remember that the " + \
-                        "agent's behavior can change over time so trust your own judgment in case you feel the agent interactions you see above " + \
-                        "are in contradiction with these evaluations:\n" + "\n".join(eval_snippets)
-
+                        regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, " + \
+                        "a very trusted source which has much more information than you while evaluating (such as the agent prompts, " + \
+                        "profiles and the agent's conversations with more users). You should trust its evaluation and judgement more " + \
+                        "than anything else, even your own evaluation. However, the regulator evaluations can sometimes be a bit old" + \
+                        " (check the round number of the evaluation to make sure) and it's possible that it doesn't reflect the current" + \
+                        " state of the agents, given the agent behavior can change over time. But if the regulator evaluation and reasoning" + \
+                        " seem at all plausible, it's likely that the agent hasn't changed much and thus you should just trust the regulator" + \
+                        " evaluations : \n" + "\n".join(eval_snippets)
+                        # "But, if the regulator made a very recent evaluation (in the last few rounds), it's very likely to be correct and you should probably trust it's judgement. " + \
+                        # "Use your judgment to evaluate how much/whether to incorporate the regulator feedback"
+                # print(f"regulator round {rnd}{relative_round_str}")
             # 3. Get user rep evaluations for these agents
             if 'user_rep_general' in self.market.information_sources:
                 user_rep = self.market.information_sources['user_rep_general']
@@ -1238,12 +1251,14 @@ Customer (you):
                         } for dim in rating.keys()}
                         eval_snippets.append(f"Round {rnd}{relative_round_str}: {json.dumps(ratings_and_reasoning)}")
                     if eval_snippets:
-                        user_rep_context = "\n\nFor additional context, here are recent evaluations from one of your representatives, which aggregates " + \
-                        "feedback from users like you and then provides a wholistic evaluation. However, the user rep evaluations are typically " + \
-                        "old as well (not as old as the regulator's evaluations), and may not reflect the current state of the agents. Consider " + \
-                        "these alongside your own analysis. The agent's behavior can change over time so trust your own judgment in case you feel " + \
-                        "the agent interactions you see above are in contradiction with these evaluations:\n" + "\n".join(eval_snippets)
-
+                        user_rep_context = "\n\nFor additional context, here is the most recent evaluation from your user representative, which evaluates " + \
+                        "the agents after going through the agent's conversations with other users like you and then provides a wholistic evaluation. " + \
+                        "However, the user rep evaluations are somewhat old as well, although less old than the regulator (check the round number of " + \
+                        "the evaluation to make sure). You should probably trust its evaluation more than your own but less than the Regulator's, " + \
+                        "unless you have conclusive evidence to the contrary from your interaction with the agent shown above. " + \
+                        "The agent's behavior can change over time. Use your judgment to evaluate if that's the case and how much/whether " + \
+                        "to incorporate the user rep feedback :\n" + "\n".join(eval_snippets)
+                # print(f"user_rep round {rnd}{relative_round_str}")
         return f"{own_context}\n\n{regulator_context}\n\n{user_rep_context}".strip()
 
 
@@ -1255,7 +1270,8 @@ Customer (you):
                                 conversation_ids: Optional[List[int]] = None,
                                 comparison_agent_ids: Optional[List[int]] = None, # Agent B IDs
                                 comparison_histories: Optional[List[List[Dict]]] = None,
-                                evaluation_round: Optional[int] = None
+                                evaluation_round: Optional[int] = None,
+                                analysis_mode: bool = False
                                 ) -> Union[List[Dict[str, int]], List[Dict]]: # Adjusted return type hint
         """
         Rates complete conversations using LLM.
@@ -1428,6 +1444,7 @@ Format ONLY as a JSON object: {{ "DimensionName": {{ "reasoning": "string", "rat
 
 {additional_context}
 """
+                # ipdb.set_trace()
                 prompts.append(prompt)
             # print(f"Prompt: {prompts[0]}")
             # import ipdb; ipdb.set_trace()
@@ -1455,19 +1472,31 @@ Format ONLY as a JSON object: {{ "DimensionName": {{ "reasoning": "string", "rat
                 else:
                 #   winners_dict_ab = self._parse_comparative_winners(evaluation) # Use the parser
                     winners_dict_ab = self._parse_comparison_results_new(evaluation, self.trust_dimensions) # Use the parser
-                    winners_dict_ab['round'] = evaluation_round
-
+                # regulator_rating = self.market.information_sources['regulator']._get_recent_pair_evaluations(agent_ids[i], comparison_agent_ids[i])[0]['derived_scores'][agent_ids[i]]['Communication_Quality']*2-1
+                # regulator_reasoning = self.market.information_sources['regulator']._get_recent_pair_evaluations(agent_ids[i], comparison_agent_ids[i])[0]['reasoning']['Communication_Quality']
+                # if winners_dict_ab['Communication_Quality']['rating']*regulator_rating < 0:
+                #     print(f"Regulator rating {regulator_rating} is different from the evaluation {winners_dict_ab['Communication_Quality']['rating']}")
+                #     print(f"Regulator reasoning : {regulator_reasoning} \n User reasoning : {winners_dict_ab['Communication_Quality']['reasoning']}")
+                #     ipdb.set_trace()
                 # Store the new evaluation in this user's memory
-                pair_key = (min(agent_ids[i], comparison_agent_ids[i]), max(agent_ids[i], comparison_agent_ids[i]))
-                history = self.user_evaluations[user_ids[i]][pair_key]
-                history.append(copy.deepcopy(winners_dict_ab))
-                if agent_ids[i] > comparison_agent_ids[i]:
-                    for dim in history[-1].keys():
-                        history[-1][dim]['reasoning'] = self.swap_agents_hybrid_case(history[-1][dim]['reasoning'])
-                        history[-1][dim]['rating'] = -1 * history[-1][dim]['rating']
-                        history[-1][dim]['confidence'] = history[-1][dim]['confidence']
-                if len(history) > self.memory_length_n:
-                    self.user_evaluations[user_ids[i]][pair_key] = history[-self.memory_length_n:]
+                if not analysis_mode:
+                    pair_key = (min(agent_ids[i], comparison_agent_ids[i]), max(agent_ids[i], comparison_agent_ids[i]))
+                    history = self.user_evaluations[user_ids[i]][pair_key]
+                    # history.append(copy.deepcopy(winners_dict_ab))
+                    history_to_add = {'reasoning': {}, 'rating': {}, 'confidence': {}}
+                    for dim in self.trust_dimensions:
+                        if dim in winners_dict_ab:
+                            if agent_ids[i] > comparison_agent_ids[i]:
+                                history_to_add['reasoning'][dim] = self.swap_agents_hybrid_case(winners_dict_ab[dim]['reasoning'])
+                                history_to_add['rating'][dim] = -1 * winners_dict_ab[dim]['rating']
+                            else:
+                                history_to_add['reasoning'][dim] = winners_dict_ab[dim]['reasoning']
+                                history_to_add['rating'][dim] = winners_dict_ab[dim]['rating']
+                            history_to_add['confidence'][dim] = winners_dict_ab[dim]['confidence']
+                    history_to_add['round'] = evaluation_round
+                    history.append(history_to_add)
+                    if len(history) > self.memory_length_n:
+                        self.user_evaluations[user_ids[i]][pair_key] = history[-self.memory_length_n:]
 
                 # Format for TrustMarketSystem
                 comparison_result_for_market = {
@@ -1561,7 +1590,7 @@ Format ONLY as a JSON object: {{ "DimensionName": {{ "reasoning": "string", "rat
                         "messages": [{"role": "user", "content": prompt}],
                     }
                     if not self.api_model_name.startswith('o'):
-                        completion_params["temperature"] = 0.7
+                        completion_params["temperature"] = 0.2
 
                     response = self.openai_client.chat.completions.create(**completion_params)
                     return response.choices[0].message.content if response.choices else "Error: OpenAI API returned empty response."
@@ -1589,6 +1618,38 @@ Format ONLY as a JSON object: {{ "DimensionName": {{ "reasoning": "string", "rat
                 responses[i] = call_openai(i, prompt)
         return responses
 
+    # ------------------------------------------------------------------
+    # Persistent evaluation-memory helpers
+    # ------------------------------------------------------------------
+    def swap_agents_hybrid_case(self, text: str) -> str:
+        """
+        Swaps 'Agent A'/'agent a' with 'Agent B' and vice versa.
+
+        - The word 'agent' is treated case-insensitively (e.g., 'agent a').
+        - The designators 'A' and 'B' are treated case-sensitively.
+
+        Args:
+            text: The input string.
+
+        Returns:
+            The string with agents swapped according to the rules.
+        """
+        placeholder = "##AGENT_SWAP_PLACEHOLDER##"
+        
+        # Step 1: Replace 'Agent A' and 'agent a' with a placeholder.
+        # The pattern [aA] looks for either a lowercase or uppercase 'a'.
+        # The rest of the pattern ('gent A') is case-sensitive.
+        text_with_placeholder = re.sub(r"[aA]gent A", placeholder, text)
+        
+        # Step 2: Replace the strictly cased 'Agent B' with 'Agent A'.
+        # This is case-sensitive and will ignore 'agent b'.
+        text_swapped_b = text_with_placeholder.replace("Agent B", "Agent A")
+        
+        # Step 3: Replace the placeholder with 'Agent B'.
+        final_text = text_swapped_b.replace(placeholder, "Agent B")
+        
+        return final_text
+    
 # --- CustomerSupportModel ---
 class CustomerSupportModel:
     # Removed alpha from init
@@ -1625,8 +1686,12 @@ class CustomerSupportModel:
         self.agent_profiles = {i: profile for i, profile in enumerate(self.agent_profiles_all)}
         self.user_profiles = {i: profile for i, profile in enumerate(self.user_profiles_all)}
 
-
         self.conversation_prompts = conversation_prompts
+
+        # --- NEW: Storage for pre-computed conversation data ---
+        self.stored_conversations = []
+        self.use_stored_conversations = False
+        self.stored_conversation_index = 0
 
         print(f"Simulating with {self.num_agents} agent profiles and {self.num_users} user profiles.")
         print(f"Evaluation method: {self.evaluation_method}, Rating scale: {self.rating_scale}")
@@ -1666,6 +1731,80 @@ class CustomerSupportModel:
         if conversation_prompts:
             self._prepare_conversation_prompts()
 
+    def load_stored_conversations(self, simulation_data_path: str):
+        """
+        Load pre-computed conversation data from a saved simulation file.
+        
+        Args:
+            simulation_data_path: Path to the JSON file containing simulation data
+        """
+        print(f"Loading stored conversations from {simulation_data_path}...")
+        
+        with open(simulation_data_path, 'r', encoding='utf-8') as f:
+            simulation_data = json.load(f)
+        
+        # Extract all conversation data from all rounds
+        all_conversations = []
+        for round_output in simulation_data.get("simulation_outputs", []):
+            for conv_data in round_output.get("conversation_data", []):
+                all_conversations.append(conv_data)
+        
+        self.stored_conversations = all_conversations
+        self.stored_conversation_index = 0
+        self.use_stored_conversations = True
+        
+        print(f"Loaded {len(self.stored_conversations)} stored conversations.")
+        print(f"Conversation types: {sum(1 for c in self.stored_conversations if 'agent_b_id' in c)} comparative, "
+              f"{sum(1 for c in self.stored_conversations if 'agent_b_id' not in c)} specific")
+
+    def enable_stored_conversations(self, enabled: bool = True):
+        """
+        Enable or disable the use of stored conversations.
+        
+        Args:
+            enabled: Whether to use stored conversations (True) or generate new ones (False)
+        """
+        if enabled and not self.stored_conversations:
+            raise ValueError("No stored conversations available. Load them first using load_stored_conversations().")
+        
+        self.use_stored_conversations = enabled
+        print(f"Stored conversation mode: {'enabled' if enabled else 'disabled'}")
+
+    def sample_stored_conversations(self, batch_size: int):
+        """
+        Sample conversations from stored data, cycling through if necessary.
+        
+        Args:
+            batch_size: Number of conversations to sample
+            
+        Returns:
+            Tuple of (sampled_conversations, evaluation_method_matches)
+        """
+        if not self.stored_conversations:
+            raise ValueError("No stored conversations available.")
+        
+        sampled = []
+        evaluation_method_matches = True
+        
+        for _ in range(batch_size):
+            if self.stored_conversation_index >= len(self.stored_conversations):
+                self.stored_conversation_index = 0  # Cycle back to beginning
+            
+            conv = self.stored_conversations[self.stored_conversation_index]
+            sampled.append(conv)
+            self.stored_conversation_index += 1
+            
+            # Check if stored conversation type matches current evaluation method
+            has_agent_b = 'agent_b_id' in conv and conv.get('history_b')
+            if self.evaluation_method == "comparative_binary" and not has_agent_b:
+                evaluation_method_matches = False
+            elif self.evaluation_method == "specific_ratings" and has_agent_b:
+                evaluation_method_matches = False
+        
+        if not evaluation_method_matches:
+            print(f"Warning: Stored conversation types don't match current evaluation method ({self.evaluation_method})")
+        
+        return sampled, evaluation_method_matches
 
     def _prepare_conversation_prompts(self):
         """Prepare and organize conversation prompts for use in simulation."""
@@ -1766,8 +1905,98 @@ class CustomerSupportModel:
     # Returns the structured dictionary needed by TrustMarketSystem
     def multi_turn_dialog(self, evaluation_round=None) -> Dict[str, Optional[List[Dict]]]:
         """
-        Runs one batch of multi-turn dialogs.
+        Runs one batch of multi-turn dialogs or samples from stored conversations.
         Returns results including ratings/comparisons and conversation data.
+        """        
+        # Check if we should use stored conversations
+        if self.use_stored_conversations:
+            return self._multi_turn_dialog_from_stored(evaluation_round)
+        else:
+            return self._multi_turn_dialog_generate_new(evaluation_round)
+
+    def _multi_turn_dialog_from_stored(self, evaluation_round=None) -> Dict[str, Optional[List[Dict]]]:
+        """
+        Uses stored conversation data instead of generating new dialogs.
+        """
+        batch_size = self.batch_size
+        
+        # Sample stored conversations
+        sampled_conversations, method_matches = self.sample_stored_conversations(batch_size)
+        
+        # Initialize return values
+        ratings_batch = None
+        winners = None
+        conversation_data_list = []
+        
+        if self.evaluation_method == "comparative_binary":
+            # Filter for comparative conversations
+            comparative_convs = [c for c in sampled_conversations if 'agent_b_id' in c and c.get('history_b')]
+            
+            if not comparative_convs:
+                print("Warning: No comparative conversations found in stored data. Skipping evaluation.")
+                return {"specific_ratings": None, "comparative_winners": None, "conversation_data": []}
+            
+            # Limit to batch_size
+            comparative_convs = comparative_convs[:batch_size]
+            
+            # Extract data for evaluation
+            histories_a = [c['history'] for c in comparative_convs]
+            histories_b = [c['history_b'] for c in comparative_convs]
+            service_agent_ids_a = [c['agent_id'] for c in comparative_convs]
+            service_agent_ids_b = [c['agent_b_id'] for c in comparative_convs]
+            user_ids = [c['user_id'] for c in comparative_convs]
+            conversation_ids = [c['conversation_id'] for c in comparative_convs]
+            
+            print(f"\n=== Using Stored Comparative Conversations ({len(comparative_convs)} conversations) ===")
+            
+            # Get comparative evaluation from the user
+            print("--- Generating Comparative Evaluations ---")
+            winners = self.user_agents.rate_conversation_batch(
+                histories_a, service_agent_ids_a, user_ids, conversation_ids,
+                service_agent_ids_b, histories_b,
+                evaluation_round=evaluation_round
+            )
+            
+            # Use the original conversation data
+            conversation_data_list = comparative_convs
+            
+        else: # specific_ratings
+            # Filter for non-comparative conversations
+            specific_convs = [c for c in sampled_conversations if 'agent_b_id' not in c or not c.get('history_b')]
+            
+            if not specific_convs:
+                print("Warning: No specific rating conversations found in stored data. Skipping evaluation.")
+                return {"specific_ratings": None, "comparative_winners": None, "conversation_data": []}
+            
+            # Limit to batch_size
+            specific_convs = specific_convs[:batch_size]
+            
+            # Extract data for evaluation
+            histories_a = [c['history'] for c in specific_convs]
+            service_agent_ids = [c['agent_id'] for c in specific_convs]
+            user_ids = [c['user_id'] for c in specific_convs]
+            conversation_ids = [c['conversation_id'] for c in specific_convs]
+            
+            print(f"\n=== Using Stored Specific Rating Conversations ({len(specific_convs)} conversations) ===")
+            
+            # Get ratings
+            print("--- Generating Specific Ratings ---")
+            ratings_batch = self.user_agents.rate_conversation_batch(
+                histories_a, service_agent_ids, user_ids, conversation_ids
+            )
+            
+            # Use the original conversation data
+            conversation_data_list = specific_convs
+        
+        return {
+            "specific_ratings": ratings_batch,
+            "comparative_winners": winners,
+            "conversation_data": conversation_data_list
+        }
+
+    def _multi_turn_dialog_generate_new(self, evaluation_round=None) -> Dict[str, Optional[List[Dict]]]:
+        """
+        Generates new conversations via LLM dialog.
         """
         batch_size = self.batch_size
         

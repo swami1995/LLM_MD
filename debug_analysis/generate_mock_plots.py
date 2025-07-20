@@ -3,7 +3,7 @@ import random
 import numpy as np
 from collections import defaultdict
 
-from trust_market.trust_market import TrustMarket
+from ..trust_market.trust_market import TrustMarket
 
 def create_realistic_mock_market(num_rounds=50, num_agents=4):
     """

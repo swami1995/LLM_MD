@@ -28,8 +28,8 @@ class UserRepresentative(InformationSource):
             expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment"]
             confidence = {"Communication_Quality": 0.9, "Problem_Resolution": 0.8, "Value_Alignment": 0.7}
         else: # balanced
-            expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment", "Manipulation_Resistance"]
-            confidence = {"Communication_Quality": 0.8, "Problem_Resolution": 0.8, "Value_Alignment": 0.7, "Manipulation_Resistance": 0.7}
+            expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment", "Manipulation_Resistance", "Adaptability", "Safety_Security"]
+            confidence = {"Communication_Quality": 0.8, "Problem_Resolution": 0.8, "Value_Alignment": 0.7, "Manipulation_Resistance": 0.7, "Adaptability": 0.7, "Safety_Security": 0.7}
 
         super().__init__(source_id, "user_representative", expertise_dimensions,
                          confidence, market)
@@ -171,7 +171,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'rank_correction_strength': 0.5,
             'market_growth_factor': 1.0,
             'quality_concentration_power': 2.0,
+            'max_eval_trials': 1,
         }
+        self.num_trials = self.config.get('max_eval_trials', 1)
         # Note: Uses segment_weights from base class for dimension importance
 
 
@@ -202,8 +204,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # 2. Get regulator evaluations for these agents
         regulator_context = ""
         try:
-            if self.market and 'regulator' in self.market.sources:
-                regulator = self.market.sources['regulator']
+            if self.market and 'regulator' in self.market.information_sources:
+                regulator = self.market.information_sources['regulator']
                 reg_evals = regulator._get_recent_pair_evaluations(agent_a_id, agent_b_id)[:1] # Only the most recent one
                 if reg_evals:
                     eval_snippets = []
@@ -228,7 +230,17 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                         eval_snippets.append(f"Round {rnd}{relative_round_str}: {json.dumps(ratings_and_reasoning)}")
                     
                     if eval_snippets:
-                        regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, a trusted source, and has more information than you while evaluating (such as the agent prompts and profiles). However, the regulator evaluations are typically old (reflected by the round number) and may not reflect the current state of the agents. Consider these alongside your own analysis. And remember that the agent's behavior can change over time so trust your own judgment in case you feel the agent interactions/profile you see above are in contradiction with these evaluations:\n" + "\n".join(eval_snippets)
+                        regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, " + \
+                        "a very trusted source which has much more information than you while evaluating (such as the agent prompts, " + \
+                        "profiles and its conversations with more users). You should probably trust its evaluation more than your own. " + \
+                        "However, the regulator evaluations are typically a bit old (check the round number of the evaluation to make sure) and may " + \
+                        "not reflect the current state of the agents, given that the agent's behavior can change over time. " + \
+                        "So if you have conclusive evidence that the regulator's evaluation and reasoning aren't reflective of the agent" + \
+                        " interactions you observed above and believe that the agent behavior has likely changed since the regulator's " + \
+                        "evaluation, feel free to override its evaluation. But, if the regulator's evaluation and reasoning " + \
+                        "seem at all plausible, it's likely that the agent hasn't changed much and thus you should just trust" + \
+                        " the regulator evaluations :\n" + "\n".join(eval_snippets)
+                        # . Based on that, use your judgment to evaluate how much/whether to incorporate the regulator's feedback
         except Exception as e:
             if self.verbose:
                 print(f"DEBUG ({self.source_id}): Could not fetch regulator context. Error: {e}")
@@ -256,10 +268,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # confidences = super()._extract_comparison_confidences(comparison_results, aid, oid)
         
         # Return 5-tuple if detailed analysis is active, 4-tuple otherwise
-        if return_raw:
-            return (aid, oid, derived_scores, confidences, comparison_results)
-        else:
-            return (aid, oid, derived_scores, confidences)
+        return (aid, oid, derived_scores, confidences, comparison_results)
+        # else:
+        #     return (aid, oid, derived_scores, confidences)
 
     # Override evaluate_agent to use the holistic comparison method
     def evaluate_agent(self, agent_id, dimensions=None, evaluation_round=None, use_comparative=True):
@@ -925,6 +936,47 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
 
+    def evaluate_and_get_pair_evaluation_memory(self, evaluation_round=None, use_comparative=True):
+        """
+        Returns the pair evaluation memory for the auditor.
+        """
+
+        own_evaluations = {}
+        market_prices = {}
+        
+        candidate_agent_ids = list(self.agent_conversations.keys()) 
+        if not candidate_agent_ids:
+            return {}
+
+        # for agent_id in candidate_agent_ids:
+        #     market_prices[agent_id] = {}
+        #     for dim_to_eval in self.expertise_dimensions:
+        #         self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
+        #         amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
+        #         price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
+        #                 self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
+        #         market_prices[agent_id][dim_to_eval] = price
+        
+        own_evaluations = self.evaluate_agents_batch(
+            candidate_agent_ids,
+            dimensions=self.expertise_dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )
+
+        if not own_evaluations:
+            return {}
+
+        # # This is the key call
+        # _projected_prices, projected_capital_shares, _capacity_flags = self.check_market_capacity(
+        #     own_evaluations, 
+        #     market_prices, 
+        #     regulatory_capacity=self.config.get('regulatory_capacity', 0.0),
+        #     include_source_capacity=True
+        # )
+
+        return self.pair_evaluation_memory
+    
     def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         """Parallel batch evaluation wrapper for UserRep."""
         return super().evaluate_agents_batch(

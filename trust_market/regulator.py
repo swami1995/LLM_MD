@@ -63,7 +63,7 @@ class Regulator(InformationSource):
             'divestment_threshold': 0.45, # Max score to consider divestment
             'invest_multiplier': 0.2, # Aggressiveness of investment
             'divest_multiplier': 0.15, # Aggressiveness of divestment
-            'base_score_persistence': 0.2, # Factor for persisting base scores during updates
+            'base_score_persistence': 0.0, # Factor for persisting base scores during updates
             'derived_score_update_weight': 0.3, # Weight for new scores when updating derived scores from a single comparison
             
             # Parameters for decide_investments that were using .get()
@@ -79,7 +79,12 @@ class Regulator(InformationSource):
             'max_confidence_history': 10,
             'max_realloc_per_dim': 100,
             'regulator_influence_ratio': 0.5, # Added for the new decide_investments method
+            'max_eval_trials': 1,
+            'var_threshold': 0.1,
+            'min_eval_trials': 1,
         }
+        self.num_trials = self.config.get('max_eval_trials', 1)
+        self.min_trials = self.config.get('min_eval_trials', 1)
 
     def add_agent_profile(self, agent_id: int, profile: Dict):
         """Stores agent profile data."""
@@ -837,6 +842,27 @@ class Regulator(InformationSource):
             return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
 
+
+    def evaluate_and_get_pair_evaluation_memory(self, evaluation_round=None, use_comparative=True):
+        """
+        Returns the pair evaluation memory for the auditor.
+        """      
+        candidate_agent_ids = list(self.agent_profiles.keys())
+        if not candidate_agent_ids:
+            return {}
+        
+        own_evaluations = self.evaluate_agents_batch(
+            candidate_agent_ids,
+            dimensions=self.expertise_dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )
+
+        if not own_evaluations:
+            return {}
+
+        return self.pair_evaluation_memory
+
     def get_target_capital_distribution(self, evaluation_round=None, use_comparative=True):
         """
         Evaluates agents and returns the ideal capital distribution from the regulator's perspective.
@@ -877,19 +903,21 @@ class Regulator(InformationSource):
             include_source_capacity=True
         )
 
-        return projected_capital_shares
+        return projected_capital_shares, self.pair_evaluation_memory
 
     def _perform_base_evaluation(self, agent_id, dimensions, evaluation_round):
         """The Regulator's base evaluation can be a simple profile check."""
         # For simplicity, we'll make this a neutral score, as comparison is key.
         return {dim: (0.5, 0.3) for dim in dimensions}
 
-    def _compare_pair(self, aid, oid, dimensions):
-        """Regulator's implementation of pairwise comparison using profiles and conversations."""
-        agent_profile = self.agent_profiles.get(aid)
-        other_profile = self.agent_profiles.get(oid)
-        agent_convs = self.get_agent_conversations(aid)
-        other_convs = self.get_agent_conversations(oid)
+    def _compare_pair(self, agent_a_id: int, agent_b_id: int, dimensions: List[str], additional_context: str = ""):
+        """
+        Compares two agents based on their profiles using the batch evaluator.
+        """
+        agent_profile = self.agent_profiles.get(agent_a_id)
+        other_profile = self.agent_profiles.get(agent_b_id)
+        agent_convs = self.get_agent_conversations(agent_a_id)
+        other_convs = self.get_agent_conversations(agent_b_id)
         min_convs = self.config.get('min_conversations_required', 3)
 
         can_compare_convs_aid = len(agent_convs) >= min_convs
@@ -900,32 +928,31 @@ class Regulator(InformationSource):
         # Prefer hybrid comparison if all data is available
         if agent_profile and other_profile and can_compare_convs_aid and can_compare_convs_oid:
             comparison_call_results = self.batch_evaluator.compare_agent_profiles_and_convs(
-                agent_profile, agent_convs, aid, other_profile, other_convs, oid, dimensions
+                agent_profile, agent_convs, agent_a_id, other_profile, other_convs, agent_b_id, dimensions, additional_context=additional_context
             )
         # Fallback to profile-only
         elif agent_profile and other_profile:
             comparison_call_results = self.batch_evaluator.compare_agent_profiles(
-                agent_profile, aid, other_profile, oid, dimensions
+                agent_profile, agent_a_id, other_profile, agent_b_id, dimensions, additional_context=additional_context
             )
         # Fallback to conversation-only
         elif can_compare_convs_aid and can_compare_convs_oid:
             comparison_call_results = self.batch_evaluator.compare_agent_batches(
-                agent_convs, aid, other_convs, oid, dimensions
+                agent_convs, agent_a_id, other_convs, agent_b_id, dimensions, additional_context=additional_context
             )
         else:
-            raise ValueError(f"Cannot compare agents {aid} and {oid} with the given data.")
+            raise ValueError(f"Cannot compare agents {agent_a_id} and {agent_b_id} with the given data.")
         
         if not comparison_call_results:
             return None
 
-        derived_scores, confidences = self.batch_evaluator.get_agent_scores_new(comparison_call_results, aid, oid)
+        derived_scores, confidences = self.batch_evaluator.get_agent_scores_new(comparison_call_results, agent_a_id, agent_b_id)
         # confidences = super()._extract_comparison_confidences(comparison_call_results, aid, oid)
         
         # Return 5-tuple if detailed analysis is active, 4-tuple otherwise
-        if return_raw:
-            return (aid, oid, derived_scores, confidences, comparison_call_results)
-        else:
-            return (aid, oid, derived_scores, confidences)
+        return (agent_a_id, agent_b_id, derived_scores, confidences, comparison_call_results)
+        # else:
+        #     return (aid, oid, derived_scores, confidences)
 
     def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         """

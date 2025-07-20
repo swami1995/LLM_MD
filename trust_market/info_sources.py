@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Set, Optional, Union, Any
 import re
 import json
+import ipdb
+import copy
 
 class InformationSource:
     """Base class for all information sources in the trust market."""
@@ -100,31 +102,35 @@ class InformationSource:
                                evaluation_round: int = None):
         """Save this source's evaluation of a pair of agents for future prompt context."""
         key = (min(agent_a_id, agent_b_id), max(agent_a_id, agent_b_id))
-        confidences = {dim: raw_results[agent_a_id][dim]['confidence'] for dim in confidences[agent_a_id].keys()}
+        
+        raw_confidences = {}
+        raw_confidences = {dim: r['confidence'] for dim, r in raw_results.items()}
+
         if agent_a_id > agent_b_id:
             # replace all mentions of "Agent A" with "Agent B" and vice versa in a non case sensitive way
-            reasoning = {dim: self.swap_agents_hybrid_case(raw_results[dim]['reasoning']) for dim in derived_scores[agent_a_id].keys()}
+            reasoning = {dim: self.swap_agents_hybrid_case(r['reasoning']) for dim, r in raw_results.items()}
         else:
-            reasoning = {dim: raw_results[dim]['reasoning'] for dim in derived_scores[agent_a_id].keys()}
+            reasoning = {dim: r['reasoning'] for dim, r in raw_results.items()}
+        
         entry = {
             'round': evaluation_round,
             'timestamp': time.time(),
             'derived_scores': derived_scores,
-            'confidences': confidences,
+            'confidences': raw_confidences,
             'reasoning': reasoning,
             'raw_results': raw_results,
         }
         self.pair_evaluation_memory[key].append(entry)
         # Keep only the most recent N
-        if len(self.pair_evaluation_memory[key]) > self.memory_length_n:
-            self.pair_evaluation_memory[key] = self.pair_evaluation_memory[key][-self.memory_length_n:]
+        # if len(self.pair_evaluation_memory[key]) > self.memory_length_n:
+            # self.pair_evaluation_memory[key] = self.pair_evaluation_memory[key][-self.memory_length_n:]
 
     def _get_recent_pair_evaluations(self, agent_a_id: int, agent_b_id: int) -> List[Dict[str, Any]]:
         """Return up to the last N stored evaluations (most recent first)."""
         key = (min(agent_a_id, agent_b_id), max(agent_a_id, agent_b_id))
         # Return reversed copy so most recent first
         # return list(reversed(self.pair_evaluation_memory.get(key, [])))
-        pair_eval_memory = list(reversed(self.pair_evaluation_memory.get(key, [])))
+        pair_eval_memory = copy.deepcopy(list(reversed(self.pair_evaluation_memory.get(key, [])[-self.memory_length_n:])))
         if len(pair_eval_memory) > 0 and agent_a_id > agent_b_id:
             for eval in pair_eval_memory:
                 eval['reasoning'] = {dim: self.swap_agents_hybrid_case(eval['reasoning'][dim]) for dim in eval['reasoning'].keys()}
@@ -236,13 +242,13 @@ class InformationSource:
             }
 
             summary_str = json.dumps(ratings_and_reasoning)
-            if len(summary_str) > 600:
-                summary_str = summary_str[:595] + "...}}"
+            # if len(summary_str) > 600:
+            #     summary_str = summary_str[:595] + "...}}"
 
-            snippets.append(f"{relative_round_str}: {summary_str}")
+            snippets.append(f"Round {rnd}{relative_round_str}: {summary_str}")
 
-        header = "For context, here are your past evaluations for this pair (most recent first).\n" \
-                 "Use these to inform your judgment, but be aware that agent behavior can change over time. Trust your own judgment in case you feel the agent interactions/profile you see above are in contradiction with these evaluations.\n"
+        header = "For context, here are your past evaluations for this pair (most recent first, as shown by the round number of the evaluation). \n" \
+                 "Use these to inform your judgment, but be aware that agent behavior can change over time. So the older evaluations might be outdated or stale. Trust your own judgment in case you feel the agent interactions/profile you see above are in contradiction with these evaluations.\n"
 
         return header + "\n".join(snippets)
 
@@ -345,12 +351,20 @@ class InformationSource:
                 continue
             pairs_to_eval.append((a, b))
 
+        
+        if self.num_trials > 1:# and not analysis_mode and not detailed_analysis:
+            pairs_to_eval_og = copy.deepcopy(pairs_to_eval)
+            pairs_to_eval_new = pairs_to_eval
+            for i in range(1, self.num_trials):
+                pairs_to_eval_new = [(b,a) for (a,b) in pairs_to_eval_new]
+                pairs_to_eval = pairs_to_eval + pairs_to_eval_new
 
         # ------------------------------------------------------------
         # Phase 3 – parallel LLM comparison calls for those pairs
         # ------------------------------------------------------------
         accumulated_scores_for_target = defaultdict(lambda : defaultdict(list))
         accumulated_confs_for_target = defaultdict(lambda : defaultdict(list))
+        prompts_for_pairs = {}
         
         if pairs_to_eval:
             contexts_for_pairs = {
@@ -359,8 +373,11 @@ class InformationSource:
             }
             with ThreadPoolExecutor(max_workers=min(8, len(pairs_to_eval))) as exe:
                 fut_to_pair = {exe.submit(self._compare_pair, a, b, dimensions, contexts_for_pairs.get((a,b), "")): (a, b) for (a, b) in pairs_to_eval}
+                # if True:
                 for fut in as_completed(fut_to_pair):
                     result = fut.result()
+                    # for a, b in pairs_to_eval:
+                    #     result = self._compare_pair(a, b, dimensions, contexts_for_pairs.get((a,b), ""))
                     if result is None:
                         continue
                     
@@ -373,9 +390,11 @@ class InformationSource:
 
                     cache_key = (min(aid, oid), max(aid, oid), evaluation_round)
                     self.comparison_results_cache[cache_key] = (derived_scores, confidences)
+                    prompts_for_pairs[str((aid, oid))] = raw_results['Communication_Quality'].get('prompt', "Not provided by source.")
 
                     # --- NEW: persist evaluation memory ---
-                    self._store_pair_evaluation(aid, oid, derived_scores, confidences, raw_results=raw_results, evaluation_round=evaluation_round)
+                    if True:#not analysis_mode and not detailed_analysis:
+                        self._store_pair_evaluation(aid, oid, derived_scores, confidences, raw_results=raw_results, evaluation_round=evaluation_round)
 
                     # Log for detailed analysis if enabled
                     if detailed_analysis:
@@ -402,6 +421,35 @@ class InformationSource:
                             accumulated_scores_for_target[oid][dim].append(derived_scores[oid][dim])
                             accumulated_confs_for_target[oid][dim].append(confidences.get(oid, {}).get(dim, 0.3))
 
+
+        if self.num_trials > 1:# and not analysis_mode and not detailed_analysis:
+            all_variances = []
+            for (a,b) in pairs_to_eval_og:
+                pair = (min(a, b), max(a, b))
+                evals_for_pair = self.pair_evaluation_memory.get(pair, [])[-self.num_trials:]
+                derived_scores_for_pair = [eval['derived_scores'][a] for eval in evals_for_pair]
+                for dim in derived_scores_for_pair[0].keys():
+                    scores_for_dim = [eval['derived_scores'][a][dim] for eval in evals_for_pair]
+                    variances = np.var(scores_for_dim)
+                    all_variances.append(variances)
+            avg_variance = np.mean(all_variances)
+            var_threshold = self.config.get('var_threshold', 0.1)
+            max_trials = self.config.get('max_eval_trials', 5)
+            min_trials = self.config.get('min_eval_trials', 2)
+            self.num_trials = max(min_trials, min(1, int(avg_variance / var_threshold))*max_trials)
+            print(f"INFO ({self.source_id}): Adjusting num_trials from {self.num_trials} to {self.num_trials} based on variance {avg_variance}.")
+                
+
+        # if analysis_mode or detailed_analysis:
+            # with open(f"outputs/detailed_analysis/memory_based/prompts_for_pairs_{self.source_id}_crossReg2.txt", "w") as f:
+            #     for pair, prompt in prompts_for_pairs.items():
+            #         # Replace literal '\n' in prompt with actual newlines before writing
+            #         if isinstance(prompt, str):
+            #             prompt_to_write = prompt.replace("\\n", "\n")
+            #         else:
+            #             prompt_to_write = str(prompt)
+            #         f.write(f"{pair}:\n{prompt_to_write}\n\n")
+            # ipdb.set_trace()
         # ------------------------------------------------------------
         # Phase 4 – aggregate final scores per agent
         # ------------------------------------------------------------
@@ -435,7 +483,7 @@ class InformationSource:
                     final_weight_new = effective_weight_new * (1 - persistence_factor)
 
                     current_score_for_update = self.derived_agent_scores.get(aid, {}).get(dim, 0.5)
-                    if analysis_mode:
+                    if True:#analysis_mode:
                         final_weight_new = 1.0
 
                     final_score = (final_weight_new * avg_new_score) + ((1 - final_weight_new) * current_score_for_update)

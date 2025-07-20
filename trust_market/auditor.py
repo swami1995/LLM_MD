@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple, Set, Optional, Union, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from google import genai
 from google.genai import types
-
+import ipdb
 
 # --- LLM-Powered Analyzer Classes (ProfileAnalyzer, BatchEvaluator) ---
 class ProfileAnalyzer:
@@ -24,7 +24,8 @@ class ProfileAnalyzer:
             self.genai_client = genai.Client(api_key=api_key)
         elif self.api_provider == 'openai' and openai_api_key:
             from openai import OpenAI
-            self.openai_client = OpenAI(api_key=openai_api_key)
+            self.openai_client = OpenAI(base_url="https://openrouter.ai/api/v1",
+                                        api_key=openai_api_key)
         
         # Map of dimension names to descriptions for LLM prompting
         self.dimension_descriptions = {
@@ -88,7 +89,7 @@ class ProfileAnalyzer:
                     "messages": [{"role": "user", "content": prompt}],
                 }
                 if not self.api_model_name.startswith('o'):
-                    completion_params["temperature"] = 0.8
+                    completion_params["temperature"] = 0.2
                 
                 response = self.openai_client.chat.completions.create(**completion_params)
 
@@ -332,7 +333,9 @@ class AuditorWithProfileAnalysis(InformationSource):
             'investment_scale': 0.2,
             'rank_correction_strength': 0.5,
             'max_confidence_history': 10,
+            'max_eval_trials': 1,
         }
+        self.num_trials = self.config.get('max_eval_trials', 1)
 
     def add_agent_profile(self, agent_id: int, profile: Dict):
         """Adds or updates an agent's profile."""
@@ -1204,8 +1207,8 @@ class AuditorWithProfileAnalysis(InformationSource):
         # 2. Get regulator evaluations for these agents
         regulator_context = ""
         try:
-            if self.market and 'regulator' in self.market.sources:
-                regulator = self.market.sources['regulator']
+            if self.market and 'regulator' in self.market.information_sources:
+                regulator = self.market.information_sources['regulator']
                 # This relies on the regulator having run its evaluation in the same round already.
                 reg_evals = regulator._get_recent_pair_evaluations(agent_a_id, agent_b_id)[:1] # Only the most recent one
                 if reg_evals:
@@ -1232,53 +1235,89 @@ class AuditorWithProfileAnalysis(InformationSource):
                         eval_snippets.append(f"Round {rnd}{relative_round_str}: {json.dumps(ratings_and_reasoning)}")
                     
                     if eval_snippets:
-                        regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, a trusted source, and has more information than you (such as the agent profiles and user-agent interactions/dialogue across a variety of users). However, the regulator evaluations are typically old (reflected by the round number) and may not reflect the current state of the agents. Consider these alongside your own analysis. And remember that the agent's behavior can change over time so trust your own judgment in case you feel the agent interactions/profile you see above are in contradiction with these evaluations:\n" + "\n".join(eval_snippets)
+                        regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, " + \
+                        "a very trusted source which has much more information than you while evaluating (such as the agent profiles " + \
+                        "and user-agent interactions/dialogue across a variety of users). You should probably trust its evaluation" + \
+                        " more than your own. However, the regulator evaluations are sometimes a bit old (check the round number of the " + \
+                        "evaluation to make sure) and may not reflect the current state of the agents, given the agent's behavior " + \
+                        "can change over time. So if you have conclusive evidence that the regulator's evaluation and reasoning " + \
+                        "aren't reflective of the agent profile you observed above and believe that the agent behavior has" + \
+                        " likely changed since the regulator's evaluation, feel free to override its evaluation. But, if the regulator " + \
+                        "evaluation and reasoning seem at all plausible, it's likely that the agent hasn't changed much and thus you " + \
+                        "should just trust the regulator evaluations :\n" + "\n".join(eval_snippets)
+                        # "Based on that, use your judgment to evaluate how much/whether to incorporate the regulator's feedback :\n" + "\n".join(eval_snippets)
         except Exception as e:
             if self.verbose:
                 print(f"DEBUG ({self.source_id}): Could not fetch regulator context. Error: {e}")
 
         return f"{own_context}{regulator_context}".strip()
 
-    def _compare_pair(self, aid, oid, dimensions, additional_context: str = ""):
-        """Auditor's implementation of a pairwise comparison."""
-        agent_profile = self.agent_profiles.get(aid)
-        other_profile = self.agent_profiles.get(oid)
-        agent_convs = self.get_agent_conversations(aid)
-        other_convs = self.get_agent_conversations(oid)
-        min_convs = self.config.get('min_conversations_required', 3)
+    def _compare_pair(self, agent_a_id: int, agent_b_id: int, dimensions: List[str], additional_context: str = ""):
+        """
+        Compares two agents based on their profiles using the batch evaluator.
+        """
+        agent_a_profile = self.agent_profiles.get(agent_a_id)
+        agent_b_profile = self.agent_profiles.get(agent_b_id)
 
-        # Check if detailed analysis is requested
-        return_raw = self._detailed_analysis_active
+        comparison_results = self.batch_evaluator.compare_agent_profiles(
+            agent_a_profile, agent_a_id,
+            agent_b_profile, agent_b_id,
+            dimensions=dimensions, additional_context=additional_context
+        )
 
-        comparison_call_results = None
-        
-        # Prefer profile–profile
-        if agent_profile and other_profile:
-            comparison_call_results = self.batch_evaluator.compare_agent_profiles(
-                agent_profile, aid, other_profile, oid, dimensions, additional_context=additional_context
-            )
-        # Else, use conversations if both sides have enough
-        elif len(agent_convs) >= min_convs and len(other_convs) >= min_convs:
-            comparison_call_results = self.batch_evaluator.compare_agent_batches(
-                agent_convs, aid, other_convs, oid, dimensions, additional_context=additional_context
-            )
-        else:
-            return None  # Incomparable
-
-        if not comparison_call_results:
+        if not comparison_results:
             return None
 
         # derived_scores = self.batch_evaluator.get_agent_scores(comparison_call_results, aid, oid)
         # confidences = super()._extract_comparison_confidences(comparison_call_results, aid, oid)
         # print(f"DEBUG: Comparison call results: {comparison_call_results}, Agent A: {aid}, Agent B: {oid}")
-        derived_scores, confidences = self.batch_evaluator.get_agent_scores_new(comparison_call_results, aid, oid)
+        derived_scores, confidences = self.batch_evaluator.get_agent_scores_new(comparison_results, agent_a_id, agent_b_id)
         
         # Return 5-tuple if detailed analysis is active, 4-tuple otherwise
-        if return_raw:
-            return (aid, oid, derived_scores, confidences, comparison_call_results)
-        else:
-            return (aid, oid, derived_scores, confidences)
+        return (agent_a_id, agent_b_id, derived_scores, confidences, comparison_results)
+        # else:
+        #     return (aid, oid, derived_scores, confidences)
 
+    def evaluate_and_get_pair_evaluation_memory(self, evaluation_round=None, use_comparative=True):
+        """
+        Returns the pair evaluation memory for the auditor.
+        """
+
+        own_evaluations = {}
+        market_prices = {}
+        
+        candidate_agent_ids = list(self.agent_profiles.keys())
+        if not candidate_agent_ids:
+            return {}
+
+        # for agent_id in candidate_agent_ids:
+        #     market_prices[agent_id] = {}
+        #     for dim_to_eval in self.expertise_dimensions:
+        #         self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
+        #         amm_p = self.market.agent_amm_params[agent_id][dim_to_eval]
+        #         price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
+        #                 self.market.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
+        #         market_prices[agent_id][dim_to_eval] = price
+        
+        own_evaluations = self.evaluate_agents_batch(
+            candidate_agent_ids,
+            dimensions=self.expertise_dimensions,
+            evaluation_round=evaluation_round,
+            use_comparative=use_comparative
+        )
+
+        if not own_evaluations:
+            return {}
+
+        # # This is the key call
+        # _projected_prices, projected_capital_shares, _capacity_flags = self.check_market_capacity(
+        #     own_evaluations, 
+        #     market_prices, 
+        #     regulatory_capacity=self.config.get('regulatory_capacity', 0.0),
+        #     include_source_capacity=True
+        # )
+
+        return self.pair_evaluation_memory
 
     def evaluate_agents_batch(self, agent_ids, dimensions=None, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         """
@@ -1309,7 +1348,8 @@ class BatchEvaluator:
             self.genai_client = genai.Client(api_key=api_key)
         elif self.api_provider == 'openai' and openai_api_key:
             from openai import OpenAI
-            self.openai_client = OpenAI(api_key=openai_api_key)
+            self.openai_client = OpenAI(base_url="https://openrouter.ai/api/v1",
+                                        api_key=openai_api_key)
 
         self.dimension_descriptions = ProfileAnalyzer().dimension_descriptions # Reuse descriptions
         self.evaluation_cache = {}
@@ -1401,15 +1441,20 @@ class BatchEvaluator:
         """Gets response from LLM or returns mock."""
         return self._get_api_response(prompt)
 
-    def _get_mock_response(self):
+    def _get_mock_response(self, prompt=None):
         """Mock comparison JSON response."""
         mock_result = {}
         for dim in self.dimension_descriptions.keys():
             winner = random.choice(["A", "B", "Tie"])
             confidence = random.randint(0, 5) if winner != "Tie" else 0
+            # mock_result[dim] = {
+            #     "winner": winner, "confidence": confidence,
+            #     "reasoning": f"Mock reasoning for comparing A vs B on {dim}."
+            # }
             mock_result[dim] = {
-                "winner": winner, "confidence": confidence,
-                "reasoning": f"Mock reasoning for comparing A vs B on {dim}."
+                "reasoning": f"Mock reasoning for comparing A vs B on {dim}.",
+                "rating": random.randint(-5, 5),
+                "confidence": random.randint(0, 5)
             }
         return json.dumps(mock_result, indent=2)
 
@@ -1561,10 +1606,13 @@ Format your response as a JSON object with this structure for each dimension:
   }},
   ...
 }}
+
+
 {additional_context}
 """
         response_text = self._get_llm_response(prompt)
         results = self._parse_comparison_results_new(response_text, dimensions)
+        results['Communication_Quality']['prompt'] = prompt
         self.evaluation_cache[cache_key] = results
         return results
 
@@ -1643,6 +1691,7 @@ Format your response as a JSON object with this structure for each dimension:
 }}"""
         response_text = self._get_llm_response(prompt)
         results = self._parse_comparison_results_new(response_text, dimensions)
+        results['Communication_Quality']['prompt'] = prompt
         self.evaluation_cache[cache_key] = results
         return results
 
@@ -1778,7 +1827,9 @@ Format your response as a JSON object with this structure:
 """
 
         response_text = self._get_llm_response(prompt)
+        # response_text = self._get_mock_response(prompt)
         results = self._parse_comparison_results_new(response_text, dimensions)
+        results['Communication_Quality']['prompt'] = prompt
         self.evaluation_cache[cache_key] = results
         return results
 
@@ -1810,7 +1861,6 @@ Format your response as a JSON object with this structure:
             agent_a_id: {dim: 0.5 for dim in comparison_results},
             agent_b_id: {dim: 0.5 for dim in comparison_results}
         }
-
 
         for dimension, result in comparison_results.items():
             winner = result["winner"]

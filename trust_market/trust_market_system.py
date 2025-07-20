@@ -245,85 +245,119 @@ class TrustMarketSystem:
 
         # Send comparison results to the market for score updates
         try:
-            self.trust_market.record_comparative_feedback(agent_a_id, agent_b_id, winners)
+            # Here, we need to pass the full comparison_data dict
+            self.trust_market.record_comparative_feedback(
+                agent_a_id,
+                agent_b_id,
+                winners=winners,
+                # Pass the raw reasoning and confidence if available
+                raw_comparison_details=comparison_data 
+            )
         except Exception as e:
             print(f"    Error recording comparative feedback in market for agents {agent_a_id} vs {agent_b_id}: {e}")
-
-        # **Note:** Not passing directly to UserRep. They analyze conversations.
-
+        
+        # Also pass the full comparison data to information sources that might use it
+        for source in self.information_sources.values():
+            if hasattr(source, 'add_comparison_feedback') and callable(source.add_comparison_feedback):
+                source.add_comparison_feedback(comparison_data)
 
     def run_evaluation_round(self):
-        """Run a single evaluation round: simulate, process feedback, evaluate sources."""
-        self.evaluation_round += 1
-        print(f"\n--- Starting Evaluation Round {self.evaluation_round} ---")
+        """
+        Runs one full evaluation round, including simulation, feedback processing,
+        and information source evaluations.
+        """
+        print(f"\n{'='*20} Starting Evaluation Round: {self.evaluation_round} {'='*20}")
 
-        # 1. Market Maintenance (e.g., decay)
-        self.trust_market.increment_evaluation_round() # Handles decay etc.
+        if not self.simulation_module:
+            print("Error: No simulation module registered. Cannot run evaluation round.")
+            return {}, [], {}
 
-        # 2. Run Simulation & Get Feedback/Data
-        if self.simulation_module:
-            print("  Running simulation batch...")
-            # try:
-            simulation_output = self.simulation_module.multi_turn_dialog(evaluation_round=self.evaluation_round)
-            print("  Simulation batch finished. Processing output...")
-            self._process_simulation_output(simulation_output)
-            # except Exception as e:
-                # Optionally add more robust error handling (e.g., skip round?)
-        else:
-            print("  Warning: No simulation module registered. Skipping simulation step.")
+        # 1. Run simulation to get user-agent interactions
+        print("\n--- 1. Running User-Agent Interaction Simulation ---")
+        simulation_output = self.simulation_module.multi_turn_dialog(
+            evaluation_round=self.evaluation_round
+        )
 
-        # 3. Run Information Source Evaluations
-        print("  Running information source evaluations...")
-        self._run_source_evaluations()
-        # ipdb.set_trace()  # Debugging breakpoint
-        # 4. Display Scores for the Round
+        # 2. Process simulation output
+        print("\n--- 2. Processing Simulation Output & User Feedback ---")
+        self._process_simulation_output(simulation_output)
+
+        # 3. Trigger information source evaluations
+        print("\n--- 3. Running Information Source Evaluations ---")
+        detailed_source_evals = self._run_source_evaluations()
+
+        # 4. Apply any pending spread investments from sources with investment horizons
+        self.trust_market.apply_spread_investments()
+        
+        # 5. Apply trust decay at the end of the round
+        # self.trust_market.apply_trust_decay().
+
         self.display_current_scores()
-        print(f"--- Finished Evaluation Round {self.evaluation_round} ---")
 
+        # 6. Increment evaluation round counter
+        self.trust_market.increment_evaluation_round()
+        self.evaluation_round += 1
+
+        print(f"\n{'='*20} Finished Evaluation Round: {self.evaluation_round - 1} {'='*20}")
+        # Return the detailed evaluations and simulation output to be saved by the main loop
+        return detailed_source_evals, simulation_output.get("comparative_winners", []), simulation_output
+
+    def run_evaluation_rounds(self, num_rounds):
+        """
+        Run the simulation for a specified number of evaluation rounds.
+        """
+        all_simulation_outputs = []
+        all_detailed_evaluations = []
+        for i in range(num_rounds):
+            detailed_source_evals, user_evals, simulation_output = self.run_evaluation_round()
+            all_detailed_evaluations.append({
+                "round": self.evaluation_round - 1, # Current round (after increment)
+                "source_evaluations": detailed_source_evals,
+                "user_evaluations": user_evals
+            })
+            # Store the complete simulation output
+            simulation_output_with_round = simulation_output.copy() if simulation_output else {}
+            simulation_output_with_round["round"] = self.evaluation_round - 1
+            all_simulation_outputs.append(simulation_output_with_round)
+        return all_simulation_outputs, all_detailed_evaluations
 
     def _process_simulation_output(self, output: Dict):
-        """Processes the dictionary returned by simulation_module.multi_turn_dialog."""
-        if not output:
-            print("  No output received from simulation module.")
-            return
-        # ipdb.set_trace()  # Debugging breakpoint
-        # Process specific ratings
-        if output.get("specific_ratings"):
-            ratings_batch = output["specific_ratings"]
-            # Map conversation data for easy lookup by index (assuming order matches)
-            conv_data_map = {i: data for i, data in enumerate(output.get("conversation_data", []))}
-            print(f"  Processing {len(ratings_batch)} specific ratings...")
+        """
+        Internal helper to process the output from the simulation module.
+        It handles recording conversations and processing both specific and
+        comparative feedback.
+        """
+        # --- Record all conversation data first ---
+        conversation_data = output.get("conversation_data", [])
+        if not conversation_data:
+            print("  No conversation data produced in this round.")
+        
+        is_comparative = "comparative_winners" in output and output["comparative_winners"] is not None
+        for conv_data in conversation_data:
+            self.record_conversation_data(conv_data, comparative=is_comparative)
 
-            for i, ratings in enumerate(ratings_batch):
-                if i in conv_data_map:
-                    conv_info = conv_data_map[i]
-                    self.process_user_feedback(
-                        user_id=conv_info["user_id"],
-                        agent_id=conv_info["agent_id"],
-                        ratings=ratings,
-                        user_profile_idx=conv_info.get("user_profile_idx")
-                    )
+        # --- Process specific ratings if present ---
+        specific_ratings_batch = output.get("specific_ratings")
+        if specific_ratings_batch:
+            # The structure is: list of dicts, where each dict is {dim: rating}
+            # We need to associate each rating dict with the correct user and agent
+            for i, ratings in enumerate(specific_ratings_batch):
+                # We assume the order matches the conversation_data list
+                if i < len(conversation_data):
+                    user_id = conversation_data[i]['user_id']
+                    agent_id = conversation_data[i]['agent_id']
+                    user_profile_idx = conversation_data[i]['user_profile_idx']
+                    self.process_user_feedback(user_id, agent_id, ratings, user_profile_idx)
                 else:
-                    print(f"  Warning: Missing conversation data for specific rating index {i}.")
+                    print(f"  Warning: Mismatch between ratings batch size and conversation data size.")
 
-        # Process comparative winners
-        comparative = False
-        if output.get("comparative_winners"):
-            comparisons = output["comparative_winners"]
-            print(f"  Processing {len(comparisons)} comparative results...")
-            # self.debug_print_comparisons(output)
-            comparative = True
-            for comparison in comparisons:
-                self.process_comparative_feedback(comparison)
-
-        # Record conversation data (distributes to info sources)
-        if output.get("conversation_data"):
-            conv_data_list = output["conversation_data"]
-            print(f"  Recording {len(conv_data_list)} conversations...")
-            for conv_data in conv_data_list:
-                self.record_conversation_data(conv_data, comparative=comparative)
-
-        print("  Finished processing simulation output.")
+        # --- Process comparative feedback if present ---
+        comparative_winners_batch = output.get("comparative_winners")
+        if comparative_winners_batch:
+            # The structure is: list of dicts with all comparison details
+            # self.debug_print_comparisons(comparative_winners_batch) # Optional debug print
+            for comparison_data in comparative_winners_batch:
+                self.process_comparative_feedback(comparison_data)
 
     def debug_print_comparisons(self, output):
         comparisons = output.get("comparative_winners", [])
@@ -352,58 +386,45 @@ class TrustMarketSystem:
 
 
     def _run_source_evaluations(self):
-        """Run evaluations for information sources due in this round."""
-        evaluated_sources = []
+        """
+        Triggers evaluations for all registered information sources based on
+        their specified frequency.
+        """
+        detailed_evaluations = {}
         for source_id, source in self.information_sources.items():
-            frequency = self.source_evaluation_frequency.get(source_id, 1)
-            last_evaluated = self.source_last_evaluated.get(source_id, 0) # Use .get for safety
+            # Check if it's time for this source to evaluate
+            eval_frequency = self.source_evaluation_frequency.get(source_id, 1)
+            if (self.evaluation_round+1) % eval_frequency == 0:
+                print(f"\n>>> Evaluating source: {source_id} (Round {self.evaluation_round})")
+                try:
+                    # Get investment decisions from the source
+                    # The source's `decide_investments` should return a list of investment tuples
+                    # And optionally, detailed analysis data if requested
+                    investments, analysis_data = source.decide_investments(
+                        evaluation_round=self.evaluation_round,
+                        analysis_mode=True, # Ensure analysis data is generated
+                        detailed_analysis=True # Trigger detailed logging
+                    )
+                    detailed_evaluations[source_id] = analysis_data
+                    
+                    if investments:
+                        print(f"  Source {source_id} proposed {len(investments)} investments.")
+                        # Process these investments in the trust market
+                        self.trust_market.process_investments(source_id, investments)
+                    else:
+                        print(f"  Source {source_id} proposed no investments.")
 
-            # Check if it's time to evaluate
-            if (self.evaluation_round - last_evaluated) >= frequency:
-                print(f"    Evaluating source: {source_id} (Last eval: {last_evaluated}, Freq: {frequency})")
-                # try:
-                # Let the source decide investments based on its internal logic/data
-                investments = source.decide_investments(evaluation_round=self.evaluation_round)
-
-                if investments:
-                    print(f"      Source {source_id} decided {len(investments)} investments/divestments.")
-                    # Process the investments in the market
-                    self.trust_market.process_investments(source_id, investments)
-                else:
-                    print(f"      Source {source_id} made no investment decisions this round.")
-
-                # Record that this source was evaluated in this round
-                self.source_last_evaluated[source_id] = self.evaluation_round
-                evaluated_sources.append(source_id)
-
-                # except Exception as e:
-                #     print(f"    Error evaluating source {source_id}: {str(e)}")
-                #     # Optionally skip updating last_evaluated on error?
-        
-        # After all sources due this round have submitted their plans, apply one round of spread investments
-        self.trust_market.apply_spread_investments()
-
-        if not evaluated_sources:
-            print("    No information sources due for evaluation this round.")
-        else:
-            print(f"    Evaluated sources: {', '.join(evaluated_sources)}")
-
-    def run_evaluation_rounds(self, num_rounds):
-        """
-        Run multiple evaluation rounds.
-
-        Parameters:
-        - num_rounds: Number of rounds to run
-        """
-        print(f"\nRunning Trust Market Simulation for {num_rounds} rounds...")
-        for i in range(num_rounds):
-            self.run_evaluation_round()
-            # Optional: Add a small delay or checkpoint logic here
-            # time.sleep(1)
-        print(f"\nFinished {num_rounds} evaluation rounds.")
+                except Exception as e:
+                    print(f"  !! Error during evaluation of source {source_id}: {e}")
+                    # Optionally, add traceback for debugging
+                    import traceback
+                    traceback.print_exc()
+        return detailed_evaluations
 
     def get_agent_trust_scores(self) -> Dict[int, Dict[str, float]]:
-        """Get the current trust scores for all agents known to the simulation."""
+        """
+        Get the current trust scores for all agents known to the simulation.
+        """
         agent_scores = {}
         # Iterate through agent IDs known from the simulation setup
         known_agent_ids = list(self.agent_profiles.keys())

@@ -5,6 +5,9 @@ import random # Import random for sampling
 import json # Added for final summary printing
 import pickle
 import time
+import sys
+# Add the project root to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from agent_prompting_utils import load_profiles, load_prompts
 from collections import defaultdict
 
@@ -336,7 +339,8 @@ def simulate_and_save(args: argparse.Namespace, output_path: str):
 
     # --- Setup similar to info_main.py ---
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    # openai_api_key = os.environ.get("OPENAI_API_KEY")
+    openai_api_key = os.environ.get("KIMI_API_KEY")
     
     # Configure API models based on provider
     if args.llm_source == 'api':
@@ -344,8 +348,8 @@ def simulate_and_save(args: argparse.Namespace, output_path: str):
             args.largest_model = "gemini-2.5-pro"
             args.api_model_name = "gemini-2.5-flash"
         elif args.api_provider == 'openai':
-            args.largest_model = "o4-mini"
-            args.api_model_name = "o4-mini"
+            args.largest_model = "moonshotai/kimi-k2:free"
+            args.api_model_name = "moonshotai/kimi-k2:free"
 
     # --- Load Profiles & Prompts ---
     agent_profiles_all, user_profiles_all = load_profiles("saved_profiles")
@@ -414,7 +418,7 @@ def simulate_and_save(args: argparse.Namespace, output_path: str):
     return output_path
 
 
-def load_and_recreate(saved_data_path: str):
+def load_and_recreate(saved_data_path: str, only_models_and_convdata: bool = False):
     """
     Loads data from a simulation run and recreates the state of the
     TrustMarketSystem and its components for analysis.
@@ -440,7 +444,8 @@ def load_and_recreate(saved_data_path: str):
     all_round_outputs = saved_data["simulation_outputs"]
 
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    # openai_api_key = os.environ.get("OPENAI_API_KEY")
+    openai_api_key = os.environ.get("KIMI_API_KEY")
 
     # 1. Recreate Trust Market System
     print("Initializing Trust Market System...")
@@ -516,14 +521,81 @@ def load_and_recreate(saved_data_path: str):
         trust_market_system._process_simulation_output(round_output)
     print("System state recreated successfully.")
 
+    if only_models_and_convdata:
+        return trust_market_system, customer_support_sim
+
     # NEW STEP: Set the initial market state to the regulator's target
     # Path for caching the regulator's plan.
-    regulator_plan_path = os.path.join(os.path.dirname(saved_data_path), "regulator_plan.pkl")
-    set_market_state_from_regulator(trust_market_system, regulator_plan_path)
+    suffix = saved_data_path.split("/")[-1].split(".")[0].split("_")[3:].join("_")
+    regulator_plan_path = os.path.join(os.path.dirname(saved_data_path), f"regulator_plan_{suffix}.pkl")
+    regulator_eval_pair_mem = set_market_state_from_regulator(trust_market_system, regulator_plan_path, evaluation_round=20)
+    auditor_plan_path = os.path.join(os.path.dirname(saved_data_path), f"auditor_plan_{suffix}.pkl")
+    user_rep_plan_path = os.path.join(os.path.dirname(saved_data_path), f"user_rep_plan_{suffix}.pkl")
+    auditor_eval_pair_mem, user_rep_eval_pair_mem = get_auditor_and_user_rep_evals(trust_market_system, auditor_plan_path, user_rep_plan_path, evaluation_round=35)
+    return trust_market_system, customer_support_sim, regulator_eval_pair_mem, auditor_eval_pair_mem, user_rep_eval_pair_mem
 
-    return trust_market_system, customer_support_sim
+def get_auditor_and_user_rep_evals(trust_market_system, auditor_plan_path, user_rep_plan_path, evaluation_round=1):
+    """
+    Gets the auditor and user rep evaluations from the regulator's plan.
+    """
+    print("\n--- Getting Auditor and User Rep Evaluations ---") 
+    market = trust_market_system.trust_market
+    auditor = None
+    user_rep = None
+    all_sources = list(trust_market_system.information_sources.values())
 
-def set_market_state_from_regulator(trust_market_system, regulator_plan_path=None):
+    for source in all_sources:
+        if isinstance(source, AuditorWithProfileAnalysis):
+            auditor = source
+            break
+        elif isinstance(source, UserRepresentativeWithHolisticEvaluation):
+            user_rep = source
+            break
+            
+    if not auditor or not user_rep:
+        print("Warning: No Auditor or User Rep found in the system. Cannot get evaluations.")
+        return
+
+    target_total_capital_dist = None
+    # 1. Get the auditor's "grand plan" for total capital in each asset
+    if auditor_plan_path and os.path.exists(auditor_plan_path):
+        print(f"Loading auditor plan from {auditor_plan_path}...")
+        with open(auditor_plan_path, 'rb') as f:
+            auditor_evals = pickle.load(f)
+            auditor_evals = auditor_evals['pair_evaluation_memory']
+        print("Auditor plan loaded.")
+    else:
+        print("Generating new auditor plan...")
+        auditor_evals = auditor.evaluate_and_get_pair_evaluation_memory(evaluation_round=evaluation_round)
+        if auditor_plan_path and auditor_evals:
+            print(f"Saving new auditor plan to {auditor_plan_path}...")
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(auditor_plan_path), exist_ok=True)
+            with open(auditor_plan_path, 'wb') as f:
+                pickle.dump(auditor_evals, f)
+            print("Auditor plan saved.")
+    
+    # 2. Get the user rep's "grand plan" for total capital in each asset
+    if user_rep_plan_path and os.path.exists(user_rep_plan_path):
+        print(f"Loading user rep plan from {user_rep_plan_path}...")
+        with open(user_rep_plan_path, 'rb') as f:
+            user_rep_evals = pickle.load(f)
+            user_rep_evals = user_rep_evals['pair_evaluation_memory']
+        print("User rep plan loaded.")
+    else:
+        print("Generating new user rep plan...")
+        user_rep_evals = user_rep.evaluate_and_get_pair_evaluation_memory(evaluation_round=evaluation_round)
+        if user_rep_plan_path and user_rep_evals:
+            print(f"Saving new user rep plan to {user_rep_plan_path}...")
+            os.makedirs(os.path.dirname(user_rep_plan_path), exist_ok=True)
+            with open(user_rep_plan_path, 'wb') as f:
+                pickle.dump(user_rep_evals, f)
+            print("User rep plan saved.")
+
+    return auditor_evals, user_rep_evals
+
+
+def set_market_state_from_regulator(trust_market_system, regulator_plan_path=None, evaluation_round=1):
     """
     Initializes the market by setting source investments proportionally
     based on the regulator's ideal total capital distribution.
@@ -549,17 +621,23 @@ def set_market_state_from_regulator(trust_market_system, regulator_plan_path=Non
     if regulator_plan_path and os.path.exists(regulator_plan_path):
         print(f"Loading regulator plan from {regulator_plan_path}...")
         with open(regulator_plan_path, 'rb') as f:
-            target_total_capital_dist = pickle.load(f)
+            regulator_evals = pickle.load(f)
+            target_total_capital_dist = regulator_evals['target_total_capital_dist']
+            pair_evaluation_memory = regulator_evals['pair_evaluation_memory']
         print("Regulator plan loaded.")
     else:
         print("Generating new regulator plan...")
-        target_total_capital_dist = regulator.get_target_capital_distribution(evaluation_round=1)
+        target_total_capital_dist, pair_evaluation_memory = regulator.get_target_capital_distribution(evaluation_round=evaluation_round)
+        regulator_evals = {
+            'target_total_capital_dist': target_total_capital_dist,
+            'pair_evaluation_memory': pair_evaluation_memory
+        }
         if regulator_plan_path and target_total_capital_dist:
             print(f"Saving new regulator plan to {regulator_plan_path}...")
             # Ensure directory exists
             os.makedirs(os.path.dirname(regulator_plan_path), exist_ok=True)
             with open(regulator_plan_path, 'wb') as f:
-                pickle.dump(target_total_capital_dist, f)
+                pickle.dump(regulator_evals, f)
             print("Regulator plan saved.")
 
     if not target_total_capital_dist:

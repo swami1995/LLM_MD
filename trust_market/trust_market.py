@@ -89,7 +89,8 @@ class TrustMarket:
         self.agent_performance = defaultdict(lambda: defaultdict(list)) # For external perf metrics
         self.temporal_db = {
             'trust_scores': [], 'investments': [], 
-            'source_states': [], 'agent_performance': []
+            'source_states': [], 'agent_performance': [],
+            'user_evaluations': []
         }
         self.evaluation_round = 0
 
@@ -100,6 +101,7 @@ class TrustMarket:
 
         # --- Regulator Support ---
         self.cumulative_user_influence = defaultdict(lambda: defaultdict(float))    # Tracks sum of |delta_R| from user feedback
+        self.temporal_db['user_evaluations'] = []
 
         print("TrustMarket core initialized.")
         print(f"  - Rating Scale (for feedback normalization): {self.rating_scale}")
@@ -581,7 +583,7 @@ class TrustMarket:
     # This would replace the direct manipulation of `self.agent_trust_scores`
 
     def record_comparative_feedback(self, agent_a_id: str, agent_b_id: str,
-                                    winners: Dict): # feedback_strength S
+                                    winners: Dict, raw_comparison_details: Optional[Dict] = None): # feedback_strength S
         """
         Records comparative user feedback and updates agent AMM params via oracle_adjust_reserve_direct.
         winners: Dict mapping dimension -> 'A', 'B', or 'Tie'
@@ -589,11 +591,33 @@ class TrustMarket:
         """
         base_price_adj_factor = self.comparative_feedback_strength # Beta
 
-        for dimension, winner_code_conf in winners.items():
+        if raw_comparison_details:
+            self.temporal_db['user_evaluations'].append({
+                'evaluation_round': self.evaluation_round,
+                'timestamp': time.time(),
+                **raw_comparison_details
+            })
+
+        for dimension, winner_code_conf_raw in winners.items():
             if dimension not in self.dimensions: continue
 
-            winner_code, confidence = winner_code_conf
-
+            if isinstance(winner_code_conf_raw, tuple):
+                winner_code, confidence = winner_code_conf_raw
+                rating = 0 # Not provided in this tuple format
+            elif isinstance(winner_code_conf_raw, dict):
+                rating = winner_code_conf_raw.get('rating', 0)
+                confidence = winner_code_conf_raw.get('confidence', 0) / self.rating_scale # Normalize confidence from 0-5 to 0-1
+                # Winner is derived from rating for logging/simplicity, but rating is used for adjustment
+                if rating > 0:
+                    winner_code = 'A'
+                elif rating < 0:
+                    winner_code = 'B'
+                else:
+                    winner_code = 'Tie'
+            else:
+                # Fallback for unexpected format
+                winner_code, confidence, rating = 'Tie', 0.5, 0
+                
             params_A = self.agent_amm_params[agent_a_id][dimension]
             params_B = self.agent_amm_params[agent_b_id][dimension]
 
@@ -601,13 +625,7 @@ class TrustMarket:
             # This logic should ideally be in a separate `ensure_agent_in_amm` method
             for aid in [agent_a_id, agent_b_id]:
                 if self.agent_amm_params[aid][dimension]['R'] == 0 and self.agent_amm_params[aid][dimension]['T'] == 0:
-                    self.agent_amm_params[aid][dimension]['R'] = self.config.get('initial_R_oracle', 10.0)
-                    self.agent_amm_params[aid][dimension]['T'] = self.config.get('initial_T_oracle', 20.0)
-                    self.agent_amm_params[aid][dimension]['K'] = self.agent_amm_params[aid][dimension]['R'] * self.agent_amm_params[aid][dimension]['T']
-                    self.agent_amm_params[aid][dimension]['total_supply'] = self.agent_amm_params[aid][dimension]['T']
-                    # Initialize trust score from AMM price
-                    self.agent_trust_scores[aid][dimension] = self.agent_amm_params[aid][dimension]['R'] / self.agent_amm_params[aid][dimension]['T']
-
+                    self.ensure_agent_dimension_initialized_in_amm(aid, dimension)
 
 
             if self.oracle_influence_mechanisms['user_feedback'] == 'adjust_P':
@@ -640,8 +658,8 @@ class TrustMarket:
                 actual_delta_P_B = P_B_target_clamped - P_B_current
 
                 if self.primary_source_update_type == 'fix_K':
-                    delta_R_A = params_A['R'] *(np.sqrt(P_A_target_clamped/P_A_current) - 1)
-                    delta_R_B = params_B['R'] *(np.sqrt(P_B_target_clamped/P_B_current) - 1)
+                    delta_R_A = params_A['R'] *(np.sqrt(P_A_target_clamped/P_A_current) - 1) if P_A_current > 0 else 0
+                    delta_R_B = params_B['R'] *(np.sqrt(P_B_target_clamped/P_B_current) - 1) if P_B_current > 0 else 0
                 elif self.primary_source_update_type == 'fix_T':
                     delta_R_A = actual_delta_P_A * params_A['T']
                     delta_R_B = actual_delta_P_B * params_B['T']
@@ -651,8 +669,8 @@ class TrustMarket:
                 if abs(actual_delta_P_B) > 0.0001: # Threshold for action
                     self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
             elif self.oracle_influence_mechanisms['user_feedback'] == 'adjust_R':
-                delta_R_A = confidence * base_price_adj_factor
-                delta_R_B = -confidence * base_price_adj_factor
+                delta_R_A = rating/self.rating_scale * base_price_adj_factor # Use rating directly
+                delta_R_B = -rating/self.rating_scale * base_price_adj_factor
 
                 if abs(delta_R_A) > 0.0001: # Threshold for action
                     self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
@@ -1210,6 +1228,7 @@ class TrustMarket:
         output_dir: str,
         filename_prefix: str = "trust_market_logs",
         file_format: str = "json",
+        detailed_evaluations: Optional[Dict] = None,
     ) -> str:
         """Save all relevant logged data and internal state to disk.
 
@@ -1227,6 +1246,9 @@ class TrustMarket:
         file_format : str, optional
             Either "json" or "pickle"/"pkl". Determines the serialization
             format, by default "json".
+        detailed_evaluations : dict, optional
+            A dictionary containing detailed evaluation data from sources and
+            users, to be included in the log file.
 
         Returns
         -------
@@ -1281,6 +1303,7 @@ class TrustMarket:
                 aid: {dim: list(entries) for dim, entries in dim_map.items()}
                 for aid, dim_map in self.agent_performance.items()
             },
+            "detailed_evaluations": detailed_evaluations if detailed_evaluations is not None else {},
         }
 
         # Perform the actual serialization

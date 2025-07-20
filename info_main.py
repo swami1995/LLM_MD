@@ -5,6 +5,22 @@ import random # Import random for sampling
 import json # Added for final summary printing
 from agent_prompting_utils import load_profiles, load_prompts
 
+"""
+USAGE EXAMPLES:
+
+1. Normal simulation (generate new conversations):
+   python info_main.py --num_steps 5 --batch_size 3
+
+2. Use stored conversations from previous simulation:
+   python info_main.py --use_stored_conversations --stored_data_path run_logs/my_experiment_simulation_data.json --num_steps 10
+
+   This will:
+   - Load pre-computed conversations from the specified file
+   - Use those conversations instead of generating new LLM dialogs
+   - Still run fresh evaluations on the stored conversations
+   - Run the full market simulation with all information sources
+"""
+
 # Import Trust Market components
 from trust_market.trust_market_system import TrustMarketSystem
 from trust_market.trust_market import TrustMarket
@@ -14,6 +30,10 @@ from trust_market.regulator import Regulator
 
 # Import CustomerSupportModel from info_agent
 from info_agent import CustomerSupportModel
+
+# Import rating evolution plotting
+from debug_analysis.rating_evolution_plots import RatingEvolutionTracker
+
 import ipdb
 # Import LLM client setup (assuming you have a helper, otherwise initialize here)
 # Example: from llm_utils import initialize_llm_client
@@ -34,8 +54,8 @@ if __name__ == "__main__":
     # --- Simulation Args ---
     parser.add_argument("--model_path", type=str, default="/data/models/huggingface/meta-llama/Llama-3-8B-Instruct", help="Path to the pretrained LLM model. Required if --llm_source is 'local'.")
     parser.add_argument("--llm_source", type=str, choices=["local", "api"], default="api", help="Source of LLM: 'local' (Llama) or 'api' (Gemini). Default is 'api'.")
-    parser.add_argument("--max_dialog_rounds", type=int, default=1, help="Maximum number of dialog rounds for each conversation. Default is 3.")
-    parser.add_argument("--num_steps", type=int, default=2, help="Number of simulation steps (evaluation rounds) to run. Default is 5.")
+    parser.add_argument("--max_dialog_rounds", type=int, default=5, help="Maximum number of dialog rounds for each conversation. Default is 5.")
+    parser.add_argument("--num_steps", type=int, default=30, help="Number of simulation steps (evaluation rounds) to run. Default is 4.")
     parser.add_argument("--use_chat_api", action="store_true", help="Use Gemini's chat API for more efficient multi-turn dialogs. Only applicable when --llm_source is 'api'.")
     parser.add_argument("--batch_size", type=int, default=3, help="Number of conversations per simulation step. Default is 3.")
     parser.add_argument("--use_static_kb", action="store_true", help="Use a static knowledge base for the simulation. Default is False.")
@@ -44,18 +64,25 @@ if __name__ == "__main__":
     parser.add_argument("--evaluation_method", type=str, choices=["specific_ratings", "comparative_binary"], default="comparative_binary", help="Evaluation method for user feedback.")
     parser.add_argument("--rating_scale", type=int, choices=[5, 10], default=5, help="Rating scale for user feedback (specific_ratings).")
     parser.add_argument("--trust_decay_rate", type=float, default=0.99, help="Decay rate for trust scores per round.")
-    parser.add_argument("--auditor_frequency", type=int, default=4, help="Frequency (in rounds) for auditor evaluations.")
+    parser.add_argument("--auditor_frequency", type=int, default=3, help="Frequency (in rounds) for auditor evaluations.")
     parser.add_argument("--user_rep_frequency", type=int, default=2, help="Frequency (in rounds) for user representative evaluations.")
-    parser.add_argument("--regulator_frequency", type=int, default=10, help="Frequency (in rounds) for regulator evaluations.")
+    parser.add_argument("--regulator_frequency", type=int, default=12, help="Frequency (in rounds) for regulator evaluations.")
     parser.add_argument("--exp_name", type=str, default="test_run", help="Name of the experiment.")
     parser.add_argument("--api_provider", type=str, choices=["gemini", "openai"], default="gemini", help="API provider to use. Default is 'gemini'.")
 
+    # --- NEW: Stored Conversation Args ---
+    parser.add_argument("--use_stored_conversations", action="store_true", help="Use pre-computed conversations instead of generating new ones.")
+    parser.add_argument("--stored_data_path", type=str, help="Path to the JSON file containing stored conversation data.")
+    
+    # --- NEW: Detailed Logging Args ---
+    parser.add_argument("--save_detailed_logs", action="store_true", help="Save detailed evaluation data including reasoning, confidence, and derived scores from all sources and users.")
 
     args = parser.parse_args()
 
     # --- API Key Handling ---
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    # openai_api_key = os.environ.get("OPENAI_API_KEY")
+    openai_api_key = os.environ.get("KIMI_API_KEY")
 
     if not gemini_api_key and args.api_provider == "gemini":
         # IMPORTANT: Replace with your actual key ONLY for testing. Use environment variables.
@@ -88,9 +115,9 @@ if __name__ == "__main__":
             # args.api_model_name = "gemini-2.5-pro"
         elif args.api_provider == 'openai':
             # Configure OpenAI models here if needed
-            args.largest_model = "o3"
+            args.largest_model = "moonshotai/kimi-k2:free"
             # args.api_model_name = "o3"
-            args.api_model_name = "o3"
+            args.api_model_name = "moonshotai/kimi-k2:free"
 
     # Validate chat API usage
     if args.use_chat_api and args.api_provider != "gemini":
@@ -119,83 +146,102 @@ if __name__ == "__main__":
         }
 
     # --- Load Profiles & Prompts ---
-    agent_profiles_all, user_profiles_all = load_profiles("saved_profiles") if os.path.exists("saved_profiles/agent_profiles_fixed.json") else ([], [])
-    conversation_prompts = load_prompts("generated_prompts_fixed.json") if os.path.exists("generated_prompts_fixed.json") else []
+    if args.use_stored_conversations:
+        if not args.stored_data_path or not os.path.exists(args.stored_data_path):
+            raise ValueError("A valid --stored_data_path must be provided when --use_stored_conversations is set.")
+        
+        print(f"Loading profiles, prompts, and knowledge base from stored data file: {args.stored_data_path}")
+        with open(args.stored_data_path, 'r', encoding='utf-8') as f:
+            simulation_data = json.load(f)
+        
+        # Load directly from the stored data to ensure consistency
+        agent_profiles = simulation_data.get('agent_profiles_used', [])
+        user_profiles = simulation_data.get('user_profiles_used', [])
+        conversation_prompts = simulation_data.get('conversation_prompts_used', [])
+        
+        # Also load the static knowledge base if it exists in the stored data
+        if 'static_knowledge_base' in simulation_data and simulation_data['static_knowledge_base']:
+            static_knowledge_base = simulation_data['static_knowledge_base']
+            print("Loaded static knowledge base from the stored data file.")
 
-    # Default profiles if none loaded
-    if not agent_profiles_all:
-        print("Warning: No agent profiles found. Using default profiles.")
-        agent_profiles_all = [
-            {
-                "primary_goals": [("Primary", "Assist customers efficiently")],
-                "communication_style": ["Professional", "Concise"],
-                "behavioral_tendencies": ["Responds directly to questions"],
-                "knowledge_breadth": "Comprehensive knowledge of products",
-                "knowledge_depth": "High level of detail",
-                "knowledge_accuracy": "Highly accurate"
-            },
-            {
-                "primary_goals": [("Primary", "Maximize customer satisfaction")],
-                "communication_style": ["Friendly", "Conversational"],
-                "behavioral_tendencies": ["Goes above and beyond", "Provides suggestions"],
-                "knowledge_breadth": "Standard knowledge of products",
-                "knowledge_depth": "Moderate level of detail",
-                "knowledge_accuracy": "Generally accurate"
-            },
-            {
-                "primary_goals": [("Primary", "Increase sales"), ("Secondary", "Assist customers")],
-                "communication_style": ["Persuasive", "Enthusiastic"],
-                "behavioral_tendencies": ["Recommends premium products", "Upsells when possible"],
-                "knowledge_breadth": "Focused on premium products",
-                "knowledge_depth": "Deep knowledge of premium features",
-                "knowledge_accuracy": "Accurate but emphasizes benefits"
-            }
-        ]
+    else:
+        # Original logic for new simulations
+        agent_profiles_all, user_profiles_all = load_profiles("saved_profiles") if os.path.exists("saved_profiles/agent_profiles_fixed.json") else ([], [])
+        conversation_prompts = load_prompts("generated_prompts_fixed.json") if os.path.exists("generated_prompts_fixed.json") else []
 
-    if not user_profiles_all:
-        print("Warning: No user profiles found. Using default profiles.")
-        user_profiles_all = [
-            {
-                "technical_proficiency": "High",
-                "patience": "Low",
-                "trust_propensity": "Skeptical",
-                "focus": "Technical details",
-                "communication_style": ["Direct", "Technical"],
-                "mood": ["Neutral"]
-            },
-            {
-                "technical_proficiency": "Medium",
-                "patience": "Medium",
-                "trust_propensity": "Neutral",
-                "focus": "Solution-oriented",
-                "communication_style": ["Conversational"],
-                "mood": ["Positive"]
-            },
-            {
-                "technical_proficiency": "Low",
-                "patience": "High",
-                "trust_propensity": "Trusting",
-                "focus": "Basic functionality",
-                "communication_style": ["Verbose", "Novice"],
-                "mood": ["Confused", "Anxious"]
-            }
-        ]
+        # Default profiles if none loaded
+        if not agent_profiles_all:
+            print("Warning: No agent profiles found. Using default profiles.")
+            agent_profiles_all = [
+                {
+                    "primary_goals": [("Primary", "Assist customers efficiently")],
+                    "communication_style": ["Professional", "Concise"],
+                    "behavioral_tendencies": ["Responds directly to questions"],
+                    "knowledge_breadth": "Comprehensive knowledge of products",
+                    "knowledge_depth": "High level of detail",
+                    "knowledge_accuracy": "Highly accurate"
+                },
+                {
+                    "primary_goals": [("Primary", "Maximize customer satisfaction")],
+                    "communication_style": ["Friendly", "Conversational"],
+                    "behavioral_tendencies": ["Goes above and beyond", "Provides suggestions"],
+                    "knowledge_breadth": "Standard knowledge of products",
+                    "knowledge_depth": "Moderate level of detail",
+                    "knowledge_accuracy": "Generally accurate"
+                },
+                {
+                    "primary_goals": [("Primary", "Increase sales"), ("Secondary", "Assist customers")],
+                    "communication_style": ["Persuasive", "Enthusiastic"],
+                    "behavioral_tendencies": ["Recommends premium products", "Upsells when possible"],
+                    "knowledge_breadth": "Focused on premium products",
+                    "knowledge_depth": "Deep knowledge of premium features",
+                    "knowledge_accuracy": "Accurate but emphasizes benefits"
+                }
+            ]
 
+        if not user_profiles_all:
+            print("Warning: No user profiles found. Using default profiles.")
+            user_profiles_all = [
+                {
+                    "technical_proficiency": "High",
+                    "patience": "Low",
+                    "trust_propensity": "Skeptical",
+                    "focus": "Technical details",
+                    "communication_style": ["Direct", "Technical"],
+                    "mood": ["Neutral"]
+                },
+                {
+                    "technical_proficiency": "Medium",
+                    "patience": "Medium",
+                    "trust_propensity": "Neutral",
+                    "focus": "Solution-oriented",
+                    "communication_style": ["Conversational"],
+                    "mood": ["Positive"]
+                },
+                {
+                    "technical_proficiency": "Low",
+                    "patience": "High",
+                    "trust_propensity": "Trusting",
+                    "focus": "Basic functionality",
+                    "communication_style": ["Verbose", "Novice"],
+                    "mood": ["Confused", "Anxious"]
+                }
+            ]
 
-    # --- Simulation Setup ---
-    num_agents_to_simulate = 3 # Number of agent profiles to use in simulation
-    num_users_to_simulate = 3  # Number of user profiles to use in simulation
+        # --- Simulation Setup ---
+        num_agents_to_simulate = 3 # Number of agent profiles to use in simulation
+        num_users_to_simulate = 3  # Number of user profiles to use in simulation
 
-    # Sample agent profiles if more are available than needed
-    agent_profiles = random.sample(agent_profiles_all, min(num_agents_to_simulate, len(agent_profiles_all)))
+        # Sample agent profiles if more are available than needed
+        agent_profiles = random.sample(agent_profiles_all, min(num_agents_to_simulate, len(agent_profiles_all)))
 
-    # Sample user profiles and conversation prompts if more are available than needed
-    user_indices = list(range(len(user_profiles_all)))
-    sampled_indices = random.sample(user_indices, min(num_users_to_simulate, len(user_profiles_all)))
-    
-    # Sample both profiles and prompts using the same indices
-    user_profiles = [user_profiles_all[i] for i in sampled_indices]
-    conversation_prompts = [conversation_prompts[i] for i in sampled_indices] if conversation_prompts and len(conversation_prompts) == len(user_profiles_all) else []
+        # Sample user profiles and conversation prompts if more are available than needed
+        user_indices = list(range(len(user_profiles_all)))
+        sampled_indices = random.sample(user_indices, min(num_users_to_simulate, len(user_profiles_all)))
+        
+        # Sample both profiles and prompts using the same indices
+        user_profiles = [user_profiles_all[i] for i in sampled_indices]
+        conversation_prompts = [conversation_prompts[i] for i in sampled_indices] if conversation_prompts and len(conversation_prompts) == len(user_profiles_all) else []
     
     print(f"Simulating with {len(agent_profiles)} agent profiles and {len(user_profiles)} user profiles.")
     print(f"User profiles:")
@@ -246,11 +292,16 @@ if __name__ == "__main__":
         market=trust_market_system.trust_market # Pass the market instance
     )
 
-    # --- 3. Pass Simulation Model to Trust Market System ---
+    # --- 3. Load Stored Conversations if Requested ---
+    if args.use_stored_conversations:
+        customer_support_sim.load_stored_conversations(args.stored_data_path)
+        customer_support_sim.enable_stored_conversations(True)
+
+    # --- 4. Pass Simulation Model to Trust Market System ---
     trust_market_system.register_simulation_module(customer_support_sim)
     print("Registered simulation module with Trust Market System.")
 
-    # --- 4. Initialize & Register Information Sources ---
+    # --- 5. Initialize & Register Information Sources ---
     print("Registering Information Sources...")
 
     # Add Auditors
@@ -303,11 +354,16 @@ if __name__ == "__main__":
     trust_market_system.register_regulator(regulator, evaluation_frequency=args.regulator_frequency)
     print(f"Registered Regulator: {regulator.source_id} (Eval Freq: {args.regulator_frequency})")
 
-    # --- 5. Run Simulation Rounds via Trust Market System ---
+    # --- 6. Run Simulation Rounds via Trust Market System ---
     print(f"\nStarting simulation orchestration for {args.num_steps} rounds...")
-    trust_market_system.run_evaluation_rounds(args.num_steps)
+    
+    if args.save_detailed_logs:
+        all_simulation_outputs, all_detailed_evaluations = trust_market_system.run_evaluation_rounds(args.num_steps)
+    else:
+        trust_market_system.run_evaluation_rounds(args.num_steps)
+        all_detailed_evaluations = None
 
-    # --- 6. Final Summary ---
+    # --- 7. Final Summary ---
     print("\n=== Simulation Complete ===")
     final_market_state = trust_market_system.summarize_market_state()
     print("Final Market State Summary:")
@@ -349,8 +405,52 @@ if __name__ == "__main__":
                  print(f"Error displaying scores for agent {agent_id_str}: {e}")
                  print(f"  Raw Scores: {scores}")
 
-    trust_market_system.trust_market.visualize_trust_scores(show_investments=True, save_path="figures/", experiment_name=args.exp_name)
-    trust_market_system.trust_market.visualize_source_value(save_path="figures/", experiment_name=args.exp_name)
-    trust_market_system.trust_market.save_logged_data("./run_logs", filename_prefix=args.exp_name, file_format="json")
+    # trust_market_system.trust_market.visualize_trust_scores(show_investments=True, save_path="figures/", experiment_name=args.exp_name)
+    # trust_market_system.trust_market.visualize_source_value(save_path="figures/", experiment_name=args.exp_name)
+    
+    # Save logged data with detailed evaluations if requested
+    if args.save_detailed_logs:
+        print("\nSaving detailed evaluation logs...")
+        log_filepath = trust_market_system.trust_market.save_logged_data(
+            "./run_logs", 
+            filename_prefix=args.exp_name, 
+            file_format="json",
+            detailed_evaluations=all_detailed_evaluations
+        )
+        
+        # Generate rating evolution plots
+        print("\nGenerating rating evolution plots...")
+        try:
+            # Get dimensions and agent IDs from the system
+            dimensions = trust_market_system.trust_market.dimensions
+            agent_ids = list(trust_market_system.agent_profiles.keys())
+            
+            # Initialize tracker
+            tracker = RatingEvolutionTracker(dimensions, agent_ids)
+            
+            # Process the detailed evaluations
+            tracker.process_detailed_evaluations(all_detailed_evaluations)
+            
+            # Also process user evaluations from the trust market's temporal database
+            # tracker.process_user_evaluations_from_temporal_db(trust_market_system.trust_market.temporal_db)
+            
+            # Print summary
+            tracker.print_summary()
+            
+            # Create plots
+            tracker.create_rating_evolution_plots(save_path="figures/rating_evolution", experiment_name=args.exp_name)
+            
+            # Save tracking data
+            tracker.save_tracking_data(save_path="figures/rating_evolution", experiment_name=args.exp_name)
+            
+            print("Rating evolution plots generated successfully!")
+            
+        except Exception as e:
+            print(f"Error generating rating evolution plots: {e}")
+            import traceback
+            traceback.print_exc()
+        
+    else:
+        trust_market_system.trust_market.save_logged_data("./run_logs", filename_prefix=args.exp_name, file_format="json")
     #agents=list(sim_agent_profiles.keys()), dimensions=sorted_dims,
     # show_investments=True, start_round=0, end_round=args.num_steps)
