@@ -172,6 +172,11 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'market_growth_factor': 1.0,
             'quality_concentration_power': 2.0,
             'max_eval_trials': 1,
+
+            # Bayesian Inference Parameters
+            'confidence_to_kappa_scale_factor': 50.0, # M parameter for converting confidence to precision
+            'decay_rate': 0.5, # How quickly old evidence is forgotten
+            'likelihood_strength_factor': 1.0, # Lower value = auditor evaluations have moderate influence
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
         # Note: Uses segment_weights from base class for dimension importance

@@ -334,6 +334,11 @@ class AuditorWithProfileAnalysis(InformationSource):
             'rank_correction_strength': 0.5,
             'max_confidence_history': 10,
             'max_eval_trials': 1,
+            
+            # Bayesian Inference Parameters
+            'confidence_to_kappa_scale_factor': 50.0, # M parameter for converting confidence to precision
+            'decay_rate': 0.25, # How quickly old evidence is forgotten
+            'likelihood_strength_factor': 2.0, # Lower value = auditor evaluations have moderate influence
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
 

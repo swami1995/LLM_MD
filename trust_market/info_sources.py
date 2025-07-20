@@ -58,6 +58,10 @@ class InformationSource:
         self.memory_length_n = max(1, memory_length_n)
         self.rating_scale = 5.0
         
+        # --- NEW: Bayesian belief state for persistent agent evaluations ---
+        # key: agent_id -> dimension -> (alpha, beta) tuple for Beta distribution
+        self.belief_state = defaultdict(lambda: defaultdict(lambda: None))
+        
         # To be configured by subclasses
         self.verbose = False 
         self.config = {}
@@ -269,10 +273,138 @@ class InformationSource:
         """Placeholder for subclasses to implement."""
         return False
     
+    # ------------------------------------------------------------------
+    # Bayesian Inference Methods
+    # ------------------------------------------------------------------
+    def _score_and_confidence_to_beta_params(self, score: float, confidence: float) -> Tuple[float, float]:
+        """
+        Convert a (score, confidence) pair to Beta distribution parameters (alpha, beta).
+        
+        Parameters:
+        - score: The evaluation score (0-1)
+        - confidence: The confidence in the evaluation (0-1)
+        
+        Returns:
+        - (alpha, beta): Parameters for Beta distribution
+        """
+        # Get configuration parameters
+        M = self.config.get('confidence_to_kappa_scale_factor', 50.0)
+        
+        # Calculate kappa (precision parameter)
+        kappa = 2.0 + confidence * M
+        
+        # Calculate alpha and beta
+        alpha = score * kappa
+        beta = (1.0 - score) * kappa
+        
+        return alpha, beta
+    
+    def _beta_params_to_score_and_confidence(self, alpha: float, beta: float) -> Tuple[float, float]:
+        """
+        Convert Beta distribution parameters to (score, confidence) pair.
+        
+        Parameters:
+        - alpha, beta: Beta distribution parameters
+        
+        Returns:
+        - (score, confidence): Mean and derived confidence
+        """
+        # Mean of Beta distribution
+        mean = alpha / (alpha + beta)
+        
+        # Derive confidence from precision (kappa)
+        kappa = alpha + beta
+        M = self.config.get('confidence_to_kappa_scale_factor', 50.0)
+        confidence = max(0.0, min(1.0, (kappa - 2.0) / M))
+        
+        return mean, confidence
+    
+    def _update_belief_state_bayesian(self, agent_id: int, dimension: str, 
+                                     new_score: float, new_confidence: float) -> Tuple[float, float]:
+        """
+        Update the belief state for an agent-dimension using Bayesian inference.
+        
+        Parameters:
+        - agent_id: The agent ID
+        - dimension: The dimension being evaluated
+        - new_score: The new evaluation score (0-1)
+        - new_confidence: The confidence in the new evaluation (0-1)
+        
+        Returns:
+        - (updated_score, updated_confidence): The posterior mean and confidence
+        """
+        # Convert new evidence to Beta parameters
+        alpha_new, beta_new = self._score_and_confidence_to_beta_params(new_score, new_confidence)
+        
+        # Get prior belief
+        prior_belief = self.belief_state[agent_id][dimension]
+        
+        if prior_belief is None:
+            # First evaluation - set posterior to new evidence
+            alpha_posterior = alpha_new
+            beta_posterior = beta_new
+        else:
+            # Get configuration parameters
+            decay_rate = self.config.get('decay_rate', 0.5)
+            likelihood_strength_factor = self.config.get('likelihood_strength_factor', 1.0)
+            
+            # Unpack prior parameters
+            alpha_prior, beta_prior = prior_belief
+            
+            # Apply decay to prior
+            kappa_prior = alpha_prior + beta_prior
+            mu_prior = alpha_prior / kappa_prior if kappa_prior > 0 else 0.5
+            kappa_decayed = kappa_prior * decay_rate
+            alpha_decayed = mu_prior * kappa_decayed
+            beta_decayed = (1 - mu_prior) * kappa_decayed
+            
+            # Combine decayed prior with scaled new evidence
+            alpha_posterior = alpha_decayed + (alpha_new * likelihood_strength_factor)
+            beta_posterior = beta_decayed + (beta_new * likelihood_strength_factor)
+        
+        # Store updated belief
+        self.belief_state[agent_id][dimension] = (alpha_posterior, beta_posterior)
+        
+        # Convert back to score and confidence
+        return self._beta_params_to_score_and_confidence(alpha_posterior, beta_posterior)
+    
+    def combine_multiple_beliefs(self, scores: List[float], confidences: List[float]) -> Tuple[float, float]:
+        """
+        Combine multiple (score, confidence) pairs into a single belief state.
+        
+        Parameters:
+        - scores: List of scores (0-1)
+        - confidences: List of confidences (0-1)
+        
+        Returns:
+        - (combined_score, combined_confidence): Combined score and confidence
+        """
+        if not scores or not confidences or len(scores) != len(confidences):
+            return 0.5, 0.3
+
+        alphas = []
+        betas = []
+        for score, confidence in zip(scores, confidences):
+            alpha, beta = self._score_and_confidence_to_beta_params(score, confidence)
+            alphas.append(alpha)
+            betas.append(beta)
+        # Combine all alphas and betas
+        alpha_combined = sum(alphas)
+        beta_combined = sum(betas)
+        # Convert back to score and confidence
+        combined_score, combined_confidence = self._beta_params_to_score_and_confidence(alpha_combined, beta_combined)
+        return combined_score, combined_confidence
+        # return alpha_combined, beta_combined
+    # ------------------------------------------------------------------
+    # End Bayesian Inference Methods
+    # ------------------------------------------------------------------
+    
     def evaluate_agents_batch(self, agent_ids: List[int], dimensions: Optional[List[str]] = None, 
                               evaluation_round: Optional[int] = None, use_comparative: bool = True,
                               analysis_mode: bool = False, detailed_analysis: bool = False):
         """Batch variant of evaluate_agent that pairs agents globally and evaluates in parallel.
+        
+        Now uses Dynamic Bayesian Inference to update persistent belief states about agents.
 
         Returns: 
           - if detailed_analysis is False: {agent_id: {dimension: (score, confidence)}}
@@ -299,11 +431,20 @@ class InformationSource:
             base_evaluations = {}
             # This could be parallelized if _perform_base_evaluation is slow
             for aid in agent_ids:
-                base_evaluations[aid] = self._perform_base_evaluation(
+                base_eval = self._perform_base_evaluation(
                     aid,
                     dimensions=dimensions,
                     evaluation_round=evaluation_round
                 )
+                # Update belief state with base evaluation
+                updated_eval = {}
+                for dim in dimensions:
+                    score, confidence = base_eval.get(dim, (0.5, 0.3))
+                    updated_score, updated_confidence = self._update_belief_state_bayesian(
+                        aid, dim, score, confidence
+                    )
+                    updated_eval[dim] = (updated_score, updated_confidence)
+                base_evaluations[aid] = updated_eval
             return base_evaluations
         
         # ------------------------------------------------------------
@@ -324,7 +465,21 @@ class InformationSource:
 
         valid_agents = [aid for aid in agent_ids if self._agent_has_comparable_data(aid)]
         if len(valid_agents) < 2:
-            return base_scores_with_conf
+            # Even with no comparisons, update belief states for agents with existing beliefs
+            final_evals = {}
+            for aid in agent_ids:
+                final_evals[aid] = {}
+                for dim in dimensions:
+                    # Get current belief if it exists
+                    belief = self.belief_state[aid][dim]
+                    if belief is not None:
+                        # Return current belief without update
+                        score, confidence = self._beta_params_to_score_and_confidence(*belief)
+                        final_evals[aid][dim] = (score, confidence)
+                    else:
+                        # Use base score for new agents
+                        final_evals[aid][dim] = base_scores_with_conf.get(aid, {}).get(dim, (0.5, 0.3))
+            return final_evals
 
         # Collect desired unique pairs
         desired_pairs = set()
@@ -362,8 +517,8 @@ class InformationSource:
         # ------------------------------------------------------------
         # Phase 3 – parallel LLM comparison calls for those pairs
         # ------------------------------------------------------------
-        accumulated_scores_for_target = defaultdict(lambda : defaultdict(list))
-        accumulated_confs_for_target = defaultdict(lambda : defaultdict(list))
+        # Store current round evaluations for Bayesian update
+        current_round_evaluations = defaultdict(lambda: defaultdict(list))  # agent_id -> dim -> [(score, confidence), ...]
         prompts_for_pairs = {}
         
         if pairs_to_eval:
@@ -376,10 +531,10 @@ class InformationSource:
                 # if True:
                 for fut in as_completed(fut_to_pair):
                     result = fut.result()
-                    # for a, b in pairs_to_eval:
-                    #     result = self._compare_pair(a, b, dimensions, contexts_for_pairs.get((a,b), ""))
                     if result is None:
                         continue
+                    # for a, b in pairs_to_eval:
+                    #     result = self._compare_pair(a, b, dimensions, contexts_for_pairs.get((a,b), ""))
                     
                     # Unpack result, which may or may not include raw_reasoning
                     if len(result) == 4:
@@ -390,10 +545,12 @@ class InformationSource:
 
                     cache_key = (min(aid, oid), max(aid, oid), evaluation_round)
                     self.comparison_results_cache[cache_key] = (derived_scores, confidences)
-                    prompts_for_pairs[str((aid, oid))] = raw_results['Communication_Quality'].get('prompt', "Not provided by source.")
+                    
+                    if isinstance(raw_results, dict) and 'Communication_Quality' in raw_results:
+                        prompts_for_pairs[str((aid, oid))] = raw_results['Communication_Quality'].get('prompt', "Not provided by source.")
 
-                    # --- NEW: persist evaluation memory ---
-                    if True:#not analysis_mode and not detailed_analysis:
+                    # --- Persist evaluation memory ---
+                    if True:  # not analysis_mode and not detailed_analysis:
                         self._store_pair_evaluation(aid, oid, derived_scores, confidences, raw_results=raw_results, evaluation_round=evaluation_round)
 
                     # Log for detailed analysis if enabled
@@ -405,26 +562,28 @@ class InformationSource:
                             'raw_results': raw_results
                         })
 
-                    # Single-thread update of derived scores/confidences to avoid race conditions
+                    # Collect current round evaluations for Bayesian update
+                    for dim in dimensions:
+                        if aid in derived_scores and dim in derived_scores[aid]:
+                            score = derived_scores[aid][dim]
+                            confidence = confidences.get(aid, {}).get(dim, 0.3)
+                            current_round_evaluations[aid][dim].append((score, confidence))
+
+                        if oid in derived_scores and dim in derived_scores[oid]:
+                            score = derived_scores[oid][dim]
+                            confidence = confidences.get(oid, {}).get(dim, 0.3)
+                            current_round_evaluations[oid][dim].append((score, confidence))
+
+                    # Update legacy derived scores for backward compatibility
                     self._update_agent_derived_scores(aid, derived_scores.get(aid, {}), dimensions, confidences.get(aid, {}))
                     self._update_agent_confidences(aid, confidences.get(aid, {}), dimensions)
-
                     self._update_agent_derived_scores(oid, derived_scores.get(oid, {}), dimensions, confidences.get(oid, {}))
                     self._update_agent_confidences(oid, confidences.get(oid, {}), dimensions)
 
-                    for dim in dimensions:
-                        if aid in derived_scores and dim in derived_scores[aid]:
-                            accumulated_scores_for_target[aid][dim].append(derived_scores[aid][dim])
-                            accumulated_confs_for_target[aid][dim].append(confidences.get(aid, {}).get(dim, 0.3))
-
-                        if oid in derived_scores and dim in derived_scores[oid]:
-                            accumulated_scores_for_target[oid][dim].append(derived_scores[oid][dim])
-                            accumulated_confs_for_target[oid][dim].append(confidences.get(oid, {}).get(dim, 0.3))
-
-
-        if self.num_trials > 1:# and not analysis_mode and not detailed_analysis:
+        # Handle variance-based trial adjustment if applicable
+        if self.num_trials > 1:
             all_variances = []
-            for (a,b) in pairs_to_eval_og:
+            for (a,b) in pairs_to_eval_og if 'pairs_to_eval_og' in locals() else []:
                 pair = (min(a, b), max(a, b))
                 evals_for_pair = self.pair_evaluation_memory.get(pair, [])[-self.num_trials:]
                 derived_scores_for_pair = [eval['derived_scores'][a] for eval in evals_for_pair]
@@ -451,54 +610,39 @@ class InformationSource:
             #         f.write(f"{pair}:\n{prompt_to_write}\n\n")
             # ipdb.set_trace()
         # ------------------------------------------------------------
-        # Phase 4 – aggregate final scores per agent
+        # Phase 4 – Bayesian belief state updates and final scores
         # ------------------------------------------------------------
         final_evals = {}
         for aid in agent_ids:
             final_evals[aid] = {}
-            base_scores = base_scores_with_conf.get(aid, {})
-            new_scores_for_agent = accumulated_scores_for_target.get(aid, {})
-            new_confs_for_agent = accumulated_confs_for_target.get(aid, {})
-
+            
             for dim in dimensions:
-                base_score, base_conf = base_scores.get(dim, (0.5, 0.3))
+                current_evaluations = current_round_evaluations.get(aid, {}).get(dim, [])
                 
-                new_scores = new_scores_for_agent.get(dim, [])
-                new_confs = new_confs_for_agent.get(dim, [])
-
-                if new_scores:
-                    avg_new_score = 0.0
-                    avg_new_confidence = 0.3
-                    avg_new_score = sum(new_scores) / len(new_scores)
-                    if sum(new_confs) > 1e-6:
-                        avg_new_score = sum(s*c for s,c in zip(new_scores, new_confs)) / sum(new_confs)
-                        # avg_new_confidence = sum(new_confs) / len(new_confs)
-                    elif new_scores: # Fallback if all confidences are zero
-                        avg_new_score = sum(new_scores) / len(new_scores)
-
-                    total_confidence_metric = base_conf + avg_new_confidence
-                    effective_weight_new = avg_new_confidence / total_confidence_metric if total_confidence_metric > 1e-6 else 0.5
+                if current_evaluations:
+                    # Aggregate current round evaluations
+                    # Use confidence-weighted average for multiple evaluations in the same round
+                    aggregated_score, aggregated_confidence = self.combine_multiple_beliefs(
+                        [eval[0] for eval in current_evaluations],
+                        [eval[1] for eval in current_evaluations]
+                    )
                     
-                    persistence_factor = self.config.get('base_score_persistence', 0.2)
-                    final_weight_new = effective_weight_new * (1 - persistence_factor)
-
-                    current_score_for_update = self.derived_agent_scores.get(aid, {}).get(dim, 0.5)
-                    if True:#analysis_mode:
-                        final_weight_new = 1.0
-
-                    final_score = (final_weight_new * avg_new_score) + ((1 - final_weight_new) * current_score_for_update)
-                    final_confidence = self._aggregate_confidences(new_confs, base_conf, final_weight_new)
-
-                    final_evals[aid][dim] = (final_score, final_confidence)
+                    # Update belief state with aggregated current round evaluation
+                    updated_score, updated_confidence = self._update_belief_state_bayesian(
+                        aid, dim, aggregated_score, aggregated_confidence
+                    )
+                    final_evals[aid][dim] = (updated_score, updated_confidence)
                 else:
-                    # No new comparisons, return base score with slightly decayed confidence
-                    final_score, final_confidence = base_score, base_conf * 0.9
-                    final_evals[aid][dim] = (final_score, final_confidence)
-                
-                # Persist the final score for the next round
-                ### TODO :  We probably don't want to do this since we are already updating derived_agent_scores above.
-                # if aid not in self.derived_agent_scores: self.derived_agent_scores[aid] = {}
-                # self.derived_agent_scores[aid][dim] = final_evals[aid][dim][0]
+                    # No new evaluations for this agent-dimension
+                    belief = self.belief_state[aid][dim]
+                    if belief is not None:
+                        # Return current belief state
+                        score, confidence = self._beta_params_to_score_and_confidence(*belief)
+                        final_evals[aid][dim] = (score, confidence)
+                    else:
+                        # Use base score for agents without any prior belief
+                        base_score, base_conf = base_scores_with_conf.get(aid, {}).get(dim, (0.5, 0.3))
+                        final_evals[aid][dim] = (base_score, base_conf * 0.9)  # Slight decay as in original
 
         if detailed_analysis:
             return final_evals, comparison_log

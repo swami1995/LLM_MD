@@ -82,6 +82,11 @@ class Regulator(InformationSource):
             'max_eval_trials': 1,
             'var_threshold': 0.1,
             'min_eval_trials': 1,
+            
+            # Bayesian Inference Parameters
+            'confidence_to_kappa_scale_factor': 50.0, # M parameter for converting confidence to precision
+            'decay_rate': 0.0, # How quickly old evidence is forgotten
+            'likelihood_strength_factor': 4.0, # Higher value = regulator evaluations have stronger influence
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
         self.min_trials = self.config.get('min_eval_trials', 1)
