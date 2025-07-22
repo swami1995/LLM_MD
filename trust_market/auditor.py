@@ -339,6 +339,10 @@ class AuditorWithProfileAnalysis(InformationSource):
             'confidence_to_kappa_scale_factor': 50.0, # M parameter for converting confidence to precision
             'decay_rate': 0.25, # How quickly old evidence is forgotten
             'likelihood_strength_factor': 2.0, # Lower value = auditor evaluations have moderate influence
+            
+            # Monte Carlo Simulation Parameters
+            'monte_carlo_trials': 50, # Number of Monte Carlo trials for risk assessment
+            'use_monte_carlo': True, # Whether to use Monte Carlo for investment decisions
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
 
@@ -757,7 +761,7 @@ class AuditorWithProfileAnalysis(InformationSource):
         # return max(total_potential, self.config.get('min_portfolio_value_potential', 100.0))
         return total_potential
 
-    def _project_steady_state_prices(self, own_evaluations, market_prices, dimension):
+    def _get_steady_state_capital(self, market_prices, dimension):
         """
         Project what market prices will be at steady state based on:
         1. Expected total capital deployment
@@ -774,7 +778,6 @@ class AuditorWithProfileAnalysis(InformationSource):
         
         # Add expected growth factor (new investors, increased allocations)
         growth_factor = self.config.get('market_growth_factor', 1.5)
-        steady_state_capital = total_potential_capital * growth_factor
         
         # Step 2: Current total capital in market
         current_total_market_capital = 0
@@ -782,12 +785,35 @@ class AuditorWithProfileAnalysis(InformationSource):
             if dimension in self.market.agent_amm_params[agent_id]:
                 # Total capital locked in AMM = R (reserves)
                 current_total_market_capital += self.market.agent_amm_params[agent_id][dimension]['R']
-        
-        steady_state_capital += current_total_market_capital # Include current capital in the market
+        # 2a. Compute steady state capital as the sum of current market capital and expected new capital. And capital ratio.
+        # This assumes the market will stabilize at a point
+        steady_state_capital = current_total_market_capital + total_potential_capital * growth_factor
+        capacity_ratio = steady_state_capital/current_total_market_capital
+
+        # 2b. Calculate current capital shares from the market.
+        current_agent_capital = {
+            agent_id: self.market.agent_amm_params[agent_id][dimension]['R']
+            for agent_id in market_prices
+            if dimension in self.market.agent_amm_params.get(agent_id, {})
+        }
+        current_total_market_capital_for_shares = sum(current_agent_capital.values())
+
+        current_capital_shares = {}
+        if current_total_market_capital_for_shares > 1e-9:
+            current_capital_shares = {
+                aid: cap / current_total_market_capital_for_shares
+                for aid, cap in current_agent_capital.items()
+            }
+        return steady_state_capital, capacity_ratio, current_capital_shares
+
+    def _project_steady_state_prices(self, own_evaluations, dimension, steady_state_capital, current_capital_shares=None):
+        """
         # Step 3: Project capital distribution based on quality scores
         # Use own evaluations as best estimate of true quality
+        """
+        # Step 3a: Calculate steady-state capital based on own evaluations
         quality_scores = {
-            agent_id: eval_data[dimension][0]
+            agent_id: eval_data[dimension]
             for agent_id, eval_data in own_evaluations.items()
             if dimension in eval_data
         }
@@ -797,17 +823,41 @@ class AuditorWithProfileAnalysis(InformationSource):
         concentration_power = self.config.get('quality_concentration_power', 2.0)
         
         quality_powered = {
-            aid: q ** concentration_power 
+            aid: q[0] ** concentration_power 
             for aid, q in quality_scores.items()
         }
         total_quality_powered = sum(quality_powered.values())
         
         # Expected share of steady-state capital for each agent
-        expected_capital_shares = {
+        evaluation_based_capital_shares = {
             aid: qp / total_quality_powered 
             for aid, qp in quality_powered.items()
         }
         
+        # 3b. Interpolate between evaluation-based and market-based shares using confidence.
+        if current_capital_shares is not None:
+            interpolated_shares = {}
+            all_agent_ids = set(quality_scores.keys()) | set(current_capital_shares.keys())
+
+            for aid in all_agent_ids:
+                # Confidence acts as the interpolation factor. High confidence -> lean towards own eval.
+                confidence = quality_scores.get(aid, (0.5, 0.0))[1]
+                
+                eval_share = evaluation_based_capital_shares.get(aid, 0.0)
+                market_share = current_capital_shares.get(aid, 0.0)
+                weight = confidence ** 2
+                interpolated_shares[aid] = (weight * eval_share) + ((1 - weight) * market_share)
+
+            # 3d. Normalize the interpolated shares to ensure they sum to 1.
+            total_interpolated_share = sum(interpolated_shares.values())
+            expected_capital_shares = {
+                aid: share / total_interpolated_share
+                for aid, share in interpolated_shares.items()
+            }
+        else:
+            # If no current capital shares, use evaluation-based shares directly
+            expected_capital_shares = evaluation_based_capital_shares
+
         # Step 4: Project steady-state prices
         projected_prices = {}
         projected_capital_shares = {}
@@ -834,23 +884,28 @@ class AuditorWithProfileAnalysis(InformationSource):
             projected_price = expected_capital / projected_T if projected_T > 0 else 0
             projected_prices[agent_id] = projected_price
         
-        return projected_prices, projected_capital_shares, steady_state_capital / current_total_market_capital
-
+        return projected_prices, projected_capital_shares
+    
     def check_market_capacity(self, own_evaluations, market_prices):
         """
         Checks if the source has enough capacity to invest based on its evaluations and market prices.
         If not, it will print a warning and return False.
         """
-        capacity_flags = {} # Collect ratios for all dimensions
-        projected_prices = {} # {agent_id: projected_price}
-        projected_capital_shares = {} # {agent_id: projected_capital_share}
-        for dim in self.expertise_dimensions:
-            projected_prices_dim, projected_capital_shares_dim, steady_state_ratio = self._project_steady_state_prices(own_evaluations, market_prices, dimension=dim)
-            capacity_flags[dim] = steady_state_ratio>1.2 # Collect ratios for all dimensions
-            projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
-            projected_capital_shares[dim] = projected_capital_shares_dim # Store projected capital shares for this dimension
+        if self.monte_carlo_evals:
+            num_trials = self.config.get('monte_carlo_trials', 50)
+            return self._monte_carlo_check_market_capacity(own_evaluations, market_prices, num_trials)
+        else:
+            capacity_flags = {} # Collect ratios for all dimensions
+            projected_prices = {} # {agent_id: projected_price}
+            projected_capital_shares = {} # {agent_id: projected_capital_share}
+            for dim in self.expertise_dimensions:
+                steady_state_capital, steady_state_ratio, current_capital_shares = self._get_steady_state_capital(market_prices, dimension=dim)
+                projected_prices_dim, projected_capital_shares_dim = self._project_steady_state_prices(own_evaluations, dimension=dim, steady_state_capital=steady_state_capital, current_capital_shares=current_capital_shares)
+                capacity_flags[dim] = steady_state_ratio>1.2 # Collect ratios for all dimensions
+                projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
+                projected_capital_shares[dim] = projected_capital_shares_dim # Store projected capital shares for this dimension
 
-        return projected_prices, projected_capital_shares, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
+            return projected_prices, projected_capital_shares, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
 
     def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
         """

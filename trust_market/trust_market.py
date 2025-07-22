@@ -61,6 +61,14 @@ class TrustMarket:
         # Source allocated: source_id -> dimension -> allocated capacity
         self.allocated_influence = defaultdict(lambda: {dim: 0.0 for dim in self.dimensions})
 
+        # --- Market Volatility Tracking ---
+        # History of agent trust scores for volatility computation
+        self.agent_score_history = defaultdict(lambda: defaultdict(list))  # agent_id -> dim -> [score_history]
+        self.agent_capital_history = defaultdict(lambda: defaultdict(list))  # agent_id -> dim -> [capital_history] 
+        # History of market-wide statistics
+        self.market_volatility_history = []  # List of volatility metrics per round
+        self.volatility_window_size = config.get('volatility_window_size', 10)  # Number of rounds to consider for volatility
+
         # --- Configuration ---
         self.primary_sources = set(config.get('primary_sources', ['user_feedback', 'regulator'])) # Types considered primary
         self.primary_source_weight = config.get('primary_source_weight', 1.5) # Weight for primary source investments
@@ -790,6 +798,85 @@ class TrustMarket:
         #           # Simplest: apply to all dimensions if any score is not neutral.
         #           all_dims = list(self.dimensions)
         #           self.apply_dimension_correlations(agent_id, all_dims) # Over-applying maybe?
+        
+        # Update market volatility tracking after each round
+        self.update_market_volatility_tracking()
+
+    def update_market_volatility_tracking(self) -> None:
+        """Update market volatility tracking with current market state."""
+        current_round = self.evaluation_round
+        
+        # Track individual agent score/capital history
+        for agent_id in self.agent_trust_scores.keys():
+            for dimension in self.dimensions:
+                # Update score history
+                current_score = self.agent_trust_scores[agent_id].get(dimension, 0.5)
+                self.agent_score_history[agent_id][dimension].append(current_score)
+                
+                # Update capital history (market cap = R in AMM)
+                amm_params = self.agent_amm_params.get(agent_id, {}).get(dimension, {})
+                current_capital = amm_params.get('R', 0.0)
+                self.agent_capital_history[agent_id][dimension].append(current_capital)
+                
+                # Keep only recent history within window
+                if len(self.agent_score_history[agent_id][dimension]) > self.volatility_window_size:
+                    self.agent_score_history[agent_id][dimension] = \
+                        self.agent_score_history[agent_id][dimension][-self.volatility_window_size:]
+                if len(self.agent_capital_history[agent_id][dimension]) > self.volatility_window_size:
+                    self.agent_capital_history[agent_id][dimension] = \
+                        self.agent_capital_history[agent_id][dimension][-self.volatility_window_size:]
+        
+    
+    def compute_market_volatility(self) -> Dict[str, float]:
+        """Compute various market volatility metrics."""
+        volatility_metrics = {}
+        
+        # Compute score volatility across all agents/dimensions
+        all_score_volatilities = defaultdict(lambda: defaultdict(float))  # {agent_id: {dimension: volatility}}
+        all_score_momentum_volatilities = defaultdict(lambda: defaultdict(float))  # {agent_id: {dimension: momentum_volatility}}
+        for agent_id in self.agent_score_history.keys():
+            for dimension in self.agent_score_history[agent_id].keys():
+                score_history = self.agent_score_history[agent_id][dimension]
+                score_history_np = np.array(score_history)
+                score_momentum_history = score_history_np[1:] - score_history_np[:-1]  # Momentum is the difference between consecutive scores
+                if len(score_history) > 1:
+                    score_volatility = np.std(score_history)
+                    all_score_volatilities[agent_id][dimension] = score_volatility
+                    score_momentum_volatility = np.std(score_momentum_history)
+                    all_score_momentum_volatilities[agent_id][dimension] = score_momentum_volatility
+               
+        # Compute capital volatility across all agents/dimensions
+        all_capital_volatilities = defaultdict(lambda: defaultdict(float))  # {agent_id: {dimension: volatility}}
+        all_capital_momentum_volatilities = defaultdict(lambda: defaultdict(float))  # {agent_id: {dimension: momentum_volatility}}
+        for agent_id in self.agent_capital_history.keys():
+            for dimension in self.agent_capital_history[agent_id].keys():
+                capital_history = self.agent_capital_history[agent_id][dimension]
+                capital_history_np = np.array(capital_history)
+                capital_momentum_history = capital_history_np[1:] - capital_history_np[:-1]
+                if len(capital_history) > 1:
+                    capital_volatility = np.std(capital_history)
+                    all_capital_volatilities[agent_id][dimension] = capital_volatility
+                    capital_momentum_volatility = np.std(capital_momentum_history)
+                    all_capital_momentum_volatilities[agent_id][dimension] = capital_momentum_volatility
+        
+        volatility_metrics['score_volatilities'] = all_score_volatilities
+        volatility_metrics['capital_volatility'] = all_capital_volatilities
+        volatility_metrics['score_momentum_volatilities'] = all_score_momentum_volatilities
+        volatility_metrics['capital_momentum_volatilities'] = all_capital_momentum_volatilities
+        
+        # Store computed metrics
+        volatility_record = {
+            'round': self.evaluation_round,
+            'timestamp': time.time(),
+            **volatility_metrics
+        }
+        self.market_volatility_history.append(volatility_record)
+        
+        # Keep only recent history
+        if len(self.market_volatility_history) > self.volatility_window_size:
+            self.market_volatility_history = self.market_volatility_history[-self.volatility_window_size:]
+        
+        return volatility_metrics
 
     def get_market_prices(self, candidate_agent_ids=None, dimensions=None, verbose=False):
         market_prices = {}   # {agent_id: {dimension: P_current}}

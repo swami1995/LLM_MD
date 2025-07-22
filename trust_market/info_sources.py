@@ -62,6 +62,14 @@ class InformationSource:
         # key: agent_id -> dimension -> (alpha, beta) tuple for Beta distribution
         self.belief_state = defaultdict(lambda: defaultdict(lambda: None))
         
+        # --- Prediction Volatility Tracking ---
+        # History of posterior belief means for volatility computation
+        self.belief_mean_history = defaultdict(lambda: defaultdict(list))  # agent_id -> dim -> [mean_history]
+        self.belief_confidence_history = defaultdict(lambda: defaultdict(list))  # agent_id -> dim -> [confidence_history]
+        # Track prediction volatility metrics
+        self.prediction_volatility_history = []  # List of volatility metrics per evaluation round
+        self.prediction_volatility_window_size = 10  # Number of evaluations to consider for volatility
+        
         # To be configured by subclasses
         self.verbose = False 
         self.config = {}
@@ -399,6 +407,210 @@ class InformationSource:
     # End Bayesian Inference Methods
     # ------------------------------------------------------------------
     
+    # ------------------------------------------------------------------
+    # Prediction Volatility Tracking Methods
+    # ------------------------------------------------------------------
+    def update_prediction_volatility_tracking(self, evaluation_round: Optional[int] = None) -> None:
+        """Update prediction volatility tracking with current belief states."""
+        current_round = evaluation_round if evaluation_round is not None else getattr(self, 'last_evaluation_round', 0)
+        
+        # Track belief mean and confidence history for all agents/dimensions
+        for agent_id in self.belief_state.keys():
+            for dimension in self.belief_state[agent_id].keys():
+                belief_params = self.belief_state[agent_id][dimension]
+                if belief_params is not None:
+                    # Compute current mean and confidence from belief state
+                    current_mean, current_confidence = self._beta_params_to_score_and_confidence(*belief_params)
+                    
+                    # Update history
+                    self.belief_mean_history[agent_id][dimension].append(current_mean)
+                    self.belief_confidence_history[agent_id][dimension].append(current_confidence)
+                    
+                    # Keep only recent history within window
+                    if len(self.belief_mean_history[agent_id][dimension]) > self.prediction_volatility_window_size:
+                        self.belief_mean_history[agent_id][dimension] = \
+                            self.belief_mean_history[agent_id][dimension][-self.prediction_volatility_window_size:]
+                    if len(self.belief_confidence_history[agent_id][dimension]) > self.prediction_volatility_window_size:
+                        self.belief_confidence_history[agent_id][dimension] = \
+                            self.belief_confidence_history[agent_id][dimension][-self.prediction_volatility_window_size:]
+    
+    def compute_prediction_volatility(self) -> Dict[str, float]:
+        """Compute various prediction volatility metrics."""
+        volatility_metrics = {}
+        
+        # Compute mean volatility across all agents/dimensions
+        all_mean_volatilities = defaultdict(lambda: defaultdict(float))
+        all_mean_momentum_volatilities = defaultdict(lambda: defaultdict(float))
+        for agent_id in self.belief_mean_history.keys():
+            for dimension in self.belief_mean_history[agent_id].keys():
+                mean_history = self.belief_mean_history[agent_id][dimension]
+                mean_history_np = np.array(mean_history)
+                mean_diff_history = mean_history_np[1:] - mean_history_np[:-1]  # Compute first differences
+                if len(mean_history) > 1:
+                    mean_volatility = np.std(mean_history)
+                    mean_momentum_volatility = np.std(mean_diff_history)
+                    all_mean_volatilities[agent_id][dimension] = mean_volatility
+                    all_mean_momentum_volatilities[agent_id][dimension] = mean_momentum_volatility
+        
+        # Compute confidence volatility across all agents/dimensions
+        all_confidence_volatilities = defaultdict(lambda: defaultdict(float))
+        all_confidence_momentum_volatilities = defaultdict(lambda: defaultdict(float))
+        for agent_id in self.belief_confidence_history.keys():
+            for dimension in self.belief_confidence_history[agent_id].keys():
+                confidence_history = self.belief_confidence_history[agent_id][dimension]
+                confidence_history_np = np.array(confidence_history)
+                confidence_diff_history = confidence_history_np[1:] - confidence_history_np[:-1]  # Compute first differences
+                if len(confidence_history) > 1:
+                    confidence_volatility = np.std(confidence_history)
+                    confidence_momentum_volatility = np.std(confidence_diff_history)
+                    all_confidence_volatilities[agent_id][dimension] = confidence_volatility
+                    all_confidence_momentum_volatilities[agent_id][dimension] = confidence_momentum_volatility
+        
+        volatility_metrics['mean_volatilities'] = all_mean_volatilities
+        volatility_metrics['mean_momentum_volatilities'] = all_mean_momentum_volatilities
+        volatility_metrics['confidence_volatilities'] = all_confidence_volatilities
+        volatility_metrics['confidence_momentum_volatilities'] = all_confidence_momentum_volatilities        
+        
+        # Store computed metrics
+        volatility_record = {
+            'round': getattr(self, 'last_evaluation_round', 0),
+            'source_id': self.source_id,
+            'timestamp': time.time(),
+            **volatility_metrics
+        }
+        self.prediction_volatility_history.append(volatility_record)
+        
+        # Keep only recent history
+        if len(self.prediction_volatility_history) > self.prediction_volatility_window_size:
+            self.prediction_volatility_history = self.prediction_volatility_history[-self.prediction_volatility_window_size:]
+        
+        return volatility_metrics
+
+    # ------------------------------------------------------------------
+    # End Prediction Volatility Tracking Methods
+    # ------------------------------------------------------------------
+    
+    # ------------------------------------------------------------------
+    # Monte Carlo Simulation Methods for Risk-Sensitive Investment
+    # ------------------------------------------------------------------
+    def sample_from_belief_states(self, agent_ids: List[int], dimensions: List[str]) -> Dict[int, Dict[str, float]]:
+        """
+        Sample scores from Beta distributions for given agents and dimensions.
+        
+        Parameters:
+        - agent_ids: List of agent IDs to sample
+        - dimensions: List of dimensions to sample
+        
+        Returns:
+        - Dict mapping agent_id -> dimension -> sampled_score
+        """
+        sampled_scores = {}
+        
+        for agent_id in agent_ids:
+            sampled_scores[agent_id] = {}
+            for dimension in dimensions:
+                belief_params = self.belief_state[agent_id].get(dimension)
+                
+                if belief_params is not None:
+                    alpha, beta = belief_params
+                    # Sample from Beta distribution
+                    sampled_score = np.random.beta(alpha, beta)
+                    sampled_scores[agent_id][dimension] = sampled_score
+                else:
+                    # If no belief state, use neutral default
+                    sampled_scores[agent_id][dimension] = 0.5
+        
+        return sampled_scores
+    
+    def monte_carlo_projected_capital_simulation(self, own_evaluations: Dict[int, Dict[str, Tuple[float, float]]], 
+                                                market_prices: Dict[int, Dict[str, float]], 
+                                                dimension: str, 
+                                                num_trials: int = 1000) -> Dict[str, Any]:
+        """
+        Run Monte Carlo simulation to estimate distribution of projected capital shares.
+        
+        Parameters:
+        - own_evaluations: Current mean evaluations {agent_id: {dim: (score, confidence)}}
+        - market_prices: Current market prices {agent_id: {dim: price}}
+        - dimension: Dimension to simulate
+        - num_trials: Number of Monte Carlo trials
+        
+        Returns:
+        - Dict with simulation results including mean, variance, and percentiles
+        """
+        # Get agent IDs that we have evaluations for
+        agent_ids = list(own_evaluations.keys())
+        
+        # Store results from each trial
+        trial_projected_capitals = defaultdict(list)  # agent_id -> [capital_values_across_trials]
+        trial_projected_prices = defaultdict(list)    # agent_id -> [price_values_across_trials]
+        steady_state_capital, steady_state_ratio = self._get_steady_state_capital(market_prices, dimension)
+        
+        for trial in range(num_trials):
+            # Sample scores from belief states
+            sampled_scores = self.sample_from_belief_states(agent_ids, [dimension])
+            
+            # Create evaluation format expected by _project_steady_state_prices
+            trial_evaluations = {}
+            for agent_id in agent_ids:
+                if agent_id in own_evaluations and dimension in own_evaluations[agent_id]:
+                    # Use sampled score with original confidence
+                    original_confidence = own_evaluations[agent_id][dimension][1]
+                    sampled_score = sampled_scores[agent_id][dimension]
+                    trial_evaluations[agent_id] = {dimension: (sampled_score, original_confidence)}
+            
+            # Calculate projected capital shares for this trial
+            trial_projected_prices_dim, trial_projected_capital_dim = self._project_steady_state_prices(
+                    trial_evaluations, dimension, steady_state_capital)
+                    
+            # Store results for this trial
+            for agent_id in trial_projected_capital_dim:
+                trial_projected_capitals[agent_id].append(trial_projected_capital_dim[agent_id])
+                trial_projected_prices[agent_id].append(trial_projected_prices_dim[agent_id])
+                        
+        projected_prices_dim = {}
+        projected_capital_dim = {}
+        for agent_id in agent_ids:
+            if agent_id in trial_projected_prices:
+                projected_capital_dim[agent_id] = np.mean(trial_projected_capitals[agent_id])
+                projected_prices_dim[agent_id] = np.mean(trial_projected_prices[agent_id])
+        return projected_prices_dim, projected_capital_dim, steady_state_ratio
+        
+    
+    def monte_carlo_market_capacity_check(self, own_evaluations: Dict[int, Dict[str, Tuple[float, float]]], 
+                                         market_prices: Dict[int, Dict[str, float]], 
+                                         num_trials: int = None) -> Dict[str, Any]:
+        """
+        Monte Carlo version of check_market_capacity that incorporates uncertainty.
+        
+        Parameters:
+        - own_evaluations: {agent_id: {dim: (score, confidence)}}
+        - market_prices: {agent_id: {dim: price}}
+        - num_trials: Number of Monte Carlo trials (defaults to config value)
+        
+        Returns:
+        - Dict with simulation results for all dimensions
+        """
+        if num_trials is None:
+            num_trials = self.config.get('monte_carlo_trials', 50)
+        
+        projected_capital_shares = {}
+        projected_prices = {}
+        capacity_flags = {}        
+        for dimension in self.expertise_dimensions:
+            # Run Monte Carlo simulation for this dimension
+            projected_prices_dim, projected_capital_dim, steady_state_ratio = self.monte_carlo_projected_capital_simulation(
+                own_evaluations, market_prices, dimension, num_trials
+            )
+            projected_capital_shares[dimension] = projected_capital_dim
+            projected_prices[dimension] = projected_prices_dim
+            capacity_flags[dimension] = steady_state_ratio > 1.2
+        
+        return projected_prices, projected_capital_shares, capacity_flags    
+    # ------------------------------------------------------------------
+    # End Monte Carlo Simulation Methods
+    # ------------------------------------------------------------------
+    
     def evaluate_agents_batch(self, agent_ids: List[int], dimensions: Optional[List[str]] = None, 
                               evaluation_round: Optional[int] = None, use_comparative: bool = True,
                               analysis_mode: bool = False, detailed_analysis: bool = False):
@@ -643,6 +855,10 @@ class InformationSource:
                         # Use base score for agents without any prior belief
                         base_score, base_conf = base_scores_with_conf.get(aid, {}).get(dim, (0.5, 0.3))
                         final_evals[aid][dim] = (base_score, base_conf * 0.9)  # Slight decay as in original
+
+        # ------------------------------------------------------------
+        # Phase 5 – Update prediction volatility tracking after belief update
+        self.update_prediction_volatility_tracking(evaluation_round=getattr(self, 'last_evaluation_round', None))
 
         if detailed_analysis:
             return final_evals, comparison_log
