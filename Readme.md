@@ -1,7 +1,5 @@
-Project: Trust Market
+Trust Market : Reputation Market for AI agents for market based scalable oversight
 
-I'm working on this project on trust markets where there are a bunch of customer service agents and users interacting... the market defines some ground truth sources of trust such as the regulator and user agents which jointly define the true trust in the agents. 
-Then there are certain investors such as auditors and user reps who are interested in gaining trust in the ecosystem by correctly making investments in agents in a way that's aligned with the true trust in the agents (by the ground truth sources).
+Trust markets are a reputation system for AI agents designed to handle the dynamism and scale of an Agentic Platform. It's designed as a mechanism to incentivize and incorporate diverse forms of feedback/information from a variety of different information sources such as users, auditors, red teamers, experts, regulators etc. The repository simulates a trust market in a customer care scenario with all entities modelled as AI agents. 
 
-The trust market is a simulation environment that runs a bunch of customer service agents and users interacting... 
-Then collects evaluation and investment data from the users, investors and other information sources and keeps track of the trust in the agents and the investors.
+(The project is still in development. Hopefully to be submitted to ICLR 2026)
