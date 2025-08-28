@@ -5,6 +5,8 @@ from typing import Dict, List, Tuple, Set, Optional, Union, Any
 from trust_market.trust_market import TrustMarket
 import numpy as np
 import ipdb # Assuming ipdb is used for debugging, otherwise remove
+import os
+import json
 
 
 class TrustMarketSystem:
@@ -230,7 +232,7 @@ class TrustMarketSystem:
         # whether to use direct feedback (if available) or perform their own LLM evals.
 
 
-    def process_comparative_feedback(self, comparison_data: Dict):
+    def process_comparative_feedback(self, comparison_data: Dict, bayesian=False):
         """
         Processes comparative user feedback and sends it to the TrustMarket.
 
@@ -251,7 +253,8 @@ class TrustMarketSystem:
                 agent_b_id,
                 winners=winners,
                 # Pass the raw reasoning and confidence if available
-                raw_comparison_details=comparison_data 
+                raw_comparison_details=comparison_data,
+                bayesian=bayesian
             )
         except Exception as e:
             print(f"    Error recording comparative feedback in market for agents {agent_a_id} vs {agent_b_id}: {e}")
@@ -356,8 +359,14 @@ class TrustMarketSystem:
         if comparative_winners_batch:
             # The structure is: list of dicts with all comparison details
             # self.debug_print_comparisons(comparative_winners_batch) # Optional debug print
-            for comparison_data in comparative_winners_batch:
-                self.process_comparative_feedback(comparison_data)
+            
+            if isinstance(list(comparative_winners_batch[0]['winners'].values())[0], dict) and 'rating' in list(comparative_winners_batch[0]['winners'].values())[0]:
+                for comparison_data in comparative_winners_batch:
+                    self.process_comparative_feedback(comparison_data, bayesian=True)
+                self.trust_market.user_update.decide_investments()
+            else:
+                for comparison_data in comparative_winners_batch:
+                    self.process_comparative_feedback(comparison_data)
 
     def debug_print_comparisons(self, output):
         comparisons = output.get("comparative_winners", [])
@@ -406,7 +415,7 @@ class TrustMarketSystem:
                         detailed_analysis=True # Trigger detailed logging
                     )
                     detailed_evaluations[source_id] = analysis_data
-                    
+                                        
                     if investments:
                         print(f"  Source {source_id} proposed {len(investments)} investments.")
                         # Process these investments in the trust market
@@ -419,6 +428,7 @@ class TrustMarketSystem:
                     # Optionally, add traceback for debugging
                     import traceback
                     traceback.print_exc()
+        
         return detailed_evaluations
 
     def get_agent_trust_scores(self) -> Dict[int, Dict[str, float]]:
@@ -501,3 +511,102 @@ class TrustMarketSystem:
         return self.trust_market.visualize_source_performance(
             sources, dimensions, start_round, end_round
         )
+
+    def get_base_save_dir(self):
+        """Get the base directory for saving logs."""
+        return os.path.join(self.base_save_dir, "trust_market_logs")
+
+    def load_cached_evaluations_from_log(self, log_filepath: str):
+        """
+        Load cached evaluations from a previously saved log file and 
+        distribute them to information sources.
+        
+        Args:
+            log_filepath: Path to the JSON log file from a previous run
+        """
+        
+        if not os.path.exists(log_filepath):
+            print(f"Error: Log file {log_filepath} not found")
+            return False
+            
+        try:
+            with open(log_filepath, 'r', encoding='utf-8') as f:
+                log_data = json.load(f)
+            
+            detailed_evaluations = log_data.get('detailed_evaluations', {})
+            
+            # Extract evaluations by round and source
+            evaluations_by_source_by_round = {}
+            comparison_log_by_source_by_round = {}
+            
+            for round_data in detailed_evaluations:
+                round_num = round_data.get('round')
+                source_evaluations = round_data.get('source_evaluations', {})
+                
+                if round_num is not None:
+                    for source_id, source_data in source_evaluations.items():
+                        if source_id not in evaluations_by_source_by_round:
+                            evaluations_by_source_by_round[source_id] = {}
+                            
+                        # Check if this source_data contains own_evaluations
+                        if 'own_evaluations' in source_data:
+                            evaluations_by_source_by_round[source_id][round_num] = source_data['own_evaluations']
+                        
+                        if 'comparison_log' in source_data:
+                            comparison_log_by_source_by_round[source_id][round_num] = source_data['comparison_log']
+            
+            # Distribute cached evaluations to information sources
+            sources_loaded = 0
+            for source_id, cached_evals in evaluations_by_source_by_round.items():
+                if source_id in self.information_sources:
+                    source = self.information_sources[source_id]
+                    if hasattr(source, 'load_cached_evaluations'):
+                        source.load_cached_evaluations(cached_evals, comparison_log_by_source_by_round.get(source_id, {}))
+                        sources_loaded += 1
+                        print(f"Loaded cached evaluations for source {source_id}: {len(cached_evals)} rounds")
+                    else:
+                        print(f"Warning: Source {source_id} does not support cached evaluations")
+                else:
+                    print(f"Warning: Source {source_id} from log file not found in current system")
+            
+            # Also try to load user evaluations from the simulation module
+            if hasattr(self, 'simulation_module') and self.simulation_module:
+                # Check if there are user evaluations in the log data
+                user_evaluations_by_round = {}
+                for round_data in detailed_evaluations:
+                    round_num = round_data.get('round')
+                    user_evaluations = round_data.get('user_evaluations', [])
+                    
+                    if round_num is not None and user_evaluations:
+                        # Convert user evaluations list to the expected format
+                        # This assumes user_evaluations is a list of rating dicts
+                        user_evaluations_by_round[round_num] = user_evaluations
+                
+                if user_evaluations_by_round and hasattr(self.simulation_module, 'load_cached_user_evaluations'):
+                    self.simulation_module.load_cached_user_evaluations(user_evaluations_by_round)
+                    print(f"Loaded cached user evaluations for {len(user_evaluations_by_round)} rounds")
+            
+            print(f"Successfully loaded cached evaluations for {sources_loaded} sources from {log_filepath}")
+            return True
+            
+        except Exception as e:
+            print(f"Error loading cached evaluations from {log_filepath}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def enable_cached_evaluations_for_all_sources(self, enable: bool = True):
+        """Enable or disable cached evaluation mode for all information sources that support it."""
+        for source_id, source in self.information_sources.items():
+            if hasattr(source, 'enable_cached_evaluations'):
+                source.enable_cached_evaluations(enable)
+            else:
+                print(f"Warning: Source {source_id} does not support cached evaluations")
+        
+        # Also enable cached evaluations for the simulation module
+        if hasattr(self, 'simulation_module') and self.simulation_module:
+            if hasattr(self.simulation_module, 'enable_cached_user_evaluations'):
+                self.simulation_module.enable_cached_user_evaluations(enable)
+                print(f"Enabled cached user evaluations for simulation module")
+            else:
+                print(f"Warning: Simulation module does not support cached evaluations")

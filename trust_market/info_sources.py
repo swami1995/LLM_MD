@@ -9,7 +9,38 @@ import ipdb
 import copy
 
 class InformationSource:
-    """Base class for all information sources in the trust market."""
+    """
+    Base class for all information sources in the trust market.
+    
+    Risk Configuration Parameters:
+    ----------------------------
+    # Core Risk Calculation
+    - volatility_risk_weight (float, default=0.5): Weight 'w' in Total_Risk = sqrt((Risk_MC)^2 + (w * Risk_Vol)^2)
+    - volatility_normalization_method (str, default='historical_range'): Method to normalize volatility
+      Options: 'historical_range', 'price_scaling', 'capital_scaling', 'sigmoid'
+    
+    # Volatility Component Weights (for combining different volatility sources)
+    - agent_volatility_weight (float, default=0.6): Weight for agent prediction volatility vs market volatility
+    - market_volatility_weight (float, default=0.4): Weight for market volatility (should sum to 1.0 with agent_volatility_weight)
+    - mean_volatility_weight (float, default=0.7): Weight for mean/score volatility vs momentum volatility
+    - momentum_volatility_weight (float, default=0.3): Weight for momentum (first-difference) volatility
+    - confidence_volatility_weight (float, default=0.4): Weight for confidence volatility in agent predictions
+    - score_capital_volatility_weight (float, default=0.6): Weight for score vs capital volatility in market metrics
+    
+    # Volatility Normalization Parameters
+    - max_historical_volatility (float, default=1.0): Maximum volatility seen (updated automatically)
+    - min_historical_volatility (float, default=0.0): Minimum volatility for normalization
+    - volatility_sigmoid_steepness (float, default=5.0): Steepness parameter for sigmoid normalization
+    
+    # Risk-Adjusted Investment Parameters
+    - risk_adjustment_method (str, default='multiplicative'): Method for adjusting investments based on risk
+      Options: 'multiplicative', 'additive', 'threshold', 'exponential'
+    - risk_aversion_factor (float, default=0.5): How much to penalize investments based on risk
+    - min_investment_after_risk_adjustment (float, default=0.01): Minimum investment amount after risk adjustment
+    - max_risk_threshold (float, default=0.8): Maximum risk ratio above which investment is zero (threshold method)
+    - adjust_confidence_with_risk (bool, default=False): Whether to lower confidence when risk is high
+    - risk_confidence_penalty (float, default=0.2): How much to reduce confidence based on risk ratio
+    """
     
     def __init__(self, source_id, source_type, expertise_dimensions,
                  evaluation_confidence=None, market=None, memory_length_n: int = 3):
@@ -42,12 +73,16 @@ class InformationSource:
         self.comparison_evaluation_cache = {}
         self.hybrid_evaluation_cache = {} # Cache for combined results
 
-        self.last_evaluation_round = -1 # Track last evaluated round
+        self.last_evaluation_round = -1
+        self.compared_pairs = set() # Track which pairs have been compared in current round
 
-        self.compared_pairs = set() # Track compared pairs within a round
-        self.derived_agent_scores = {} # Store scores derived from comparisons
+        # Cached evaluations for reuse across runs
+        self.cached_evaluations = {}  # {evaluation_round: {agent_id: {dimension: (score, confidence)}}}
+        self.cached_comparison_log = {}  # {evaluation_round: {agent_id: {dimension: (score, confidence)}}}
+        self.use_cached_evaluations = False  # Flag to enable using cached evaluations
 
         # --- NEW: mirror user_rep tracking for confidences & cache ---
+        self.derived_agent_scores = defaultdict(lambda: defaultdict(list))
         self.derived_agent_confidences = defaultdict(lambda: defaultdict(list))
         self.comparison_results_cache = {}       # {(aid1,aid2,round): (derived_scores_dict, comparison_confidences_dict)}
         self.agent_comparison_counts = defaultdict(int)
@@ -69,6 +104,9 @@ class InformationSource:
         # Track prediction volatility metrics
         self.prediction_volatility_history = []  # List of volatility metrics per evaluation round
         self.prediction_volatility_window_size = 10  # Number of evaluations to consider for volatility
+        
+        # Prediction Volatility Tracking
+        self.prediction_volatility = defaultdict(lambda: defaultdict(float))  # agent_id -> dim -> volatility score
         
         # To be configured by subclasses
         self.verbose = False 
@@ -295,6 +333,10 @@ class InformationSource:
         Returns:
         - (alpha, beta): Parameters for Beta distribution
         """
+        EPSILON = 1e-6  # Small value to avoid division by zero
+        # Clamp the score to be slightly away from 0 and 1
+        score = max(EPSILON, min(1.0 - EPSILON, score))
+        
         # Get configuration parameters
         M = self.config.get('confidence_to_kappa_scale_factor', 50.0)
         
@@ -486,6 +528,550 @@ class InformationSource:
         
         return volatility_metrics
 
+    def compute_risk(self, projected_capital_holdings, current_capital_holdings, type='relative_capital'):
+        """
+        Compute risk based on projected capital holdings and current capital holdings.
+        
+        Parameters:
+        - projected_capital_holdings: Dict[agent_id][dimension] = (mean_capital, std_capital)
+        - current_capital_holdings: Dict[agent_id][dimension] = current_capital
+        - type: Type of risk calculation ('relative_capital', 'absolute_capital')
+        
+        Returns:
+        - Dict[agent_id][dimension] = {'risk': float, 'capital_mean': float}
+        """
+        risk_results = defaultdict(lambda: defaultdict(dict))
+        
+        for agent_id in projected_capital_holdings:
+            for dimension in projected_capital_holdings[agent_id]:
+                if isinstance(projected_capital_holdings[agent_id][dimension], tuple):
+                    mean_capital, std_capital = projected_capital_holdings[agent_id][dimension]
+                else:
+                    mean_capital = projected_capital_holdings[agent_id][dimension]
+                    std_capital = 0.0
+                
+                if type == 'relative_capital':
+                    # Relative risk based on capital holdings
+                    current_capital = current_capital_holdings.get(agent_id, {}).get(dimension, 1.0)
+                    risk = std_capital / max(1e-6, current_capital)
+                elif type == 'absolute_capital':
+                    # Absolute risk based on standard deviation of capital
+                    risk = std_capital
+                else:
+                    raise ValueError(f"Unknown risk type: {type}")
+                # Store results
+                risk_results[agent_id][dimension] = risk
+        return risk_results
+
+    # ------------------------------------------------------------------
+    # Elaborate Risk Computation Methods - Not used yet : We'll figure it out later
+    # ------------------------------------------------------------------
+    def compute_risk_elaborate(self, projected_capital_holdings, market_prices=None, current_capital_holdings=None):
+        """
+        Compute comprehensive risk for each dimension based on:
+        1. Monte Carlo risk (standard deviation of projected capital)
+        2. Volatility-based risk (normalized historical volatility scaled to capital amount)
+        3. Combined total risk using configurable weighting
+        
+        Parameters:
+        - projected_capital_holdings: Dict[agent_id][dimension] = (mean_capital, std_capital)
+        - market_prices: Dict[agent_id][dimension] = price (for scaling volatility risk)
+        - current_capital_holdings: Dict[agent_id][dimension] = current_capital (for scaling)
+        
+        Returns:
+        - Dict[agent_id][dimension] = {'monte_carlo_risk': float, 'volatility_risk': float, 'total_risk': float}
+        """
+        risk_results = defaultdict(lambda: defaultdict(dict))
+        
+        # Get configuration parameters
+        volatility_weight = self.config.get('volatility_risk_weight', 0.5)
+        volatility_normalization_method = self.config.get('volatility_normalization_method', 'historical_range')
+        
+        # Get current volatility metrics
+        agent_volatility_metrics = self.compute_prediction_volatility()
+        
+        # Get market volatility if market is available
+        market_volatility_metrics = {}
+        if self.market is not None:
+            market_volatility_metrics = self.market.compute_market_volatility()
+        
+        for agent_id in projected_capital_holdings:
+            for dimension in projected_capital_holdings[agent_id]:
+                # --- 1. Monte Carlo Risk (Risk_MC) ---
+                if isinstance(projected_capital_holdings[agent_id][dimension], tuple):
+                    mean_capital, std_capital = projected_capital_holdings[agent_id][dimension]
+                    monte_carlo_risk = std_capital
+                else:
+                    # If not a tuple, assume it's just the mean with no std
+                    mean_capital = projected_capital_holdings[agent_id][dimension]
+                    monte_carlo_risk = 0.0
+                
+                # --- 2. Volatility-Based Risk (Risk_Vol) ---
+                volatility_risk = self._compute_volatility_risk(
+                    agent_id, dimension, mean_capital, 
+                    agent_volatility_metrics, market_volatility_metrics,
+                    market_prices, current_capital_holdings,
+                    volatility_normalization_method
+                )
+                
+                # --- 3. Total Risk ---
+                # Total_Risk = sqrt((Risk_MC)^2 + (w * Risk_Vol)^2)
+                total_risk = np.sqrt(monte_carlo_risk**2 + (volatility_weight * volatility_risk)**2)
+                
+                # Store results
+                risk_results[agent_id][dimension] = {
+                    'monte_carlo_risk': monte_carlo_risk,
+                    'volatility_risk': volatility_risk,
+                    'weighted_volatility_risk': volatility_weight * volatility_risk,
+                    'total_risk': total_risk,
+                    'capital_mean': mean_capital
+                }
+        
+        return risk_results
+    
+    def _compute_volatility_risk(self, agent_id, dimension, capital_amount, 
+                                agent_volatility_metrics, market_volatility_metrics,
+                                market_prices=None, current_capital_holdings=None,
+                                normalization_method='historical_range'):
+        """
+        Compute volatility-based risk by combining agent prediction volatility and market volatility,
+        then scaling it to the capital amount.
+        
+        Parameters:
+        - agent_id: The agent ID
+        - dimension: The dimension 
+        - capital_amount: The projected capital amount to scale the risk to
+        - agent_volatility_metrics: Output from compute_prediction_volatility()
+        - market_volatility_metrics: Output from market.compute_market_volatility()
+        - market_prices: Current market prices for normalization
+        - current_capital_holdings: Current capital holdings for reference
+        - normalization_method: Method to normalize volatility ('historical_range', 'price_scaling', 'capital_scaling')
+        
+        Returns:
+        - float: Volatility-based risk scaled to capital amount
+        """
+        # Get agent-specific volatility components
+        agent_mean_volatility = agent_volatility_metrics.get('mean_volatilities', {}).get(agent_id, {}).get(dimension, 0.0)
+        agent_confidence_volatility = agent_volatility_metrics.get('confidence_volatilities', {}).get(agent_id, {}).get(dimension, 0.0)
+        agent_mean_momentum = agent_volatility_metrics.get('mean_momentum_volatilities', {}).get(agent_id, {}).get(dimension, 0.0)
+        agent_confidence_momentum = agent_volatility_metrics.get('confidence_momentum_volatilities', {}).get(agent_id, {}).get(dimension, 0.0)
+        
+        # Get market-specific volatility components
+        market_score_volatility = market_volatility_metrics.get('score_volatilities', {}).get(agent_id, {}).get(dimension, 0.0)
+        market_capital_volatility = market_volatility_metrics.get('capital_volatility', {}).get(agent_id, {}).get(dimension, 0.0)
+        market_score_momentum = market_volatility_metrics.get('score_momentum_volatilities', {}).get(agent_id, {}).get(dimension, 0.0)
+        market_capital_momentum = market_volatility_metrics.get('capital_momentum_volatilities', {}).get(agent_id, {}).get(dimension, 0.0)
+        
+        # Combine volatility components with configurable weights
+        agent_volatility_weight = self.config.get('agent_volatility_weight', 0.6)
+        market_volatility_weight = self.config.get('market_volatility_weight', 0.4)
+        mean_volatility_weight = self.config.get('mean_volatility_weight', 0.7)
+        momentum_weight = self.config.get('momentum_volatility_weight', 0.3)
+        confidence_weight = self.config.get('confidence_volatility_weight', 0.4)
+        score_capital_weight = self.config.get('score_capital_volatility_weight', 0.6)
+        
+        # Combine agent volatilities
+        combined_agent_volatility = (
+            mean_volatility_weight * agent_mean_volatility +
+            momentum_weight * agent_mean_momentum +
+            confidence_weight * agent_confidence_volatility +
+            momentum_weight * confidence_weight * agent_confidence_momentum
+        )
+        
+        # Combine market volatilities  
+        combined_market_volatility = (
+            score_capital_weight * market_score_volatility +
+            (1 - score_capital_weight) * market_capital_volatility +
+            momentum_weight * score_capital_weight * market_score_momentum +
+            momentum_weight * (1 - score_capital_weight) * market_capital_momentum
+        )
+        
+        # Overall combined volatility
+        combined_volatility = (
+            agent_volatility_weight * combined_agent_volatility +
+            market_volatility_weight * combined_market_volatility
+        )
+        
+        # Normalize the combined volatility to a [0, 1] scale
+        normalized_volatility = self._normalize_volatility(
+            combined_volatility, agent_id, dimension, 
+            normalization_method, market_prices, current_capital_holdings
+        )
+        
+        # Scale the normalized volatility to the capital amount
+        volatility_risk = normalized_volatility * abs(capital_amount)
+        
+        return volatility_risk
+    
+    def _normalize_volatility(self, combined_volatility, agent_id, dimension, 
+                            normalization_method='historical_range', 
+                            market_prices=None, current_capital_holdings=None):
+        """
+        Normalize volatility to a [0, 1] range using different methods.
+        
+        Parameters:
+        - combined_volatility: The raw combined volatility value
+        - agent_id: Agent ID for context
+        - dimension: Dimension for context
+        - normalization_method: Method to use for normalization
+        - market_prices: Current market prices
+        - current_capital_holdings: Current capital holdings
+        
+        Returns:
+        - float: Normalized volatility in [0, 1] range
+        """
+        if combined_volatility <= 0:
+            return 0.0
+            
+        if normalization_method == 'historical_range':
+            # Normalize based on historical range of volatilities seen
+            max_historical_volatility = self.config.get('max_historical_volatility', 1.0)
+            min_historical_volatility = self.config.get('min_historical_volatility', 0.0)
+            
+            # Update max if current volatility is higher
+            if combined_volatility > max_historical_volatility:
+                max_historical_volatility = combined_volatility
+                self.config['max_historical_volatility'] = max_historical_volatility
+            
+            if max_historical_volatility > min_historical_volatility:
+                normalized = (combined_volatility - min_historical_volatility) / (max_historical_volatility - min_historical_volatility)
+            else:
+                normalized = 0.5  # Default middle value if no range
+                
+        elif normalization_method == 'price_scaling':
+            # Normalize based on current market price
+            if market_prices and agent_id in market_prices and dimension in market_prices[agent_id]:
+                current_price = market_prices[agent_id][dimension]
+                # Scale volatility relative to price (higher price = higher tolerance for absolute volatility)
+                normalized = combined_volatility / max(current_price, 0.01)  # Avoid division by zero
+            else:
+                normalized = combined_volatility  # Fallback to raw volatility
+                
+        elif normalization_method == 'capital_scaling':
+            # Normalize based on current capital holdings
+            if current_capital_holdings and agent_id in current_capital_holdings and dimension in current_capital_holdings[agent_id]:
+                current_capital = current_capital_holdings[agent_id][dimension]
+                # Scale volatility relative to current capital
+                normalized = combined_volatility / max(abs(current_capital), 1.0)
+            else:
+                normalized = combined_volatility
+                
+        elif normalization_method == 'sigmoid':
+            # Use sigmoid function to bound volatility to [0, 1]
+            sigmoid_steepness = self.config.get('volatility_sigmoid_steepness', 5.0)
+            normalized = 1.0 / (1.0 + np.exp(-sigmoid_steepness * combined_volatility))
+            
+        else:
+            # Default: simple clipping to [0, 1]
+            normalized = min(1.0, max(0.0, combined_volatility))
+        
+        return min(1.0, max(0.0, normalized))  # Ensure result is in [0, 1]
+    
+    def compute_risk_adjusted_investment_amounts(self, base_investment_amounts, risk_results, 
+                                               risk_adjustment_method='multiplicative'):
+        """
+        Adjust investment amounts based on computed risk to implement risk-sensitive investment.
+        
+        Parameters:
+        - base_investment_amounts: Dict[agent_id][dimension] = base_amount
+        - risk_results: Output from compute_risk()
+        - risk_adjustment_method: Method to adjust investments ('multiplicative', 'additive', 'threshold')
+        
+        Returns:
+        - Dict[agent_id][dimension] = risk_adjusted_amount
+        """
+        adjusted_amounts = defaultdict(lambda: defaultdict(float))
+        
+        # Get configuration parameters
+        risk_aversion_factor = self.config.get('risk_aversion_factor', 0.5)  # How much to penalize risk
+        min_investment_after_risk = self.config.get('min_investment_after_risk_adjustment', 0.01)
+        max_risk_threshold = self.config.get('max_risk_threshold', 0.8)  # Above this, no investment
+        
+        for agent_id in base_investment_amounts:
+            for dimension in base_investment_amounts[agent_id]:
+                base_amount = base_investment_amounts[agent_id][dimension]
+                
+                if agent_id in risk_results and dimension in risk_results[agent_id]:
+                    risk_data = risk_results[agent_id][dimension]
+                    total_risk = risk_data['total_risk']
+                    capital_mean = risk_data['capital_mean']
+                    
+                    # Normalize risk relative to capital mean to get risk ratio
+                    if abs(capital_mean) > 0.001:
+                        risk_ratio = total_risk / abs(capital_mean)
+                    else:
+                        risk_ratio = total_risk  # If capital is near zero, risk is the absolute risk
+                    
+                    # Apply risk adjustment based on method
+                    if risk_adjustment_method == 'multiplicative':
+                        # Reduce investment proportionally to risk
+                        risk_multiplier = max(0.0, 1.0 - risk_aversion_factor * risk_ratio)
+                        adjusted_amount = base_amount * risk_multiplier
+                        
+                    elif risk_adjustment_method == 'additive':
+                        # Subtract risk-based penalty from investment
+                        risk_penalty = risk_aversion_factor * total_risk
+                        adjusted_amount = base_amount - risk_penalty
+                        
+                    elif risk_adjustment_method == 'threshold':
+                        # Zero investment if risk is too high, otherwise use base amount
+                        if risk_ratio > max_risk_threshold:
+                            adjusted_amount = 0.0
+                        else:
+                            adjusted_amount = base_amount
+                            
+                    elif risk_adjustment_method == 'exponential':
+                        # Exponentially decay investment with risk
+                        risk_multiplier = np.exp(-risk_aversion_factor * risk_ratio)
+                        adjusted_amount = base_amount * risk_multiplier
+                        
+                    else:
+                        # Default: no adjustment
+                        adjusted_amount = base_amount
+                    
+                    # Ensure minimum investment if positive
+                    if base_amount > 0 and adjusted_amount > 0:
+                        adjusted_amount = max(adjusted_amount, min_investment_after_risk)
+                    elif base_amount < 0 and adjusted_amount < 0:
+                        adjusted_amount = min(adjusted_amount, -min_investment_after_risk)
+                        
+                else:
+                    # No risk data available, use base amount
+                    adjusted_amount = base_amount
+                
+                adjusted_amounts[agent_id][dimension] = adjusted_amount
+        
+        return adjusted_amounts
+    
+    def get_current_capital_holdings_from_market(self):
+        """
+        Get current capital holdings for this source from the market.
+        
+        Returns:
+        - Dict[agent_id][dimension] = current_capital_amount
+        """
+        if self.market is None:
+            return defaultdict(lambda: defaultdict(float))
+            
+        current_holdings = defaultdict(lambda: defaultdict(float))
+        
+        # Get current investment amounts from market
+        for agent_id in self.source_investments:
+            for dimension in self.source_investments[agent_id]:
+                current_holdings[agent_id][dimension] = self.source_investments[agent_id][dimension]
+        
+        return current_holdings
+    
+    def risk_adjusted_decide_investments(self, base_investment_method, *args, **kwargs):
+        """
+        Wrapper method that applies risk adjustment to any base investment decision method.
+        
+        This can be used by subclasses to easily add risk adjustment to their existing
+        decide_investments implementations.
+        
+        Parameters:
+        - base_investment_method: Function that returns base investment decisions
+        - *args, **kwargs: Arguments to pass to the base investment method
+        
+        Returns:
+        - List of (agent_id, dimension, risk_adjusted_amount, confidence) tuples
+        """
+        # Get base investment decisions
+        base_decisions = base_investment_method(*args, **kwargs)
+        
+        # Convert to dict format for easier manipulation
+        base_amounts = defaultdict(lambda: defaultdict(float))
+        decision_metadata = {}  # Store confidence and other metadata
+        
+        for agent_id, dimension, amount, confidence in base_decisions:
+            base_amounts[agent_id][dimension] = amount
+            decision_metadata[(agent_id, dimension)] = {'confidence': confidence}
+        
+        # Get current evaluations for risk computation
+        agent_ids = list(base_amounts.keys())
+        dimensions = list(set(dim for agent_dims in base_amounts.values() for dim in agent_dims.keys()))
+        
+        # Get current evaluations (this should be implemented by subclasses appropriately)
+        current_evaluations = {}
+        for agent_id in agent_ids:
+            current_evaluations[agent_id] = {}
+            for dimension in dimensions:
+                # Try to get from derived scores or belief state
+                if hasattr(self, 'derived_agent_scores') and agent_id in self.derived_agent_scores:
+                    score = self.derived_agent_scores[agent_id].get(dimension, 0.5)
+                elif hasattr(self, 'belief_state') and agent_id in self.belief_state and dimension in self.belief_state[agent_id]:
+                    belief = self.belief_state[agent_id][dimension]
+                    if belief is not None:
+                        score, conf = self._beta_params_to_score_and_confidence(*belief)
+                    else:
+                        score, conf = 0.5, 0.3
+                else:
+                    score, conf = 0.5, 0.3
+                
+                # Get confidence
+                if hasattr(self, '_calculate_derived_confidence'):
+                    conf = self._calculate_derived_confidence(agent_id, [dimension]).get(dimension, 0.3)
+                else:
+                    conf = 0.3
+                    
+                current_evaluations[agent_id][dimension] = (score, conf)
+        
+        # Get market prices and current holdings
+        market_prices = None
+        current_capital_holdings = None
+        if self.market is not None:
+            try:
+                market_prices = self.market.get_market_prices(agent_ids, dimensions)
+                current_capital_holdings = self.get_current_capital_holdings_from_market()
+            except:
+                pass  # Market might not have these methods yet
+        
+        # Compute Monte Carlo projections for risk assessment
+        projected_capital_holdings = {}
+        if hasattr(self, '_monte_carlo_check_market_capacity'):
+            try:
+                _, projected_capitals, _ = self._monte_carlo_check_market_capacity(
+                    current_evaluations, market_prices
+                )
+                projected_capital_holdings = projected_capitals
+            except:
+                # Fallback: use current evaluations as mean with some default std
+                for agent_id in current_evaluations:
+                    projected_capital_holdings[agent_id] = {}
+                    for dimension in current_evaluations[agent_id]:
+                        score, conf = current_evaluations[agent_id][dimension]
+                        # Convert to a capital-like value
+                        capital_mean = score * 100  # Scale up for capital representation
+                        capital_std = (1 - conf) * capital_mean * 0.1  # Higher uncertainty = higher std
+                        projected_capital_holdings[agent_id][dimension] = (capital_mean, capital_std)
+        
+        if not projected_capital_holdings:
+            # Ultimate fallback
+            for agent_id in base_amounts:
+                projected_capital_holdings[agent_id] = {}
+                for dimension in base_amounts[agent_id]:
+                    projected_capital_holdings[agent_id][dimension] = (abs(base_amounts[agent_id][dimension]) * 10, abs(base_amounts[agent_id][dimension]))
+        
+        # Compute comprehensive risk
+        risk_results = self.compute_risk(
+            projected_capital_holdings, 
+            market_prices, 
+            current_capital_holdings
+        )
+        
+        # Apply risk adjustment to base investment amounts
+        risk_adjustment_method = self.config.get('risk_adjustment_method', 'multiplicative')
+        adjusted_amounts = self.compute_risk_adjusted_investment_amounts(
+            base_amounts, risk_results, risk_adjustment_method
+        )
+        
+        # Convert back to list format
+        risk_adjusted_decisions = []
+        for agent_id in adjusted_amounts:
+            for dimension in adjusted_amounts[agent_id]:
+                adjusted_amount = adjusted_amounts[agent_id][dimension]
+                original_confidence = decision_metadata.get((agent_id, dimension), {}).get('confidence', 0.5)
+                
+                # Optionally adjust confidence based on risk
+                adjust_confidence_with_risk = self.config.get('adjust_confidence_with_risk', False)
+                if adjust_confidence_with_risk and agent_id in risk_results and dimension in risk_results[agent_id]:
+                    total_risk = risk_results[agent_id][dimension]['total_risk']
+                    capital_mean = risk_results[agent_id][dimension]['capital_mean']
+                    if abs(capital_mean) > 0.001:
+                        risk_ratio = total_risk / abs(capital_mean)
+                        # Lower confidence when risk is high
+                        confidence_penalty = self.config.get('risk_confidence_penalty', 0.2) * risk_ratio
+                        adjusted_confidence = max(0.1, original_confidence - confidence_penalty)
+                    else:
+                        adjusted_confidence = original_confidence
+                else:
+                    adjusted_confidence = original_confidence
+                
+                risk_adjusted_decisions.append((agent_id, dimension, adjusted_amount, adjusted_confidence))
+        
+        return risk_adjusted_decisions
+    
+    def get_risk_metrics_summary(self, projected_capital_holdings, market_prices=None, current_capital_holdings=None):
+        """
+        Get a summary of risk metrics for analysis and debugging.
+        
+        Returns:
+        - Dict with summary statistics about risk across agents and dimensions
+        """
+        risk_results = self.compute_risk(projected_capital_holdings, market_prices, current_capital_holdings)
+        
+        summary = {
+            'total_agents': len(risk_results),
+            'total_dimensions': sum(len(dims) for dims in risk_results.values()),
+            'risk_statistics': {
+                'monte_carlo_risk': {'min': float('inf'), 'max': -float('inf'), 'mean': 0, 'std': 0},
+                'volatility_risk': {'min': float('inf'), 'max': -float('inf'), 'mean': 0, 'std': 0},
+                'total_risk': {'min': float('inf'), 'max': -float('inf'), 'mean': 0, 'std': 0}
+            },
+            'high_risk_investments': [],  # Investments with risk above threshold
+            'agent_risk_rankings': []     # Agents ranked by average total risk
+        }
+        
+        all_mc_risks = []
+        all_vol_risks = []
+        all_total_risks = []
+        agent_avg_risks = defaultdict(list)
+        
+        max_risk_threshold = self.config.get('max_risk_threshold', 0.8)
+        
+        for agent_id in risk_results:
+            for dimension in risk_results[agent_id]:
+                risk_data = risk_results[agent_id][dimension]
+                mc_risk = risk_data['monte_carlo_risk']
+                vol_risk = risk_data['volatility_risk']
+                total_risk = risk_data['total_risk']
+                capital_mean = risk_data['capital_mean']
+                
+                all_mc_risks.append(mc_risk)
+                all_vol_risks.append(vol_risk)
+                all_total_risks.append(total_risk)
+                agent_avg_risks[agent_id].append(total_risk)
+                
+                # Check for high-risk investments
+                if abs(capital_mean) > 0.001:
+                    risk_ratio = total_risk / abs(capital_mean)
+                else:
+                    risk_ratio = total_risk
+                    
+                if risk_ratio > max_risk_threshold:
+                    summary['high_risk_investments'].append({
+                        'agent_id': agent_id,
+                        'dimension': dimension,
+                        'risk_ratio': risk_ratio,
+                        'total_risk': total_risk,
+                        'capital_mean': capital_mean
+                    })
+        
+        # Compute statistics
+        if all_mc_risks:
+            summary['risk_statistics']['monte_carlo_risk'] = {
+                'min': min(all_mc_risks), 'max': max(all_mc_risks),
+                'mean': np.mean(all_mc_risks), 'std': np.std(all_mc_risks)
+            }
+        if all_vol_risks:
+            summary['risk_statistics']['volatility_risk'] = {
+                'min': min(all_vol_risks), 'max': max(all_vol_risks),
+                'mean': np.mean(all_vol_risks), 'std': np.std(all_vol_risks)
+            }
+        if all_total_risks:
+            summary['risk_statistics']['total_risk'] = {
+                'min': min(all_total_risks), 'max': max(all_total_risks),
+                'mean': np.mean(all_total_risks), 'std': np.std(all_total_risks)
+            }
+        
+        # Rank agents by average risk
+        for agent_id, risks in agent_avg_risks.items():
+            avg_risk = np.mean(risks)
+            summary['agent_risk_rankings'].append((agent_id, avg_risk))
+        
+        summary['agent_risk_rankings'].sort(key=lambda x: x[1], reverse=True)
+        
+        return summary
     # ------------------------------------------------------------------
     # End Prediction Volatility Tracking Methods
     # ------------------------------------------------------------------
@@ -514,8 +1100,11 @@ class InformationSource:
                 if belief_params is not None:
                     alpha, beta = belief_params
                     # Sample from Beta distribution
+                    # try:
                     sampled_score = np.random.beta(alpha, beta)
                     sampled_scores[agent_id][dimension] = sampled_score
+                    # except:
+                    #     ipdb.set_trace()  # Debugging: check if sampling fails
                 else:
                     # If no belief state, use neutral default
                     sampled_scores[agent_id][dimension] = 0.5
@@ -544,7 +1133,8 @@ class InformationSource:
         # Store results from each trial
         trial_projected_capitals = defaultdict(list)  # agent_id -> [capital_values_across_trials]
         trial_projected_prices = defaultdict(list)    # agent_id -> [price_values_across_trials]
-        steady_state_capital, steady_state_ratio = self._get_steady_state_capital(market_prices, dimension)
+        steady_state_capital, steady_state_ratio, current_capital_shares = self._get_steady_state_capital(market_prices, dimension)
+        capacity_flags = steady_state_ratio > 1.2
         
         for trial in range(num_trials):
             # Sample scores from belief states
@@ -561,7 +1151,7 @@ class InformationSource:
             
             # Calculate projected capital shares for this trial
             trial_projected_prices_dim, trial_projected_capital_dim = self._project_steady_state_prices(
-                    trial_evaluations, dimension, steady_state_capital)
+                    trial_evaluations, dimension, steady_state_capital, current_capital_shares)
                     
             # Store results for this trial
             for agent_id in trial_projected_capital_dim:
@@ -572,12 +1162,12 @@ class InformationSource:
         projected_capital_dim = {}
         for agent_id in agent_ids:
             if agent_id in trial_projected_prices:
-                projected_capital_dim[agent_id] = np.mean(trial_projected_capitals[agent_id])
-                projected_prices_dim[agent_id] = np.mean(trial_projected_prices[agent_id])
-        return projected_prices_dim, projected_capital_dim, steady_state_ratio
+                projected_capital_dim[agent_id] = (np.mean(trial_projected_capitals[agent_id]), np.std(trial_projected_capitals[agent_id]))
+                projected_prices_dim[agent_id] = (np.mean(trial_projected_prices[agent_id]), np.std(trial_projected_prices[agent_id]))
+        return projected_prices_dim, projected_capital_dim, capacity_flags
         
     
-    def monte_carlo_market_capacity_check(self, own_evaluations: Dict[int, Dict[str, Tuple[float, float]]], 
+    def _monte_carlo_check_market_capacity(self, own_evaluations: Dict[int, Dict[str, Tuple[float, float]]], 
                                          market_prices: Dict[int, Dict[str, float]], 
                                          num_trials: int = None) -> Dict[str, Any]:
         """
@@ -1003,3 +1593,74 @@ class InformationSource:
 
         return min(0.95, final_aggregated_confidence)
 
+    def load_cached_evaluations(self, cached_data: Dict, comparison_log: Dict):
+        """
+        Load cached evaluations from a previous run.
+        
+        Args:
+            cached_data: Dictionary with structure {round: {agent_id: {dimension: (score, confidence)}}}
+        """
+        self.cached_evaluations = cached_data
+        self.cached_comparison_log = comparison_log
+        self.use_cached_evaluations = True
+        print(f"{self.source_type.upper()} ({self.source_id}): Loaded cached evaluations for {len(cached_data)} rounds")
+
+    def enable_cached_evaluations(self, enable: bool = True):
+        """Enable or disable using cached evaluations."""
+        self.use_cached_evaluations = enable
+        if enable:
+            print(f"{self.source_type.upper()} ({self.source_id}): Enabled cached evaluation mode")
+        else:
+            print(f"{self.source_type.upper()} ({self.source_id}): Disabled cached evaluation mode")
+
+    def get_cached_evaluation(self, evaluation_round: int) -> Optional[Dict]:
+        """
+        Get cached evaluation for a specific round.
+        
+        Returns:
+            Dictionary with structure {agent_id: {dimension: (score, confidence)}} or None
+        """
+        return self.cached_evaluations.get(evaluation_round), self.cached_comparison_log.get(evaluation_round, {})
+
+
+# Example usage of the comprehensive risk system:
+"""
+To use the risk system in your InformationSource subclass:
+
+1. Configure risk parameters in your __init__ method:
+   self.config.update({
+       'volatility_risk_weight': 0.5,  # Weight for volatility risk component
+       'risk_adjustment_method': 'multiplicative',  # How to adjust investments
+       'risk_aversion_factor': 0.3,  # How much to penalize risky investments
+       'volatility_normalization_method': 'historical_range',
+       # ... other risk parameters as needed
+   })
+
+2. In your decide_investments method, use the risk-adjusted wrapper:
+   def decide_investments(self, *args, **kwargs):
+       # Your original investment logic
+       def base_investment_logic(*args, **kwargs):
+           # ... existing investment decision code ...
+           return [(agent_id, dimension, amount, confidence), ...]
+       
+       # Apply risk adjustment
+       return self.risk_adjusted_decide_investments(base_investment_logic, *args, **kwargs)
+
+3. Or compute risk manually for more control:
+   # Get projected capital holdings from Monte Carlo simulation
+   _, projected_capitals, _ = self._monte_carlo_check_market_capacity(evaluations, market_prices)
+   
+   # Compute comprehensive risk
+   risk_results = self.compute_risk(projected_capitals, market_prices, current_holdings)
+   
+   # Get risk summary for analysis
+   risk_summary = self.get_risk_metrics_summary(projected_capitals, market_prices)
+   
+   # Apply risk adjustment to your base investment amounts
+   adjusted_amounts = self.compute_risk_adjusted_investment_amounts(base_amounts, risk_results)
+
+The risk system combines:
+- Monte Carlo risk (standard deviation from uncertainty in evaluations)
+- Volatility risk (historical prediction and market volatility scaled to capital)
+- Configurable weighting: Total_Risk = sqrt((Risk_MC)^2 + (w * Risk_Vol)^2)
+"""

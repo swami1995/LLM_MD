@@ -10,7 +10,7 @@ import math
 import os
 import json  # For saving logs in JSON format
 import pickle  # For saving logs in pickle format
-
+from trust_market.user_update import UserUpdate
 # Trust markets are a way to combine curation, recommendation and scoring systems in a reputation system.
 # They are used to track the trustworthiness of agents based on various inputs, such as user feedback, regulator ratings, and comparative feedback.
 # The trust market uses an automated market maker (AMM) model to adjust the trust scores of agents based on the investments made by sources.
@@ -70,7 +70,7 @@ class TrustMarket:
         self.volatility_window_size = config.get('volatility_window_size', 10)  # Number of rounds to consider for volatility
 
         # --- Configuration ---
-        self.primary_sources = set(config.get('primary_sources', ['user_feedback', 'regulator'])) # Types considered primary
+        self.primary_sources = set(config.get('primary_sources', ['user_feedback', 'user_feedback_bayesian', 'regulator'])) # Types considered primary
         self.primary_source_weight = config.get('primary_source_weight', 1.5) # Weight for primary source investments
         self.secondary_source_weight = config.get('secondary_source_weight', 1.0) # Weight for others
         self.rating_scale = config.get('rating_scale', 5) # Scale used in user feedback (e.g., 1-5)
@@ -91,7 +91,7 @@ class TrustMarket:
 
         # --- Oracle Configuration for AMM ---
         # Mechanism: 'adjust_treasury', 'adjust_reserve', 'oracle_trades' ('adjust_R', 'adjust_T', 'adjust_P' are version of 'oracle_trades') # defaulting to 'adjust_reserve' for now. Others are not implemented yet.
-        self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_R'), 'regulator': config.get('regulator_amm', 'adjust_R')}
+        self.oracle_influence_mechanisms = {'user_feedback': config.get('user_amm', 'adjust_R'), 'user_feedback_bayesian': config.get('user_amm', 'adjust_R'), 'regulator': config.get('regulator_amm', 'adjust_R')}
 
         # --- Performance & History ---
         self.agent_performance = defaultdict(lambda: defaultdict(list)) # For external perf metrics
@@ -110,6 +110,8 @@ class TrustMarket:
         # --- Regulator Support ---
         self.cumulative_user_influence = defaultdict(lambda: defaultdict(float))    # Tracks sum of |delta_R| from user feedback
         self.temporal_db['user_evaluations'] = []
+
+        self.user_update = UserUpdate(config, self)
 
         print("TrustMarket core initialized.")
         print(f"  - Rating Scale (for feedback normalization): {self.rating_scale}")
@@ -521,169 +523,15 @@ class TrustMarket:
             # print(f"    Applying correlations for Agent {agent_id} due to user feedback.")
             self.apply_dimension_correlations(agent_id, list(affected_dimensions))
 
-
-    # Method for oracles to adjust R directly
-    def oracle_adjust_reserve_direct(self, agent_id: str, dimension: str, delta_R: float):
+    def record_comparative_feedback(self, agent_a_id, agent_b_id, winners, raw_comparison_details=None, bayesian=False):
         """
-        Oracle directly adjusts the reserve for an agent in a dimension.
-        This action *changes K* and is not a trade along the curve.
-        T remains constant for this operation.
+        Record comparative feedback from a comparison between two agents.
         """
-        if agent_id not in self.agent_amm_params:
-            # Initialize if new, or handle error
-            # For simplicity, let's assume agent must exist / be initialized via another mechanism
-            print(f"Warning: Agent {agent_id} not found in AMM params for oracle_adjust_reserve_direct.")
-            # A common initialization: R=initial_R, T=initial_T (e.g., R=50, T=100 for P=0.5)
-            # self.agent_amm_params[agent_id][dimension] = {'R': 50.0, 'T': 100.0, 'K': 5000.0, 'total_supply': 100.0} # Example
-            # For now, let's assume it's initialized with some values
-            if self.agent_amm_params[agent_id][dimension]['R'] == 0 and self.agent_amm_params[agent_id][dimension]['T'] == 0:
-                self.agent_amm_params[agent_id][dimension]['R'] = self.config.get('initial_R_oracle', 10.0) # Small initial R
-                self.agent_amm_params[agent_id][dimension]['T'] = self.config.get('initial_T_oracle', 20.0) # Ensures P=0.5
-                self.agent_amm_params[agent_id][dimension]['K'] = self.agent_amm_params[agent_id][dimension]['R'] * self.agent_amm_params[agent_id][dimension]['T']
-                # total_supply for AMM might track shares *held by investors* + shares *in treasury*.
-                # Here, T is treasury shares. Let's assume total_supply is just T initially for AMM internal tracking.
-                self.agent_amm_params[agent_id][dimension]['total_supply'] = self.agent_amm_params[agent_id][dimension]['T']
-
-
-        params = self.agent_amm_params[agent_id][dimension]
-        old_R = params['R']
-        new_R = old_R + delta_R
-
-        # Safeguard: R should not be negative (or below a minimum)
-        min_R = self.config.get('min_R_oracle_adj', 0.01)             # TODO: Set the min_R carefully
-        new_R = max(min_R, new_R)
-        actual_delta_R = new_R - old_R
-
-        params['R'] = new_R
-        # T remains unchanged by this direct oracle action
-        # K changes: params['K'] = new_R * params['T']
-        # Update K after R has changed and T is stable
-        if self.primary_source_update_type == 'fix_K':
-            params['T'] = params['K'] / params['R']
-        elif self.primary_source_update_type == 'fix_T':
-            params['K'] = params['R'] * params['T']
-
-        # The price (trust score) changesconfidence
-        old_price = old_R / params['T'] if params['T'] > 0 else 0
-        new_price = params['R'] / params['T'] if params['T'] > 0 else 0
-        self.agent_trust_scores[agent_id][dimension] = new_price
-
-        self.agent_amm_params[agent_id][dimension] = params
-
-        for source_id in self.allocated_influence:
-            if self.allocated_influence[source_id][dimension] > 0 and (self.source_investments[source_id][agent_id][dimension] > 0):
-                self.allocated_influence[source_id][dimension] += self.source_investments[source_id][agent_id][dimension]*(new_price - old_price)
-
-        # Accumulate the absolute change for the regulator
-        if 'user_feedback' in self.oracle_influence_mechanisms.values() or 'comparative_feedback' in self.oracle_influence_mechanisms.values(): # only if user feedback is an oracle
-            self.cumulative_user_influence[dimension][agent_id] += actual_delta_R
-
-        self.amm_transactions_log.append({
-            'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
-            'agent_id': agent_id, 'dimension': dimension, 'type': 'oracle_R_adjustment',
-            'delta_R': actual_delta_R, 'new_R': params['R'], 'T_unchanged': params['T'],
-            'old_price': old_price, 'new_price': new_price, 'source_id': 'oracle_system' # Or specific oracle
-        })
-        # print(f"Oracle adjusted R for A{agent_id} Dim {dimension}: R {old_R:.2f}->{new_R:.2f}, P {old_price:.3f}->{new_price:.3f}")
-
-
-    # In your `record_user_feedback` or `record_comparative_feedback`
-    # This would replace the direct manipulation of `self.agent_trust_scores`
-
-    def record_comparative_feedback(self, agent_a_id: str, agent_b_id: str,
-                                    winners: Dict, raw_comparison_details: Optional[Dict] = None): # feedback_strength S
-        """
-        Records comparative user feedback and updates agent AMM params via oracle_adjust_reserve_direct.
-        winners: Dict mapping dimension -> 'A', 'B', or 'Tie'
-        feedback_strength: Overall strength of this feedback batch (e.g., based on num users)
-        """
-        base_price_adj_factor = self.comparative_feedback_strength # Beta
-
-        if raw_comparison_details:
-            self.temporal_db['user_evaluations'].append({
-                'evaluation_round': self.evaluation_round,
-                'timestamp': time.time(),
-                **raw_comparison_details
-            })
-
-        for dimension, winner_code_conf_raw in winners.items():
-            if dimension not in self.dimensions: continue
-
-            if isinstance(winner_code_conf_raw, tuple):
-                winner_code, confidence = winner_code_conf_raw
-                rating = 0 # Not provided in this tuple format
-            elif isinstance(winner_code_conf_raw, dict):
-                rating = winner_code_conf_raw.get('rating', 0)
-                confidence = winner_code_conf_raw.get('confidence', 0) / self.rating_scale # Normalize confidence from 0-5 to 0-1
-                # Winner is derived from rating for logging/simplicity, but rating is used for adjustment
-                if rating > 0:
-                    winner_code = 'A'
-                elif rating < 0:
-                    winner_code = 'B'
-                else:
-                    winner_code = 'Tie'
-            else:
-                # Fallback for unexpected format
-                winner_code, confidence, rating = 'Tie', 0.5, 0
-                
-            params_A = self.agent_amm_params[agent_a_id][dimension]
-            params_B = self.agent_amm_params[agent_b_id][dimension]
-
-            # Ensure agents are initialized in AMM (important!)
-            # This logic should ideally be in a separate `ensure_agent_in_amm` method
-            for aid in [agent_a_id, agent_b_id]:
-                if self.agent_amm_params[aid][dimension]['R'] == 0 and self.agent_amm_params[aid][dimension]['T'] == 0:
-                    self.ensure_agent_dimension_initialized_in_amm(aid, dimension)
-
-
-            if self.oracle_influence_mechanisms['user_feedback'] == 'adjust_P':
-                P_A_current = params_A['R'] / params_A['T'] if params_A['T'] > 0 else 0.5 # Default if T is 0
-                P_B_current = params_B['R'] / params_B['T'] if params_B['T'] > 0 else 0.5
-
-                delta_P_A = 0.0
-                delta_P_B = 0.0
-
-                if winner_code == 'A':
-                    delta_P_A = confidence * base_price_adj_factor # Absolute adjustment
-                    delta_P_B = -confidence * base_price_adj_factor
-                elif winner_code == 'B':
-                    delta_P_A = -confidence * base_price_adj_factor
-                    delta_P_B = confidence * base_price_adj_factor
-                # If 'Tie', delta_P_A and delta_P_B remain 0.0
-
-                # Ensure target price is within valid bounds (e.g., 0 to 1)
-                # Let P_target = P_current + delta_P. Clamp P_target. Then actual_delta_P = P_target_clamped - P_current.
-                # max_score = self.config.get('max_trust_score_oracle', 1.0)
-                min_score = self.config.get('min_trust_score_oracle', 0.0)
-
-                P_A_target_unclamped = P_A_current + delta_P_A
-                # P_A_target_clamped = max(min_score, min(max_score, P_A_target_unclamped))  # TODO: set the min and max scores carefully
-                P_A_target_clamped = max(min_score, P_A_target_unclamped)
-                actual_delta_P_A = P_A_target_clamped - P_A_current
-
-                P_B_target_unclamped = P_B_current + delta_P_B
-                P_B_target_clamped = max(min_score, P_B_target_unclamped)
-                actual_delta_P_B = P_B_target_clamped - P_B_current
-
-                if self.primary_source_update_type == 'fix_K':
-                    delta_R_A = params_A['R'] *(np.sqrt(P_A_target_clamped/P_A_current) - 1) if P_A_current > 0 else 0
-                    delta_R_B = params_B['R'] *(np.sqrt(P_B_target_clamped/P_B_current) - 1) if P_B_current > 0 else 0
-                elif self.primary_source_update_type == 'fix_T':
-                    delta_R_A = actual_delta_P_A * params_A['T']
-                    delta_R_B = actual_delta_P_B * params_B['T']
-
-                if abs(actual_delta_P_A) > 0.0001: # Threshold for action
-                    self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
-                if abs(actual_delta_P_B) > 0.0001: # Threshold for action
-                    self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
-            elif self.oracle_influence_mechanisms['user_feedback'] == 'adjust_R':
-                delta_R_A = rating/self.rating_scale * base_price_adj_factor # Use rating directly
-                delta_R_B = -rating/self.rating_scale * base_price_adj_factor
-
-                if abs(delta_R_A) > 0.0001: # Threshold for action
-                    self.oracle_adjust_reserve_direct(agent_a_id, dimension, delta_R_A)
-                if abs(delta_R_B) > 0.0001: # Threshold for action
-                    self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
+        if bayesian:
+            self.user_update.record_comparative_feedback_with_bayesian_averaging(agent_a_id, agent_b_id, winners, raw_comparison_details)
+        else:
+            self.user_update.record_comparative_feedback(agent_a_id, agent_b_id, winners, raw_comparison_details)
+        return None
     
     # For trust decay
     def apply_trust_decay(self):
@@ -879,7 +727,8 @@ class TrustMarket:
         return volatility_metrics
 
     def get_market_prices(self, candidate_agent_ids=None, dimensions=None, verbose=False):
-        market_prices = {}   # {agent_id: {dimension: P_current}}
+        market_prices = defaultdict(lambda: defaultdict(float))   # {agent_id: {dimension: P_current}}
+        market_capital_holdings = defaultdict(lambda: defaultdict(float))   # {agent_id: {dimension: R_current}}
         
         # Determine which agents this source will evaluate
         if candidate_agent_ids is None:
@@ -887,17 +736,17 @@ class TrustMarket:
 
         # --- 1A. Fetch market prices (still sequential, inexpensive) ---
         for agent_id in candidate_agent_ids:
-            market_prices[agent_id] = {}
             for dim_to_eval in dimensions:
                 self.ensure_agent_dimension_initialized_in_amm(agent_id, dim_to_eval)
                 amm_p = self.agent_amm_params[agent_id][dim_to_eval]
                 price = amm_p['R'] / amm_p['T'] if amm_p['T'] > 1e-6 else \
                         self.agent_trust_scores[agent_id].get(dim_to_eval, 0.5)
                 market_prices[agent_id][dim_to_eval] = price
+                market_capital_holdings[agent_id][dim_to_eval] = amm_p['R']
                 if verbose:
                     print(f"DEBUG: Agent {agent_id}, Dim {dim_to_eval}: Market price = {price:.4f} (R={amm_p['R']:.4f}, T={amm_p['T']:.4f})")
 
-        return market_prices
+        return market_prices, market_capital_holdings
 
     def get_agent_trust(self, agent_id: int) -> Dict[str, float]:
         """Get current trust scores for an agent, returning a copy."""
@@ -1518,8 +1367,8 @@ def regenerate_plots_from_logs(
 
 if __name__ == "__main__":
     regenerate_plots_from_logs(
-        log_filepath="run_logs/flash_regfix_20250618_231452.json",
+        log_filepath="run_logs/bayes_updates_with_ratings_20250725_015357.json",
         output_dir="figures/",
-        experiment_name="flash_regfix1",
+        experiment_name="bayes_updates_with_ratings_replot",
         show_investments=True
     )

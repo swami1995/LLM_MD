@@ -3,6 +3,7 @@ import argparse
 import os
 import random # Import random for sampling
 import json # Added for final summary printing
+import sys # Added for sys.exit()
 from agent_prompting_utils import load_profiles, load_prompts
 
 """
@@ -75,8 +76,15 @@ if __name__ == "__main__":
     parser.add_argument("--stored_data_path", type=str, help="Path to the JSON file containing stored conversation data.")
     
     # --- NEW: Detailed Logging Args ---
-    parser.add_argument("--save_detailed_logs", action="store_true", help="Save detailed evaluation data including reasoning, confidence, and derived scores from all sources and users.")
-
+    parser.add_argument('--save_detailed_logs', action='store_true', default=False,
+                        help='Save detailed evaluation logs including comparison data.')
+    
+    # Add caching arguments
+    parser.add_argument('--use_cached_evaluations', action='store_true', default=False,
+                        help='Use cached evaluations from a previous run instead of making new LLM calls.')
+    parser.add_argument('--cached_evaluations_path', type=str, default=None,
+                        help='Path to the log file containing cached evaluations to load.')
+    
     args = parser.parse_args()
 
     # --- API Key Handling ---
@@ -354,6 +362,21 @@ if __name__ == "__main__":
     trust_market_system.register_regulator(regulator, evaluation_frequency=args.regulator_frequency)
     print(f"Registered Regulator: {regulator.source_id} (Eval Freq: {args.regulator_frequency})")
 
+    # Load cached evaluations if requested
+    if args.use_cached_evaluations:
+        if args.cached_evaluations_path:
+            print(f"\nLoading cached evaluations from: {args.cached_evaluations_path}")
+            success = trust_market_system.load_cached_evaluations_from_log(args.cached_evaluations_path)
+            if success:
+                trust_market_system.enable_cached_evaluations_for_all_sources(True)
+                print("Cached evaluation mode enabled for all sources.")
+            else:
+                print("Failed to load cached evaluations. Proceeding with normal LLM evaluations.")
+        else:
+            print("Error: --use_cached_evaluations specified but no --cached_evaluations_path provided.")
+            print("Please provide the path to a log file containing cached evaluations.")
+            sys.exit(1)
+
     # --- 6. Run Simulation Rounds via Trust Market System ---
     print(f"\nStarting simulation orchestration for {args.num_steps} rounds...")
     
@@ -405,8 +428,8 @@ if __name__ == "__main__":
                  print(f"Error displaying scores for agent {agent_id_str}: {e}")
                  print(f"  Raw Scores: {scores}")
 
-    # trust_market_system.trust_market.visualize_trust_scores(show_investments=True, save_path="figures/", experiment_name=args.exp_name)
-    # trust_market_system.trust_market.visualize_source_value(save_path="figures/", experiment_name=args.exp_name)
+    trust_market_system.trust_market.visualize_trust_scores(show_investments=True, save_path="figures/", experiment_name=args.exp_name)
+    trust_market_system.trust_market.visualize_source_value(save_path="figures/", experiment_name=args.exp_name)
     
     # Save logged data with detailed evaluations if requested
     if args.save_detailed_logs:

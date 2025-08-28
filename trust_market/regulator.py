@@ -73,7 +73,7 @@ class Regulator(InformationSource):
             'attractiveness_buy_threshold': 0.01,
             'min_value_holding_per_asset': 0.0,
             'portfolio_rebalance_aggressiveness': 0.5,
-            'min_delta_value_trade_threshold': 0.1,
+            'min_delta_value_trade_threshold': 5,
             'investment_scale': 0.2,
             'rank_correction_strength': 0.5,
             'max_confidence_history': 10,
@@ -86,11 +86,12 @@ class Regulator(InformationSource):
             # Bayesian Inference Parameters
             'confidence_to_kappa_scale_factor': 50.0, # M parameter for converting confidence to precision
             'decay_rate': 0.0, # How quickly old evidence is forgotten
-            'likelihood_strength_factor': 4.0, # Higher value = regulator evaluations have stronger influence
+            'likelihood_strength_factor': 4.0, # Lower value = regulator evaluations have moderate influence
             
             # Monte Carlo Simulation Parameters
             'monte_carlo_trials': 50, # Number of Monte Carlo trials for risk assessment
             'use_monte_carlo': True, # Whether to use Monte Carlo for investment decisions
+            'investment_method': 'capital_projection',
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
         self.min_trials = self.config.get('min_eval_trials', 1)
@@ -444,7 +445,7 @@ class Regulator(InformationSource):
         # return max(total_potential, self.config.get('min_portfolio_value_potential', 100.0))
         return total_potential
 
-    def _get_steady_state_capital(self, market_prices, regulatory_capacity, dimension, include_source_capacity=False):
+    def _get_steady_state_capital(self, market_prices, dimension, regulatory_capacity=0.0, include_source_capacity=False):
         """
         Project what market prices will be at steady state based on:
         1. Expected total capital deployment
@@ -586,7 +587,8 @@ class Regulator(InformationSource):
         Checks if the source has enough capacity to invest based on its evaluations and market prices.
         If not, it will print a warning and return False.
         """
-        if self.monte_carlo_evals:
+        if self.config.get('use_monte_carlo', True):
+            # TODO : Assuming regulatory_capacity is 0.0 for now. And no source capacity. So compatible with default monte carlo implementation.
             num_trials = self.config.get('monte_carlo_trials', 50)
             return self._monte_carlo_check_market_capacity(own_evaluations, market_prices, num_trials)
         else:
@@ -594,7 +596,7 @@ class Regulator(InformationSource):
             projected_prices = {} # {agent_id: projected_price}
             projected_capital_shares = {} # {agent_id: projected_capital_share}
             for dim in self.expertise_dimensions:
-                steady_state_capital, _, current_capital_shares = self._get_steady_state_capital(market_prices, regulatory_capacity, dimension=dim, include_source_capacity=include_source_capacity)
+                steady_state_capital, _, current_capital_shares = self._get_steady_state_capital(market_prices, dimension=dim, regulatory_capacity=0.0, include_source_capacity=include_source_capacity)
                 projected_prices_dim, projected_capital_shares_dim = self._project_steady_state_prices(own_evaluations, dimension=dim, steady_state_capital=steady_state_capital, current_capital_shares=current_capital_shares)
                 capacity_flags[dim] = True # regulator always has capacity
                 projected_prices[dim] = projected_prices_dim # Store projected prices for this dimension
@@ -642,6 +644,9 @@ class Regulator(InformationSource):
         return super()._aggregate_confidences(new_confidences_list, base_aggregated_confidence, weight_for_new_info_block)
 
     def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
+        """
+        The main decision-making loop for the regulator.
+        """
         desirability_method = self.config.get('desirability_method', 'percentage_change')
         if self.verbose:
             print(f"REGULATOR ({self.source_id}): Starting investment decisions for round {evaluation_round}.")
@@ -652,38 +657,55 @@ class Regulator(InformationSource):
         # --- 1. Evaluate Agents ---
         # Get evaluations for all agents the regulator is aware of.
         all_agent_ids = list(self.agent_profiles.keys())
-        analysis_data = defaultdict(lambda : defaultdict(dict)) # {(agent_id, dimension): (pseudo_score, confidence_in_eval)}
-        investments_to_propose_cash_value = [] # {(agent_id, dimension): cash_value_to_trade}
+        analysis_data = defaultdict(lambda : defaultdict(dict))
+        investments_to_propose_cash_value = []
 
-        # In analysis mode, we want to see the raw evaluation output.
-        # Otherwise, we might use cached evaluations.
-        evaluation_result = self.evaluate_agents_batch(
-            agent_ids=all_agent_ids,
-            dimensions=self.expertise_dimensions,
-            evaluation_round=evaluation_round,
-            use_comparative=use_comparative,
-            analysis_mode=analysis_mode,
-            detailed_analysis=detailed_analysis
-        )
-                
-        # Handle different return formats based on detailed_analysis flag
-        if detailed_analysis:
-            own_evaluations, comparison_log = evaluation_result
-        else:
-            own_evaluations = evaluation_result
-            comparison_log = []
+        # Check for cached evaluations first
+        own_evaluations = None
+        comparison_log = []
+        
+        if self.use_cached_evaluations and evaluation_round is not None:
+            cached_eval, cached_comparison_log = self.get_cached_evaluation(evaluation_round)
+            if cached_eval:
+                print(f"REGULATOR ({self.source_id}): Using cached evaluations for round {evaluation_round}")
+                own_evaluations = cached_eval
+                if detailed_analysis:
+                    comparison_log = cached_comparison_log
+            else:
+                print(f"REGULATOR ({self.source_id}): No cached evaluations found for round {evaluation_round}, falling back to LLM evaluation")
+        
+        # If no cached evaluations available, run normal evaluation
+        if own_evaluations is None:
+            # In analysis mode, we want to see the raw evaluation output.
+            # Otherwise, we might use cached evaluations.
+            evaluation_result = self.evaluate_agents_batch(
+                agent_ids=all_agent_ids,
+                dimensions=self.expertise_dimensions,
+                evaluation_round=evaluation_round,
+                use_comparative=use_comparative,
+                analysis_mode=analysis_mode,
+                detailed_analysis=detailed_analysis
+            )
+                    
+            # Handle different return formats based on detailed_analysis flag
+            if detailed_analysis:
+                own_evaluations, comparison_log = evaluation_result
+            else:
+                own_evaluations = evaluation_result
+                comparison_log = []
         
         if not own_evaluations:
             print("REGULATOR: No evaluations were generated. Cannot decide investments.")
             return [], {}
 
-        # --- 2. Get Current Market State ---
-        market_prices = self.market.get_market_prices(candidate_agent_ids=all_agent_ids, dimensions=self.expertise_dimensions, verbose=self.verbose)
+        # --- 2. Get Current Market State & Determine Target Capital Distribution ---
+        market_prices, market_capital_holdings = self.market.get_market_prices(candidate_agent_ids=all_agent_ids, dimensions=self.expertise_dimensions, verbose=self.verbose)
         if not market_prices:
             if self.verbose: print("REGULATOR: No market prices available. Cannot determine desirability.")
             return [], {}
 
         projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices, regulatory_capacity=self.config.get('regulatory_capacity', 0.0))
+        risk = self.compute_risk(projected_capital_shares, current_capital_holdings=market_capital_holdings, type='absolute_capital')
 
         # --- Get accumulated user influence since last run ---
         # This is the core of the reactive balancing mechanism
@@ -717,11 +739,12 @@ class Regulator(InformationSource):
                     print(f"DEBUG: No agents with projected capital shares for dim {dim}, skipping rebalance calculation.")
                 continue
 
-            deltas = np.array([projected_capital_shares[dim][agent_id] - self.market.agent_amm_params[agent_id][dim]['R'] for agent_id in agents_with_proj_capital])
+            
+            deltas = np.array([(projected_capital_shares[dim][agent_id][0] - self.market.agent_amm_params[agent_id][dim]['R']) / (1+risk[dim][agent_id]) for agent_id in agents_with_proj_capital])
             # TODO : fix this assert and division by 0 : rebalancing with capital shares for now. but need to decide between capital shares and prices or other better metrics.
-            if not np.isclose(deltas.sum(), 0.0, atol=1e-1):
-                print(f"Warning: Delta sum for dim {dim} is {deltas.sum()}, which is not close to zero.")
-            assert np.abs(deltas.sum()) < 1e-1, f"Delta sum for dim {dim} is {deltas.sum()}"
+            # if not np.isclose(deltas.sum(), 0.0, atol=1e-1):
+            #     print(f"Warning: Delta sum for dim {dim} is {deltas.sum()}, which is not close to zero.")
+            # assert np.abs(deltas.sum()) < 1e-1, f"Delta sum for dim {dim} is {deltas.sum()}"
             
             pos_deltas_sum = deltas[deltas > 0].sum()
             if pos_deltas_sum > 1e-9:
@@ -734,9 +757,10 @@ class Regulator(InformationSource):
             
             for i, agent_id in enumerate(agents_with_proj_capital):
                 delta_v = deltas[i] * rebalance_aggressiveness[dim]
+                ideal_val = self.market.agent_amm_params[agent_id][dim]['R'] + delta_v
                 # Apply a threshold to delta_v to avoid tiny trades
-                min_trade_threshold = self.config.get('min_delta_value_trade_threshold', 0.1)
-                if abs(delta_v) > min_trade_threshold: # e.g., trade if value change > $0.1
+                min_trade_threshold = self.config.get('min_delta_value_trade_threshold', 5)
+                if abs(delta_v) > min_trade_threshold*pos_deltas_sum*rebalance_aggressiveness[dim]/100 or ideal_val < 0.01*pos_deltas_sum: # e.g., trade if value change > $0.1
                     delta_value_target_map[dim][agent_id] = delta_v
                     if self.verbose:
                         print(f"DEBUG: Delta above threshold ({min_trade_threshold}) - Including in trade map: {delta_v:.4f}")
@@ -826,8 +850,8 @@ class Regulator(InformationSource):
                     analysis_data[agent_id][dim] = {
                         'cash_amount': cash_amount,
                         'confidence': own_evaluations[agent_id][dim][1],
-                        'projected_price': projected_prices[dim][agent_id],
-                        'projected_capital_share': projected_capital_shares[dim][agent_id],
+                        'projected_price': projected_prices[dim][agent_id][0],
+                        'projected_capital_share': projected_capital_shares[dim][agent_id][0],
                         'market_price': market_prices[agent_id][dim],
                         'own_evaluation': own_evaluations[agent_id][dim][0],
                     }
@@ -860,12 +884,14 @@ class Regulator(InformationSource):
         
         if self.verbose:
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
-        
-        # --- RETURN ---
+
+        self._detailed_analysis_active = False
+
         if analysis_mode or detailed_analysis:
             if detailed_analysis:
-                # Include comparison_log in analysis_data for detailed analysis
                 analysis_data['comparison_log'] = comparison_log
+            # Always include own_evaluations in analysis_data for caching purposes
+            analysis_data['own_evaluations'] = own_evaluations
             return investments_to_propose_cash_value, analysis_data
         return investments_to_propose_cash_value
 

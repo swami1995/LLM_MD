@@ -549,12 +549,12 @@ class UserAgentSet:
         # Chat sessions for Gemini API (for query generation)
         self.chat_sessions = {}
 
+        # Cached evaluations for reuse across runs
+        self.cached_evaluations = {}  # {evaluation_round: {user_id: {agent_id: ratings_dict}}}
+        self.cached_comparison_log = {}  # {evaluation_round: comparison_log}
+        self.use_cached_evaluations = False  # Flag to enable using cached evaluations
+
         # Trust dimensions expected for rating
-        # self.trust_dimensions = [
-        #     "Factual_Correctness", "Process_Reliability", "Value_Alignment",
-        #     "Communication_Quality", "Problem_Resolution", "Safety_Security",
-        #     "Transparency", "Adaptability", "Trust_Calibration", "Manipulation_Resistance"
-        # ]
         self.trust_dimensions = [
             "Value_Alignment", "Communication_Quality", "Problem_Resolution", "Safety_Security", "Manipulation_Resistance", "Adaptability",
         ]
@@ -607,6 +607,35 @@ class UserAgentSet:
         else:
             raise ValueError(f"Invalid llm_source: {self.llm_source}. Choose 'local' or 'api'.")
 
+    def load_cached_evaluations(self, cached_data: Dict):
+        """
+        Load cached evaluations from a previous run.
+        
+        Args:
+            cached_data: Dictionary with structure {round: {user_id: {agent_id: ratings_dict}}}
+            comparison_log: Dictionary with structure {round: comparison_log}
+        """
+        self.cached_evaluations = cached_data
+        self.use_cached_evaluations = True
+        print(f"UserAgentSet: Loaded cached evaluations for {len(cached_data)} rounds")
+
+    def enable_cached_evaluations(self, enable: bool = True):
+        """Enable or disable using cached evaluations."""
+        self.use_cached_evaluations = enable
+        if enable:
+            print(f"UserAgentSet: Enabled cached evaluation mode")
+        else:
+            print(f"UserAgentSet: Disabled cached evaluation mode")
+
+    def get_cached_evaluation(self, evaluation_round: int):
+        """
+        Get cached evaluation for a specific round.
+        
+        Returns:
+            Tuple of (cached_evaluations, cached_comparison_log) or (None, None)
+        """
+        cached_eval = self.cached_evaluations.get(evaluation_round)
+        return cached_eval
 
     def set_conversation_knowledge(self, conversation_id, user_id, knowledge_text):
         """Set conversation-specific knowledge for a user."""
@@ -1277,6 +1306,31 @@ Customer (you):
         Rates complete conversations using LLM.
         Returns specific ratings (List[Dict[str, int]]) or comparative results (List[Dict]).
         """
+        
+        # Check for cached evaluations first
+        if self.use_cached_evaluations and evaluation_round is not None:
+            cached_eval = self.get_cached_evaluation(evaluation_round)
+            if cached_eval:
+                print(f"UserAgentSet: Using cached evaluations for round {evaluation_round}")
+                
+                # Reconstruct the results based on the evaluation method
+                if self.evaluation_method == "specific_ratings":
+                    batch_ratings_parsed = []
+                    for i, user_id in enumerate(user_ids):
+                        agent_id = agent_ids[i]
+                        if user_id in cached_eval and agent_id in cached_eval[user_id]:
+                            batch_ratings_parsed.append(cached_eval[user_id][agent_id])
+                        else:
+                            # Fallback to neutral ratings if not found in cache
+                            neutral_rating = int((1 + self.rating_scale) / 2)
+                            batch_ratings_parsed.append({dim: neutral_rating for dim in self.trust_dimensions})
+                    return batch_ratings_parsed
+                    
+                elif self.evaluation_method == "comparative_binary":
+                    return cached_eval
+            else:
+                print(f"UserAgentSet: No cached evaluations found for round {evaluation_round}, falling back to LLM evaluation")
+
         prompts = []
 
         if self.evaluation_method == "specific_ratings":
@@ -2164,4 +2218,18 @@ class CustomerSupportModel:
 
         print("  --- Dialog Batch Finished ---")
         return conversation_histories
+
+    def load_cached_user_evaluations(self, cached_data: Dict):
+        """
+        Load cached user evaluations from a previous run.
+        
+        Args:
+            cached_data: Dictionary with structure {round: {user_id: {agent_id: ratings_dict}}}
+            comparison_log: Dictionary with structure {round: comparison_log}
+        """
+        self.user_agents.load_cached_evaluations(cached_data)
+
+    def enable_cached_user_evaluations(self, enable: bool = True):
+        """Enable or disable using cached user evaluations."""
+        self.user_agents.enable_cached_evaluations(enable)
 
