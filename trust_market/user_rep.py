@@ -11,6 +11,7 @@ from google.genai import types
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import copy
 
 # --- Base UserRepresentative (Simplified Logic) ---
 class UserRepresentative(InformationSource):
@@ -182,6 +183,19 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'monte_carlo_trials': 50, # Number of Monte Carlo trials for risk assessment
             'use_monte_carlo': True, # Whether to use Monte Carlo for investment decisions
             'investment_method': 'capital_projection', # 'capital_projection' or 'rank_mapping'
+            # Optimization-based allocation parameters (opt-in)
+            'optimization_backend': 'l2_values',
+            'optimizer_enabled': False,  # do not change existing behavior unless explicitly enabled
+            'optimizer_lambda_prox': 0.5,   # proximal weight to damp moves (maps to rebalance aggressiveness)
+            'optimizer_risk_rho': 0.5,      # penalty weight for buy-side risk
+            'optimizer_turnover_tau': 0.0,  # L1 turnover penalty (0 = off)
+            'optimizer_grid_points': 31,    # resolution for per-asset 1D search
+            'optimizer_joint_budget': True, # use dual (μ) search across agents per-dimension
+            'optimizer_solve_on_sim_state': True, # if False, solve against original snapshot R,T,S
+            'optimizer_zeroing_enabled': True,       # allow force-zero small positions when target ~ 0
+            'optimizer_zero_target_rel': 0.005,      # target <= 0.5% of portfolio triggers zeroing check
+            'optimizer_small_holding_rel': 0.01,     # holding <= 1% of portfolio eligible for zeroing
+            'optimizer_respect_investment_scale_cap': True, # cap fresh cash per round using investment_scale
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
         # Note: Uses segment_weights from base class for dimension importance
@@ -538,32 +552,38 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
 # In auditor.py or user_rep.py
 # Inside the relevant InformationSource class (e.g., AuditorWithProfileAnalysis or UserRepresentativeWithHolisticEvaluation)
 
-    def _calculate_total_portfolio_value_potential(self):
+    def _calculate_total_portfolio_value_potential(self, total_available_cash=None, amm_params=None, source_investments=None):
         """
         Calculates the sum of the current market value of all shares held by this source
         PLUS all available (uninvested) cash capacity of this source.
         This represents the total value this source could theoretically manage.
         """
         total_value_of_holdings = defaultdict(lambda : 0.0) # {dimension: total_value}
-        # Sum market value of current share holdings
-        # source_investments structure: self.source_investments[source_id][agent_id][dimension] = shares
-        if self.source_id in self.market.source_investments:
-            for agent_id, dims_data in self.market.source_investments[self.source_id].items():
-                for dimension, shares_held in dims_data.items():
-                    # if shares_held > 1e-5:
-                    self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dimension) # Ensure AMM params exist
-                    amm_params = self.market.agent_amm_params[agent_id][dimension]
-                    if amm_params['T'] > 1e-6: # Avoid division by zero if T is tiny
-                        price = amm_params['R'] / amm_params['T']
-                        total_value_of_holdings[dimension] += shares_held * price
-                        # else: if T is zero, price is undefined/infinite, value of shares is complex.
-                        # For simplicity, if T is zero, those shares are currently "unpriceable" by this AMM.
+        if total_available_cash is None:
+            total_available_cash = self.market.source_available_capacity[self.source_id]
+        if source_investments is not None or self.source_id in self.market.source_investments:
+            if source_investments is None:
+                source_investments = self.market.source_investments[self.source_id]
+            if amm_params is None:
+                amm_params = self.market.agent_amm_params
+            # Sum market value of current share holdings
+            # source_investments structure: self.source_investments[source_id][agent_id][dimension] = shares
+            if self.source_id in source_investments:
+                for agent_id, dims_data in source_investments[self.source_id].items():
+                    for dimension, shares_held in dims_data.items():
+                        # if shares_held > 1e-5:
+                        self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dimension) # Ensure AMM params exist
+                        amm_param = amm_params[agent_id][dimension]
+                        if amm_param['T'] > 1e-6: # Avoid division by zero if T is tiny
+                            price = amm_param['R'] / amm_param['T']
+                            total_value_of_holdings[dimension] += shares_held * price
+                            # else: if T is zero, price is undefined/infinite, value of shares is complex.
+                            # For simplicity, if T is zero, those shares are currently "unpriceable" by this AMM.
 
         # Sum available cash from all dimensions for this source
         # source_available_capacity structure: self.source_available_capacity[source_id][dimension] = cash
-        total_available_cash = self.market.source_available_capacity.get(self.source_id, {})
 
-        total_potential = {dim: total_value_of_holdings[dim] + total_available_cash[dim] for dim in self.market.source_available_capacity[self.source_id]}
+        total_potential = {dim: total_value_of_holdings[dim] + total_available_cash[dim] for dim in total_available_cash}
         if self.verbose:
             print(f"USER REP ({self.source_id}): Total potential: {total_potential}")
         # Ensure a minimum potential to avoid issues if source starts with no cash/shares
@@ -718,6 +738,15 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         The main decision-making loop for the user_rep.
         1. Evaluates all agents to get up-to-date scores.
         """
+        # Optional delegation to the optimized path
+        if self.config.get('optimizer_enabled', False):
+            return self.decide_investments_optimized(
+                evaluation_round=evaluation_round,
+                use_comparative=use_comparative,
+                analysis_mode=analysis_mode,
+                detailed_analysis=detailed_analysis,
+            )
+
         desirability_method = self.config.get('desirability_method', 'percentage_change')
         if self.verbose:
             print(f"\n=== DEBUG: {self.source_type.capitalize()} {self.source_id} deciding investments for round {evaluation_round} ===")
@@ -760,6 +789,16 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 own_evaluations = cached_eval
                 if detailed_analysis:
                     comparison_log = cached_comparison_log
+                # Prime the belief state with cached evaluations so Monte Carlo sampling reflects cached scores
+                try:
+                    for aid, dim_map in own_evaluations.items():
+                        for dim, (score, conf) in dim_map.items():
+                            if not isinstance(score, (int, float)) or not isinstance(conf, (int, float)):
+                                continue
+                            conf = max(0.0, min(0.99, float(conf)))
+                            self._update_belief_state_bayesian(aid, dim, float(score), conf)
+                except Exception as _e:
+                    print(f"Warning: could not prime belief state from cached evals: {_e}")
             else:
                 if self.verbose:
                     print(f"{self.source_type.upper()} ({self.source_id}): No cached evaluations found for round {evaluation_round}, falling back to LLM evaluation")
@@ -937,7 +976,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             if total_proposed_investments[dim] > 0:
                 investment_scale = self.config.get('investment_scale', 0.2)
                 investment_scale_pot = min(total_portfolio_value_potential[dim] * investment_scale / total_proposed_investments[dim], 1.0)
-                investment_scale_cap = min(uninvested_capacity[dim] / (total_proposed_investments[dim] * investment_scale_pot), 1.0)
+                divestments_sum = abs(sum(min(v,0.0) for v in delta_value_target_map[dim].values()))
+                investment_scale_cap = min((uninvested_capacity[dim]+divestments_sum) / (total_proposed_investments[dim] * investment_scale_pot), 1.0)
                 final_investment_scale = investment_scale_pot * investment_scale_cap
                 
                 if self.verbose:
@@ -981,6 +1021,368 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             return investments_to_propose_cash_value, analysis_data
         
         return investments_to_propose_cash_value
+
+    def decide_investments_optimized(self, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
+        """
+        Alternative decision method that preserves the full evaluation → target pipeline,
+        but translates targets to trades via an AMM-aware optimization.
+        Does not modify the original decide_investments; opt-in usage only.
+        """
+        desirability_method = self.config.get('desirability_method', 'percentage_change')
+        if self.verbose:
+            print(f"\n=== DEBUG(OPT): {self.source_type.capitalize()} {self.source_id} deciding investments for round {evaluation_round} ===")
+
+        self._detailed_analysis_active = detailed_analysis
+        investments_to_propose = []
+        analysis_data = {} if analysis_mode else None
+
+        if not self.market:
+            print(f"Warning ({self.source_id}): No market access.")
+            return [] if not analysis_mode else ([], analysis_data)
+
+        # 1. Gather candidate agents
+        candidate_agent_ids = list(self.agent_conversations.keys())
+        if not candidate_agent_ids:
+            return [] if not analysis_mode else ([], analysis_data)
+
+        # 1A. Market prices and current capital
+        market_prices, market_capital_holdings = self.market.get_market_prices(
+            candidate_agent_ids=candidate_agent_ids,
+            dimensions=self.expertise_dimensions,
+            verbose=self.verbose
+        )
+
+        comparison_log = []
+        own_evaluations = {}
+        if self.use_cached_evaluations and evaluation_round is not None:
+            cached_eval, cached_comparison_log = self.get_cached_evaluation(evaluation_round)
+            if cached_eval:
+                print(f"{self.source_type.upper()} ({self.source_id}): Using cached evaluations for round {evaluation_round}")
+                own_evaluations = cached_eval
+                if detailed_analysis:
+                    comparison_log = cached_comparison_log
+        if not own_evaluations:
+            eval_result = self.evaluate_agents_batch(
+                candidate_agent_ids,
+                dimensions=self.expertise_dimensions,
+                evaluation_round=evaluation_round,
+                use_comparative=use_comparative,
+                analysis_mode=analysis_mode,
+                detailed_analysis=detailed_analysis
+            )
+            if detailed_analysis:
+                own_evaluations, comparison_log = eval_result
+            else:
+                own_evaluations = eval_result
+        if not own_evaluations:
+            return [] if not analysis_mode else ([], analysis_data)
+
+        # 2. Capacity projection and risk
+        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
+        risk_iter = risk = self.compute_risk(projected_capital_shares, current_capital_holdings=market_capital_holdings, type='relative_capital')
+
+        # 3. Current value holdings
+        current_value_holding = defaultdict(lambda: defaultdict(float))
+        for dimension in self.expertise_dimensions:
+            for agent_id in own_evaluations.keys():
+                self.market.ensure_agent_dimension_initialized_in_amm(agent_id, dimension)
+                amm = self.market.agent_amm_params[agent_id][dimension]
+                p_curr = amm['R'] / max(amm['T'], 1e-9)
+                S = self.market.source_investments[self.source_id].get(agent_id, {}).get(dimension, 0.0)
+                current_value_holding[dimension][agent_id] = S * p_curr
+
+        # 4. Iterative reweighting with AMM-consistent optimization (capital-based attractiveness)
+        trades_by_dim = {dim: {aid: 0.0 for aid in own_evaluations.keys()} for dim in self.expertise_dimensions}
+
+        buy_threshold = self.config.get('attractiveness_buy_threshold', 0.01)
+        lam = float(self.config.get('optimizer_lambda_prox', 0.5))
+        rho = float(self.config.get('optimizer_risk_rho', 0.5))
+        tau = float(self.config.get('optimizer_turnover_tau', 0.0))
+        grid_pts = int(self.config.get('optimizer_grid_points', 31))
+        inner_iters = int(self.config.get('optimizer_inner_iters', 2))
+        relax = float(self.config.get('optimizer_relaxation', 0.4))
+        recompute_targets = bool(self.config.get('optimizer_recompute_targets', False))
+        recompute_risk = bool(self.config.get('optimizer_recompute_risk', False))
+
+        proj_caps = projected_capital_shares
+
+        def simulate_state(trades_map):
+            sim_amm_params = copy.deepcopy(self.market.agent_amm_params)
+            sim_S = defaultdict(lambda: defaultdict(float))
+            sim_uninvested_capacity = copy.deepcopy(self.market.source_available_capacity[self.source_id])
+            for aid in own_evaluations.keys():
+                for dim in self.expertise_dimensions:
+                    self.market.ensure_agent_dimension_initialized_in_amm(aid, dim)
+                    amm0 = self.market.agent_amm_params[aid][dim]
+                    R0, T0 = amm0['R'], amm0['T']
+                    S0 = self.market.source_investments[self.source_id].get(aid, {}).get(dim, 0.0)
+                    cash = trades_map.get(dim, {}).get(aid, 0.0)
+                    sell_cap, _ = self._compute_trade_bounds(R0, T0, S0)
+                    buy_cap = sim_uninvested_capacity[dim]
+                    if cash > buy_cap:
+                        cash = buy_cap
+                    if cash < 0:
+                        cash = -min(-cash, sell_cap)
+                    if cash == 0.0:
+                        sim_amm_params[aid][dim]['R'], sim_amm_params[aid][dim]['T'], sim_S[aid][dim] = R0, T0, S0
+                    elif cash > 0:
+                        x = cash
+                        q = x * T0 / (R0 + x)
+                        sim_amm_params[aid][dim]['R'] = R0 + x
+                        sim_amm_params[aid][dim]['T'] = max(T0 - q, 1e-9)
+                        sim_S[aid][dim] = S0 + q
+                        sim_uninvested_capacity[dim] -= x
+                    else:
+                        y = -cash
+                        q = y * T0 / (R0 - y) if (R0 - y) > 1e-9 else 0.0
+                        sim_amm_params[aid][dim]['R'] = max(R0 - y, 1e-9)
+                        sim_amm_params[aid][dim]['T'] = T0 + q
+                        sim_S[aid][dim] = max(0.0, S0 - q)
+                        sim_uninvested_capacity[dim] += y
+            return sim_amm_params, sim_S, sim_uninvested_capacity
+
+        sim_amm_params = copy.deepcopy(self.market.agent_amm_params)
+        sim_S = copy.deepcopy(self.market.source_investments[self.source_id])
+        # Snapshot original state for optional solving against original R,T,S
+        snapshot_amm_params = copy.deepcopy(self.market.agent_amm_params)
+        snapshot_S = copy.deepcopy(self.market.source_investments[self.source_id])
+        sim_uninvested_capacity = copy.deepcopy(self.market.source_available_capacity[self.source_id])
+        for _iter in range(max(1, inner_iters)):
+
+            if recompute_targets:
+                sim_market_prices = defaultdict(lambda: defaultdict(float))
+                for aid in own_evaluations.keys():
+                    for dim in self.expertise_dimensions:
+                        sim_market_prices[aid][dim] = sim_amm_params[aid][dim]['R'] / max(sim_amm_params[aid][dim]['T'], 1e-9)
+                _proj_prices, proj_caps, _ = self.check_market_capacity(own_evaluations, sim_market_prices)
+
+            # Recompute risk against simulated capital
+            if recompute_risk:
+                sim_cap_holdings = defaultdict(lambda: defaultdict(float))
+                for aid in own_evaluations.keys():
+                    for dim in self.expertise_dimensions:
+                        sim_cap_holdings[aid][dim] = sim_amm_params[aid][dim]['R'] / max(sim_amm_params[aid][dim]['T'], 1e-9)
+                risk_iter = self.compute_risk(proj_caps, current_capital_holdings=sim_cap_holdings, type='relative_capital')
+
+            # Attractiveness from capital
+            attractiveness_scores = defaultdict(lambda: defaultdict(float))
+            for dim in self.expertise_dimensions:
+                for aid in own_evaluations.keys():
+                    curr_cap = sim_amm_params[aid][dim]['R'] / max(sim_amm_params[aid][dim]['T'], 1e-9)
+                    cap_tgt = proj_caps[dim][aid][0] if isinstance(proj_caps[dim][aid], tuple) else proj_caps[dim][aid]
+                    if desirability_method == 'percentage_change':
+                        attr = ((cap_tgt - curr_cap) / curr_cap) if curr_cap > 1e-9 else 0.0
+                    elif desirability_method == 'log_ratio':
+                        if curr_cap > 1e-9 and cap_tgt > 1e-9:
+                            attr = np.log(cap_tgt / curr_cap)
+                        elif cap_tgt > curr_cap:
+                            attr = 1.0
+                        else:
+                            attr = -1.0
+                    else:
+                        attr = ((cap_tgt - curr_cap) / curr_cap) if curr_cap > 1e-9 else 0.0
+                    rsk = 0.0
+                    if isinstance(risk_iter.get(aid, None), dict):
+                        rsk = risk_iter[aid].get(dim, 0.0)
+                    elif isinstance(risk_iter.get(dim, None), dict):
+                        rsk = risk_iter[dim].get(aid, 0.0)
+                    attractiveness_scores[dim][aid] = attr / (rsk + 1.0)
+
+            # Weights and ideal values
+            target_portfolio_weights = defaultdict(lambda: defaultdict(float))
+            total_portfolio_value_potential = self._calculate_total_portfolio_value_potential(
+                total_available_cash=sim_uninvested_capacity, 
+                amm_params=sim_amm_params, 
+                source_investments=sim_S)
+            for dim in self.expertise_dimensions:
+                pos = {aid: v for aid, v in attractiveness_scores[dim].items() if v > buy_threshold}
+                s = sum(pos.values())
+                if s > 1e-9:
+                    for aid, v in pos.items():
+                        target_portfolio_weights[dim][aid] = v / s
+
+            target_value_holding_ideal = defaultdict(lambda: defaultdict(float))
+            for dim in self.expertise_dimensions:
+                for aid in own_evaluations.keys():
+                    if aid in target_portfolio_weights.get(dim, {}):
+                        target_value_holding_ideal[dim][aid] = target_portfolio_weights[dim][aid] * total_portfolio_value_potential.get(dim, 0.0)
+                    else:
+                        target_value_holding_ideal[dim][aid] = self.config.get('min_value_holding_per_asset', 0.0)
+
+            value_holding_init = defaultdict(lambda: defaultdict(float))
+            for dimension in self.expertise_dimensions:
+                for agent_id in own_evaluations.keys():
+                    S = sim_S[agent_id][dimension]
+                    R, T = sim_amm_params[agent_id][dimension]['R'], sim_amm_params[agent_id][dimension]['T']
+                    p_curr = R / max(T, 1e-9)
+                    value_holding_init[dimension][agent_id] = S * p_curr
+            # Per-dimension solve with relaxation and budget scaling
+            new_trades_by_dim = {dim: dict(trades_by_dim[dim]) for dim in self.expertise_dimensions}
+            trades_by_dim_nonsmoothed = {dim: dict(trades_by_dim[dim]) for dim in self.expertise_dimensions}
+            for dim in self.expertise_dimensions:
+                # Build asset parameter list for joint solve
+                assets = []
+                forced_sells = {}
+                zeroing = self.config.get('optimizer_zeroing_enabled', True)
+                zero_target_rel = self.config.get('optimizer_zero_target_rel', 0.005)
+                small_hold_rel = self.config.get('optimizer_small_holding_rel', 0.01)
+                portfolio_val_dim = total_portfolio_value_potential.get(dim, 0.0)
+
+                for aid in own_evaluations.keys():
+                    if self.config.get('optimizer_solve_on_sim_state', True):
+                        R = sim_amm_params[aid][dim]['R']
+                        T = sim_amm_params[aid][dim]['T']
+                        S = sim_S.get(aid, {}).get(dim, 0.0)
+                    else:
+                        R = snapshot_amm_params[aid][dim]['R']
+                        T = snapshot_amm_params[aid][dim]['T']
+                        S = snapshot_S.get(aid, {}).get(dim, 0.0)
+                    V_prev = current_value_holding[dim][aid]
+                    V_target = target_value_holding_ideal[dim][aid]
+                    attr = attractiveness_scores[dim].get(aid, 0.0)
+                    weight = max(0.05, abs(attr))
+                    # Risk dict can be agent->dim or dim->agent; guard both
+                    rsk = 0.0
+                    if isinstance(risk_iter.get(aid, None), dict):
+                        rsk = risk_iter[aid].get(dim, 0.0)
+                    elif isinstance(risk_iter.get(dim, None), dict):
+                        rsk = risk_iter[dim].get(aid, 0.0)
+                    buy_allowed = attr > buy_threshold
+                    sell_allowed = attr < -buy_threshold
+
+                    # Optional zeroing rule: if target is ~0 and current holding is small, force full sell
+                    if zeroing and (V_target <= zero_target_rel * portfolio_val_dim) and (V_prev <= small_hold_rel * portfolio_val_dim) and (sell_allowed or not buy_allowed):
+                        sell_cap, _ = self._compute_trade_bounds(R, T, S)
+                        if sell_cap > 0:
+                            forced_sells[aid] = -sell_cap
+                            # Skip adding this asset to the optimizer assets list
+                            continue
+
+                    assets.append({
+                        'key': aid,
+                        'R': R,
+                        'T': T,
+                        'S': S,
+                        'V_target': V_target,
+                        'V_prev': V_prev,
+                        'V_init': value_holding_init[dim].get(aid, 0.0),
+                        'risk': rsk,
+                        'weight': weight,
+                        'buy_allowed': buy_allowed,
+                        'sell_allowed': sell_allowed,
+                    })
+
+                available_cash_base = self.market.source_available_capacity.get(self.source_id, {}).get(dim, 0.0)
+                # Compute buys cap (applies to total buys including reallocations)
+                cap_cash = None
+                if self.config.get('optimizer_respect_investment_scale_cap', True):
+                    invest_scale = self.config.get('investment_scale', 0.2)
+                    cap_cash = max(0.0, invest_scale * portfolio_val_dim)
+                # Add proceeds from forced sells to available budget for remaining assets
+                forced_proceeds = sum(-c for c in forced_sells.values() if c < 0)
+                effective_available_cash = available_cash_base + forced_proceeds
+                if self.config.get('optimizer_joint_budget', True):
+                    joint_trades = self._solve_budget_coupled_trades(
+                        assets=assets,
+                        available_cash=effective_available_cash,
+                        lam_prox=lam,
+                        rho_risk=rho,
+                        tau_turnover=tau,
+                        grid_points=grid_pts,
+                        buys_cap=cap_cash,
+                    )
+                    cash_trades = {**forced_sells, **joint_trades}
+                else:
+                    # Fallback to independent solves + uniform scaling
+                    cash_trades = {}
+                    for a in assets:
+                        c_star = self._solve_asset_trade_L2(
+                            a['R'], a['T'], a['S'],
+                            V_target=a['V_target'],
+                            V_prev=a['V_prev'],
+                            V_init=a['V_init'],
+                            risk=a['risk'],
+                            weight=a['weight'],
+                            lam_prox=lam,
+                            rho_risk=rho,
+                            tau_turnover=tau,
+                            buy_allowed=a['buy_allowed'],
+                            sell_allowed=a['sell_allowed'],
+                            grid_points=grid_pts,
+                        )
+                        cash_trades[a['key']] = c_star
+                    cash_trades = {**forced_sells, **cash_trades}
+                    # First scale to fit available cash + sells
+                    cash_trades = self._scale_trades_to_budget(cash_trades, available_cash_base)
+                    # Then enforce total-buys cap (includes reallocations) if configured
+                    if cap_cash is not None:
+                        buys = sum(max(c, 0.0) for c in cash_trades.values())
+                        if buys > cap_cash + 1e-9:
+                            scale = cap_cash / buys if buys > 1e-9 else 0.0
+                            for k, v in list(cash_trades.items()):
+                                if v > 0:
+                                    cash_trades[k] = v * scale
+
+                trades_by_dim_nonsmoothed[dim] = cash_trades
+                for aid, c in cash_trades.items():
+                    # Do not relax forced zeroing sells; apply immediately
+                    if aid in forced_sells:
+                        new_trades_by_dim[dim][aid] = c
+                    else:
+                        new_trades_by_dim[dim][aid] = (1 - relax) * trades_by_dim[dim][aid] + relax * c
+            trades_by_dim = new_trades_by_dim
+            sim_amm_params, sim_S, sim_uninvested_capacity = simulate_state(trades_by_dim)
+
+
+        # 5. Optimization per-dimension
+        total_portfolio_value_potential = self._calculate_total_portfolio_value_potential()
+        min_trade_threshold_pct = self.config.get('min_delta_value_trade_threshold', 5)  # percent of portfolio value
+
+        for dimension in self.expertise_dimensions:
+            cash_trades = trades_by_dim_nonsmoothed[dimension]
+            # Apply min trade threshold; allow exceptions for zeroing small positions
+            threshold_value = total_portfolio_value_potential.get(dimension, 0.0) * (min_trade_threshold_pct / 100.0)
+            zeroing = self.config.get('optimizer_zeroing_enabled', True)
+            zero_target_rel = self.config.get('optimizer_zero_target_rel', 0.005)
+            small_hold_rel = self.config.get('optimizer_small_holding_rel', 0.01)
+            portfolio_val_dim = total_portfolio_value_potential.get(dimension, 0.0)
+            for agent_id, cash in cash_trades.items():
+                V_prev = 0.0
+                V_target = 0.0
+                if dimension in current_value_holding and agent_id in current_value_holding[dimension]:
+                    V_prev = current_value_holding[dimension][agent_id]
+                if dimension in target_value_holding_ideal and agent_id in target_value_holding_ideal[dimension]:
+                    V_target = target_value_holding_ideal[dimension][agent_id]
+                is_zeroing_trade = zeroing and (cash < 0) and (V_target <= zero_target_rel * portfolio_val_dim) and (V_prev <= small_hold_rel * portfolio_val_dim)
+                if abs(cash) < threshold_value and not is_zeroing_trade:
+                    continue
+                conf = own_evaluations.get(agent_id, {}).get(dimension, (0.5, 0.5))[1]
+                investments_to_propose.append((agent_id, dimension, cash, conf))
+
+        # Sort by cash magnitude for cleanliness
+        investments_to_propose.sort(key=lambda x: x[2])
+
+        # Emit final trades above threshold
+        total_portfolio_value_potential = self._calculate_total_portfolio_value_potential()
+        min_trade_threshold_pct = self.config.get('min_delta_value_trade_threshold', 5)
+        for dim in self.expertise_dimensions:
+            threshold_value = total_portfolio_value_potential.get(dim, 0.0) * (min_trade_threshold_pct / 100.0)
+            for aid, cash in trades_by_dim[dim].items():
+                if abs(cash) < threshold_value:
+                    continue
+                conf = own_evaluations.get(aid, {}).get(dim, (0.5, 0.5))[1]
+                investments_to_propose.append((aid, dim, cash, conf))
+
+        investments_to_propose.sort(key=lambda x: x[2])
+
+        if analysis_mode or detailed_analysis:
+            if detailed_analysis:
+                analysis_data = analysis_data or {}
+                analysis_data['comparison_log'] = comparison_log
+            analysis_data = analysis_data or {}
+            analysis_data['own_evaluations'] = own_evaluations
+            return investments_to_propose, analysis_data
+        return investments_to_propose
 
     def evaluate_and_get_pair_evaluation_memory(self, evaluation_round=None, use_comparative=True):
         """

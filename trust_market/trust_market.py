@@ -270,6 +270,24 @@ class TrustMarket:
 
         # ipdb.set_trace()
         for agent_id, dimension, amount, confidence in investments:
+            # Diagnostic + normalization: detect and coerce string agent IDs from cached evaluations
+            if isinstance(agent_id, str):
+                agent_id_str = agent_id
+                if agent_id_str.isdigit():
+                    int_candidate = int(agent_id_str)
+                    amm_str = self.agent_amm_params.get(agent_id_str)
+                    amm_int = self.agent_amm_params.get(int_candidate)
+                    t_str = amm_str.get(dimension, {}).get('T') if isinstance(amm_str, dict) else None
+                    t_int = amm_int.get(dimension, {}).get('T') if isinstance(amm_int, dict) else None
+                    print(
+                        f"DIAG: process_investments: source={source_id}, agent_id is string='{agent_id_str}', "
+                        f"int_candidate={int_candidate}, AMM_has_str={amm_str is not None}, T(str)={t_str}, "
+                        f"AMM_has_int={amm_int is not None}, T(int)={t_int}. Coercing to int."
+                    )
+                    agent_id = int_candidate
+                else:
+                    print(f"Warning: Non-numeric agent_id='{agent_id_str}' in investments from {source_id}. Leaving as-is.")
+
             self._execute_investment_trade(source_id, agent_id, dimension, amount, confidence, affected_agents_dimensions)
 
         # Apply correlations if enabled and scores actually changed
@@ -307,6 +325,17 @@ class TrustMarket:
                 change_amount = -actual_divestment # Record the change
                 y = actual_divestment
                 agent_amm_params = self.agent_amm_params[agent_id][dimension]
+                # Diagnostic: guard and report if T is zero before AMM math
+                if agent_amm_params['T'] == 0:
+                    alt = None
+                    if isinstance(agent_id, str) and agent_id.isdigit():
+                        aid_int = int(agent_id)
+                        alt = self.agent_amm_params.get(aid_int, {}).get(dimension, {})
+                    print(
+                        f"ERROR DIAG: AMM T=0 before divest trade for agent_id={agent_id}({type(agent_id).__name__}), "
+                        f"dimension={dimension}, R={agent_amm_params.get('R')}, K={agent_amm_params.get('K')}, "
+                        f"alt_int_params={alt}"
+                    )
                 T, K = agent_amm_params['T'], agent_amm_params['K']
                 R = K/T
                 old_price = R/T
@@ -350,6 +379,17 @@ class TrustMarket:
                 change_amount = actual_investment # Record the change
                 x = actual_investment
                 agent_amm_params = self.agent_amm_params[agent_id][dimension]
+                # Diagnostic: guard and report if T is zero before AMM math
+                if agent_amm_params['T'] == 0:
+                    alt = None
+                    if isinstance(agent_id, str) and agent_id.isdigit():
+                        aid_int = int(agent_id)
+                        alt = self.agent_amm_params.get(aid_int, {}).get(dimension, {})
+                    print(
+                        f"ERROR DIAG: AMM T=0 before invest trade for agent_id={agent_id}({type(agent_id).__name__}), "
+                        f"dimension={dimension}, R={agent_amm_params.get('R')}, K={agent_amm_params.get('K')}, "
+                        f"alt_int_params={alt}"
+                    )
                 T, K = agent_amm_params['T'], agent_amm_params['K']
                 R = K/T
                 old_price = R/T

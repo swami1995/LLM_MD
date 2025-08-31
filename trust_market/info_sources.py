@@ -205,6 +205,257 @@ class InformationSource:
         Returns a list of (agent_id, dimension, amount, confidence) tuples.
         """
         raise NotImplementedError("Subclasses must implement this method")
+
+    # -----------------------------
+    # Optimization helpers (AMM-aware)
+    # -----------------------------
+    def _amm_post_trade_value(self, R: float, T: float, S: float, cash: float) -> float:
+        """
+        Pure function: compute post-trade portfolio value for this source's position
+        in an agent-dimension given a cash trade `cash` under CPMM dynamics.
+        cash > 0: invest (buy); cash < 0: divest (sell). Returns (S' * p').
+        """
+        # Guardrails
+        R = max(R, 1e-9)
+        T = max(T, 1e-9)
+        if cash == 0.0:
+            return (R / T) * S
+
+        if cash > 0:
+            # Buy with x=cash
+            x = cash
+            q = x * T / (R + x)
+            T_new = max(T - q, 1e-9)
+            R_new = R + x
+            price_new = R_new / T_new
+            return (S + q) * price_new
+        else:
+            # Sell for y = -cash (payout)
+            y = -cash
+            # Cap y to not exceed reserve; caller should also cap sells by share ownership.
+            if y >= R:
+                y = R - 1e-9
+            q = y * T / (R - y)
+            R_new = R - y
+            T_new = T + q
+            price_new = R_new / max(T_new, 1e-9)
+            return max(0.0, (S - q)) * price_new
+
+    def _compute_trade_bounds(self, R: float, T: float, S: float) -> tuple:
+        """
+        Returns (sell_cap, buy_cap) in cash units under CPMM constraints.
+        - sell_cap limited by reserve and share ownership.
+        - buy_cap left effectively unbounded here (caller may impose per-asset cap).
+        """
+        R = max(R, 1e-9)
+        T = max(T, 1e-9)
+        # Reserve bound: y < R
+        sell_cap_reserve = max(R - 1e-9, 0.0)
+        # Share ownership bound: y <= R*S/(T+S)
+        sell_cap_shares = (R * S / (T + S)) if (T + S) > 1e-12 else 0.0
+        sell_cap = max(0.0, min(sell_cap_reserve, sell_cap_shares))
+        buy_cap = float('inf')
+        return (sell_cap, buy_cap)
+
+    def _solve_asset_trade_L2(self,
+                              R: float,
+                              T: float,
+                              S: float,
+                              V_target: float,
+                              V_prev: float,
+                              V_init: float,
+                              risk: float,
+                              weight: float,
+                              lam_prox: float,
+                              rho_risk: float,
+                              tau_turnover: float,
+                              buy_mu: float = 0.0,
+                              buy_allowed: bool = True,
+                              sell_allowed: bool = True,
+                              grid_points: int = 25) -> float:
+        """
+        Solve 1D bounded optimization over cash c to minimize:
+          f(c) = weight*(V(c)-V_target)^2 + lam_prox*(V(c)-V_prev)^2 + rho_risk*risk*max(c,0)^2 + tau_turnover*abs(c)
+        subject to c in [-sell_cap, buy_cap], and respecting buy/sell allowed flags.
+        Returns optimal cash c* (can be 0 if constrained).
+        Uses coarse grid search followed by local refinement; robust and dependency-free.
+        """
+        sell_cap, buy_cap = self._compute_trade_bounds(R, T, S)
+        # Apply directional constraints
+        lo = -sell_cap if sell_allowed else 0.0
+        hi = (buy_cap if buy_allowed else 0.0)
+        # Handle trivial infeasible direction
+        if lo >= hi:
+            return 0.0
+
+        def obj(cash: float) -> float:
+            V = self._amm_post_trade_value(R, T, S, cash)
+            # Quadratic tracking + proximal + risk buy penalty + linear turnover
+            return (
+                weight * (V - V_target) ** 2
+                + lam_prox * (V - V_prev) ** 2
+                + (rho_risk * max(cash, 0.0) ** 2) * max(risk, 0.0)
+                + max(buy_mu, 0.0) * max(cash, 0.0)
+                + tau_turnover * abs(cash)
+            )
+
+        # Coarse grid
+        best_c = 0.0
+        best_f = obj(0.0)
+        if grid_points < 5:
+            grid_points = 5
+        for k in range(grid_points + 1):
+            c = lo + (hi - lo) * (k / grid_points)
+            f = obj(c)
+            if f < best_f:
+                best_f, best_c = f, c
+
+        # Local refinement around best_c using a small bracket
+        span = max((hi - lo) * 0.1, 1e-6)
+        a = max(lo, best_c - span)
+        b = min(hi, best_c + span)
+        # Golden-section-like refinement
+        phi = (1 + 5 ** 0.5) / 2
+        invphi = 1 / phi
+        invphi2 = invphi ** 2
+        n_refine = 15
+        c1 = b - (b - a) * invphi
+        c2 = a + (b - a) * invphi
+        f1 = obj(c1)
+        f2 = obj(c2)
+        for _ in range(n_refine):
+            if f1 > f2:
+                a = c1
+                c1 = c2
+                f1 = f2
+                c2 = a + (b - a) * invphi
+                f2 = obj(c2)
+            else:
+                b = c2
+                c2 = c1
+                f2 = f1
+                c1 = b - (b - a) * invphi
+                f1 = obj(c1)
+        c_candidate = (a + b) / 2
+        f_candidate = obj(c_candidate)
+        if f_candidate < best_f:
+            best_c = c_candidate
+
+        return float(best_c)
+
+    def _solve_budget_coupled_trades(self,
+                                     assets: list,
+                                     available_cash: float,
+                                     lam_prox: float,
+                                     rho_risk: float,
+                                     tau_turnover: float,
+                                     grid_points: int = 31,
+                                     buys_cap: float = None,
+                                     tol: float = 1e-4,
+                                     max_iter: int = 30) -> dict:
+        """
+        Jointly solve per-dimension trades across assets subject to a shared budget
+        using a dual (μ) search. Each asset is solved via _solve_asset_trade_L2 with an
+        added linear buy term μ·max(cash,0). We increase μ until total buys fit the
+        budget (available_cash + sell proceeds) within tolerance.
+
+        assets: list of dicts with keys:
+            'key' (hashable id), 'R','T','S','V_target','V_prev','V_init','risk','weight',
+            'buy_allowed','sell_allowed'
+
+        Returns: dict key -> optimal cash trade.
+        """
+        # Helper to solve given mu and return trades, buys, sells
+        def solve_given_mu(mu: float):
+            trades = {}
+            buys = 0.0
+            sells = 0.0
+            for a in assets:
+                c = self._solve_asset_trade_L2(
+                    a['R'], a['T'], a['S'],
+                    V_target=a['V_target'],
+                    V_prev=a['V_prev'],
+                    V_init=a.get('V_init', 0.0),
+                    risk=a.get('risk', 0.0),
+                    weight=a.get('weight', 1.0),
+                    lam_prox=lam_prox,
+                    rho_risk=rho_risk,
+                    tau_turnover=tau_turnover,
+                    buy_mu=mu,
+                    buy_allowed=a.get('buy_allowed', True),
+                    sell_allowed=a.get('sell_allowed', True),
+                    grid_points=grid_points,
+                )
+                trades[a['key']] = c
+                if c >= 0:
+                    buys += c
+                else:
+                    sells += -c
+            return trades, buys, sells
+
+        # If already feasible at mu=0, return that solution
+        mu_lo = 0.0
+        trades, buys, sells = solve_given_mu(mu_lo)
+        budget = max(0.0, available_cash) + sells
+        if buys_cap is not None:
+            budget = min(budget, max(0.0, buys_cap))
+        if buys <= budget + tol:
+            return trades
+
+        # Find an upper bound mu_hi that makes it feasible
+        mu_hi = 1.0
+        for _ in range(40):  # expand up to ~1e12 if needed
+            trades_hi, buys_hi, sells_hi = solve_given_mu(mu_hi)
+            budget_hi = max(0.0, available_cash) + sells_hi
+            if buys_cap is not None:
+                budget_hi = min(budget_hi, max(0.0, buys_cap))
+            if buys_hi <= budget_hi + tol:
+                break
+            mu_hi *= 2.0
+        else:
+            # If still infeasible, return scaled version of mu=0 trades as a fallback
+            # to preserve feasibility (should be rare)
+            buys0 = buys
+            sells0 = sells
+            budget0 = max(0.0, available_cash) + sells0
+            scale = 0.0 if buys0 <= 1e-9 else min(1.0, budget0 / buys0)
+            return {k: (v * scale if v > 0 else v) for k, v in trades.items()}
+
+        # Bisection search over [mu_lo, mu_hi]
+        best = trades
+        for _ in range(max_iter):
+            mu_mid = 0.5 * (mu_lo + mu_hi)
+            trades_mid, buys_mid, sells_mid = solve_given_mu(mu_mid)
+            budget_mid = max(0.0, available_cash) + sells_mid
+            if buys_cap is not None:
+                budget_mid = min(budget_mid, max(0.0, buys_cap))
+            if buys_mid <= budget_mid + tol:
+                best = trades_mid
+                mu_hi = mu_mid
+            else:
+                mu_lo = mu_mid
+            if mu_hi - mu_lo <= 1e-9:
+                break
+        return best
+
+    def _scale_trades_to_budget(self, cash_trades: dict, available_cash: float) -> dict:
+        """
+        Uniformly scale positive cash trades to fit budget: sum(buys) <= available_cash + sum(sells).
+        Sells are not scaled (to not break feasibility from share caps). Returns new dict.
+        """
+        buys = sum(max(c, 0.0) for c in cash_trades.values())
+        sells = sum(max(-c, 0.0) for c in cash_trades.values())
+        budget = max(0.0, available_cash) + sells
+        if buys <= budget + 1e-9:
+            return cash_trades
+        scale = 0.0 if buys <= 1e-9 else min(1.0, budget / buys)
+        scaled = {}
+        for k, c in cash_trades.items():
+            if c > 0:
+                scaled[k] = c * scale
+            else:
+                scaled[k] = c
+        return scaled
     
     def record_evaluation(self, agent_id, ratings):
         """Record an evaluation for later analysis."""
@@ -1600,8 +1851,37 @@ class InformationSource:
         Args:
             cached_data: Dictionary with structure {round: {agent_id: {dimension: (score, confidence)}}}
         """
-        self.cached_evaluations = cached_data
-        self.cached_comparison_log = comparison_log
+        # Normalize agent_id keys to ints where possible to avoid type-mismatch in downstream code
+        def _normalize_round_map(round_map: Dict) -> Dict:
+            normalized = {}
+            for rnd, eval_map in round_map.items():
+                # Keep round key as-is (expected to be int), but coerce agent_id keys to int if digit
+                if isinstance(eval_map, dict):
+                    new_eval_map = {}
+                    for aid, dim_map in eval_map.items():
+                        new_aid = int(aid) if isinstance(aid, str) and aid.isdigit() else aid
+                        new_eval_map[new_aid] = dim_map
+                    normalized[rnd] = new_eval_map
+                else:
+                    normalized[rnd] = eval_map
+            return normalized
+
+        def _normalize_comp_log(comp_log_by_round: Dict) -> Dict:
+            normalized = {}
+            for rnd, comp_log in comp_log_by_round.items():
+                # comparison logs may be any structure; attempt to coerce top-level agent keys if present
+                if isinstance(comp_log, dict):
+                    new_comp_log = {}
+                    for aid, v in comp_log.items():
+                        new_aid = int(aid) if isinstance(aid, str) and aid.isdigit() else aid
+                        new_comp_log[new_aid] = v
+                    normalized[rnd] = new_comp_log
+                else:
+                    normalized[rnd] = comp_log
+            return normalized
+
+        self.cached_evaluations = _normalize_round_map(cached_data)
+        self.cached_comparison_log = _normalize_comp_log(comparison_log)
         self.use_cached_evaluations = True
         print(f"{self.source_type.upper()} ({self.source_id}): Loaded cached evaluations for {len(cached_data)} rounds")
 
@@ -1620,13 +1900,31 @@ class InformationSource:
         Returns:
             Dictionary with structure {agent_id: {dimension: (score, confidence)}} or None
         """
-        return self.cached_evaluations.get(evaluation_round), self.cached_comparison_log.get(evaluation_round, {})
+        eval_map = self.cached_evaluations.get(evaluation_round)
+        comp = self.cached_comparison_log.get(evaluation_round, {})
+        # Best-effort: prime belief state with cached evaluations to support MC sampling downstream
+        if eval_map:
+            try:
+                for aid, dims in eval_map.items():
+                    if not isinstance(dims, dict):
+                        continue
+                    for dim, val in dims.items():
+                        try:
+                            score, conf = val
+                        except Exception:
+                            continue
+                        if not isinstance(score, (int, float)) or not isinstance(conf, (int, float)):
+                            continue
+                        conf = max(0.0, min(0.99, float(conf)))
+                        self._update_belief_state_bayesian(aid, dim, float(score), conf)
+            except Exception as _e:
+                print(f"Warning: could not prime belief state in get_cached_evaluation: {_e}")
+        return eval_map, comp
 
 
 # Example usage of the comprehensive risk system:
 """
 To use the risk system in your InformationSource subclass:
-
 1. Configure risk parameters in your __init__ method:
    self.config.update({
        'volatility_risk_weight': 0.5,  # Weight for volatility risk component
@@ -1635,7 +1933,6 @@ To use the risk system in your InformationSource subclass:
        'volatility_normalization_method': 'historical_range',
        # ... other risk parameters as needed
    })
-
 2. In your decide_investments method, use the risk-adjusted wrapper:
    def decide_investments(self, *args, **kwargs):
        # Your original investment logic
@@ -1645,7 +1942,6 @@ To use the risk system in your InformationSource subclass:
        
        # Apply risk adjustment
        return self.risk_adjusted_decide_investments(base_investment_logic, *args, **kwargs)
-
 3. Or compute risk manually for more control:
    # Get projected capital holdings from Monte Carlo simulation
    _, projected_capitals, _ = self._monte_carlo_check_market_capacity(evaluations, market_prices)
@@ -1658,7 +1954,6 @@ To use the risk system in your InformationSource subclass:
    
    # Apply risk adjustment to your base investment amounts
    adjusted_amounts = self.compute_risk_adjusted_investment_amounts(base_amounts, risk_results)
-
 The risk system combines:
 - Monte Carlo risk (standard deviation from uncertainty in evaluations)
 - Volatility risk (historical prediction and market volatility scaled to capital)

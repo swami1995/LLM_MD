@@ -405,29 +405,29 @@ class TrustMarketSystem:
             eval_frequency = self.source_evaluation_frequency.get(source_id, 1)
             if (self.evaluation_round+1) % eval_frequency == 0:
                 print(f"\n>>> Evaluating source: {source_id} (Round {self.evaluation_round})")
-                try:
-                    # Get investment decisions from the source
-                    # The source's `decide_investments` should return a list of investment tuples
-                    # And optionally, detailed analysis data if requested
-                    investments, analysis_data = source.decide_investments(
-                        evaluation_round=self.evaluation_round,
-                        analysis_mode=True, # Ensure analysis data is generated
-                        detailed_analysis=True # Trigger detailed logging
-                    )
-                    detailed_evaluations[source_id] = analysis_data
-                                        
-                    if investments:
-                        print(f"  Source {source_id} proposed {len(investments)} investments.")
-                        # Process these investments in the trust market
-                        self.trust_market.process_investments(source_id, investments)
-                    else:
-                        print(f"  Source {source_id} proposed no investments.")
+                # try:
+                # Get investment decisions from the source
+                # The source's `decide_investments` should return a list of investment tuples
+                # And optionally, detailed analysis data if requested
+                investments, analysis_data = source.decide_investments(
+                    evaluation_round=self.evaluation_round,
+                    analysis_mode=True, # Ensure analysis data is generated
+                    detailed_analysis=True # Trigger detailed logging
+                )
+                detailed_evaluations[source_id] = analysis_data
+                                    
+                if investments:
+                    print(f"  Source {source_id} proposed {len(investments)} investments.")
+                    # Process these investments in the trust market
+                    self.trust_market.process_investments(source_id, investments)
+                else:
+                    print(f"  Source {source_id} proposed no investments.")
 
-                except Exception as e:
-                    print(f"  !! Error during evaluation of source {source_id}: {e}")
-                    # Optionally, add traceback for debugging
-                    import traceback
-                    traceback.print_exc()
+                # except Exception as e:
+                #     print(f"  !! Error during evaluation of source {source_id}: {e}")
+                #     # Optionally, add traceback for debugging
+                #     import traceback
+                #     traceback.print_exc()
         
         return detailed_evaluations
 
@@ -547,12 +547,17 @@ class TrustMarketSystem:
                     for source_id, source_data in source_evaluations.items():
                         if source_id not in evaluations_by_source_by_round:
                             evaluations_by_source_by_round[source_id] = {}
+
+                        if source_id not in comparison_log_by_source_by_round:
+                            comparison_log_by_source_by_round[source_id] = {}
                             
                         # Check if this source_data contains own_evaluations
                         if 'own_evaluations' in source_data:
+                            print(f"  Source {source_id} has own_evaluations")
                             evaluations_by_source_by_round[source_id][round_num] = source_data['own_evaluations']
                         
                         if 'comparison_log' in source_data:
+                            print(f"  Source {source_id} has comparison_log")
                             comparison_log_by_source_by_round[source_id][round_num] = source_data['comparison_log']
             
             # Distribute cached evaluations to information sources
@@ -587,6 +592,12 @@ class TrustMarketSystem:
                     print(f"Loaded cached user evaluations for {len(user_evaluations_by_round)} rounds")
             
             print(f"Successfully loaded cached evaluations for {sources_loaded} sources from {log_filepath}")
+            # Diagnostic: validate agent-id types in cached evaluations vs known agents
+            try:
+                self._debug_validate_cached_agent_ids()
+            except Exception as _e:
+                # Keep diagnostics best-effort; do not interrupt main flow
+                print(f"Warning: cached ID validation skipped due to: {_e}")
             return True
             
         except Exception as e:
@@ -594,6 +605,48 @@ class TrustMarketSystem:
             import traceback
             traceback.print_exc()
             return False
+
+    def _debug_validate_cached_agent_ids(self):
+        """Best-effort diagnostic to spot agent-id type mismatches in cached data.
+
+        Prints a concise summary per source if cached evaluations contain non-int agent IDs
+        and whether those map to known agents in the current run.
+        """
+        known_agent_ids = set(self.agent_profiles.keys())
+        if not self.information_sources:
+            return
+        for source_id, source in self.information_sources.items():
+            cached = getattr(source, 'cached_evaluations', None)
+            if not cached:
+                continue
+            non_int_keys = set()
+            convertible = set()
+            non_convertible = set()
+            rounds = list(cached.keys())
+            for rnd, eval_map in cached.items():
+                if not isinstance(eval_map, dict):
+                    continue
+                for aid in eval_map.keys():
+                    if not isinstance(aid, int):
+                        non_int_keys.add(aid)
+                        if isinstance(aid, str) and aid.isdigit():
+                            convertible.add(int(aid))
+                        else:
+                            non_convertible.add(aid)
+            if non_int_keys:
+                print(f"DIAG: Source {source_id} cached agent_id types: {len(non_int_keys)} non-int ids over {len(rounds)} rounds.")
+                missing_in_market = [aid for aid in sorted(convertible) if aid not in known_agent_ids]
+                if convertible:
+                    print(f"  - Convertible to int: {sorted(list(convertible))[:10]}{' ...' if len(convertible)>10 else ''}")
+                    if missing_in_market:
+                        print(f"  - Convertible but not in known agents: {missing_in_market[:10]}{' ...' if len(missing_in_market)>10 else ''}")
+                if non_convertible:
+                    # Print a few samples for visibility
+                    samples = list(non_convertible)[:5]
+                    print(f"  - Non-convertible agent IDs (samples): {samples}")
+            else:
+                # Optional quiet success signal when diagnostics enabled
+                pass
 
     def enable_cached_evaluations_for_all_sources(self, enable: bool = True):
         """Enable or disable cached evaluation mode for all information sources that support it."""
