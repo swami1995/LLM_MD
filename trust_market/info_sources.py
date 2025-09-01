@@ -1890,13 +1890,40 @@ class InformationSource:
             return normalized
 
         def _normalize_comp_log(comp_log_by_round: Dict) -> Dict:
+            def _norm_agent_key(k):
+                return int(k) if isinstance(k, str) and k.isdigit() else k
+            def _norm_agent_map(d):
+                if not isinstance(d, dict):
+                    return {}
+                return {_norm_agent_key(k): v for k, v in d.items()}
             normalized = {}
             for rnd, comp_log in comp_log_by_round.items():
-                # comparison logs may be any structure; attempt to coerce top-level agent keys if present
-                if isinstance(comp_log, dict):
+                # Two common shapes observed:
+                # 1) list of entries with keys: pair, derived_scores, confidences, raw_results
+                # 2) dict keyed by agent id (legacy)
+                if isinstance(comp_log, list):
+                    new_list = []
+                    for entry in comp_log:
+                        if not isinstance(entry, dict):
+                            continue
+                        pair = entry.get('pair')
+                        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                            a, b = pair
+                            pair = [_norm_agent_key(a), _norm_agent_key(b)]
+                        derived_scores = _norm_agent_map(entry.get('derived_scores', {}))
+                        confidences = _norm_agent_map(entry.get('confidences', {}))
+                        new_list.append({
+                            'pair': pair,
+                            'derived_scores': derived_scores,
+                            'confidences': confidences,
+                            'raw_results': entry.get('raw_results')
+                        })
+                    normalized[rnd] = new_list
+                elif isinstance(comp_log, dict):
+                    # Legacy dict shape; normalize only top-level keys
                     new_comp_log = {}
                     for aid, v in comp_log.items():
-                        new_aid = int(aid) if isinstance(aid, str) and aid.isdigit() else aid
+                        new_aid = _norm_agent_key(aid)
                         new_comp_log[new_aid] = v
                     normalized[rnd] = new_comp_log
                 else:
@@ -1927,7 +1954,7 @@ class InformationSource:
         comp = self.cached_comparison_log.get(evaluation_round, {})
         # Rehydrate pair evaluation memory and derived/confidence histories if comparison logs are present
         did_update_from_comp = False
-        try:
+        if True:
             if isinstance(comp, list) and comp:
                 did_update_from_comp = True
                 per_agent_dim_scores = {}
@@ -1974,39 +2001,26 @@ class InformationSource:
                                 per_agent_dim_scores[aid][dim].append(score)
                                 per_agent_dim_confs[aid][dim].append(conf_map.get(dim, 0.3))
                 # Aggregate and update beliefs using combined evidence for this round
-                try:
-                    for aid, dims in per_agent_dim_scores.items():
-                        for dim, scores in dims.items():
-                            confs = per_agent_dim_confs[aid][dim]
-                            agg_score, agg_conf = self.combine_multiple_beliefs(scores, confs)
-                            self._update_belief_state_bayesian(aid, dim, agg_score, agg_conf)
-                except Exception as _e5:
-                    print(f"Warning: aggregating cached evidence failed: {_e5}")
-        except Exception as _e:
-            print(f"Warning: could not process cached comparison log: {_e}")
-        # If no comparison logs, prime belief from eval_map as a fallback
+                for aid, dims in per_agent_dim_scores.items():
+                    for dim, scores in dims.items():
+                        confs = per_agent_dim_confs[aid][dim]
+                        agg_score, agg_conf = self.combine_multiple_beliefs(scores, confs)
+                        self._update_belief_state_bayesian(aid, dim, agg_score, agg_conf)
         if not did_update_from_comp and eval_map:
-            try:
-                for aid, dims in eval_map.items():
-                    if not isinstance(dims, dict):
+            for aid, dims in eval_map.items():
+                if not isinstance(dims, dict):
+                    continue
+                for dim, val in dims.items():
+                    try:
+                        score, conf = val
+                    except Exception:
                         continue
-                    for dim, val in dims.items():
-                        try:
-                            score, conf = val
-                        except Exception:
-                            continue
-                        if not isinstance(score, (int, float)) or not isinstance(conf, (int, float)):
-                            continue
-                        conf = max(0.0, min(0.99, float(conf)))
-                        # self._update_belief_state_bayesian(aid, dim, float(score), conf)
-                        self.belief_state[aid][dim] = self._score_and_confidence_to_beta_params(float(score), conf)
-            except Exception as _e:
-                print(f"Warning: could not prime belief state in get_cached_evaluation: {_e}")
+                    if not isinstance(score, (int, float)) or not isinstance(conf, (int, float)):
+                        continue
+                    conf = max(0.0, min(0.99, float(conf)))
+                    self.belief_state[aid][dim] = self._score_and_confidence_to_beta_params(float(score), conf)
         # Update prediction volatility tracking for this round using the primed beliefs
-        try:
-            self.update_prediction_volatility_tracking(evaluation_round=evaluation_round)
-        except Exception as _e:
-            print(f"Warning: volatility tracking update failed: {_e}")
+        self.update_prediction_volatility_tracking(evaluation_round=evaluation_round)
         return eval_map, comp
 
 

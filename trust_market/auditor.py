@@ -346,6 +346,7 @@ class AuditorWithProfileAnalysis(InformationSource):
             # Monte Carlo Simulation Parameters
             'monte_carlo_trials': 50, # Number of Monte Carlo trials for risk assessment
             'use_monte_carlo': True, # Whether to use Monte Carlo for investment decisions
+            'mc_seed_base': 42, # Base seed for Monte Carlo simulations
             'investment_method': 'capital_projection', # 'capital_projection' or 'rank_mapping'
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
