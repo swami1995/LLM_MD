@@ -789,16 +789,6 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 own_evaluations = cached_eval
                 if detailed_analysis:
                     comparison_log = cached_comparison_log
-                # Prime the belief state with cached evaluations so Monte Carlo sampling reflects cached scores
-                try:
-                    for aid, dim_map in own_evaluations.items():
-                        for dim, (score, conf) in dim_map.items():
-                            if not isinstance(score, (int, float)) or not isinstance(conf, (int, float)):
-                                continue
-                            conf = max(0.0, min(0.99, float(conf)))
-                            self._update_belief_state_bayesian(aid, dim, float(score), conf)
-                except Exception as _e:
-                    print(f"Warning: could not prime belief state from cached evals: {_e}")
             else:
                 if self.verbose:
                     print(f"{self.source_type.upper()} ({self.source_id}): No cached evaluations found for round {evaluation_round}, falling back to LLM evaluation")

@@ -1902,8 +1902,67 @@ class InformationSource:
         """
         eval_map = self.cached_evaluations.get(evaluation_round)
         comp = self.cached_comparison_log.get(evaluation_round, {})
-        # Best-effort: prime belief state with cached evaluations to support MC sampling downstream
-        if eval_map:
+        # Rehydrate pair evaluation memory and derived/confidence histories if comparison logs are present
+        did_update_from_comp = False
+        try:
+            if isinstance(comp, list) and comp:
+                did_update_from_comp = True
+                per_agent_dim_scores = {}
+                per_agent_dim_confs = {}
+                for entry in comp:
+                    pair = entry.get('pair')
+                    derived_scores = entry.get('derived_scores', {})
+                    confidences = entry.get('confidences', {})
+                    raw_results = entry.get('raw_results')
+                    if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                        a, b = pair
+                        # Persist evaluation memory
+                        try:
+                            self._store_pair_evaluation(a, b, derived_scores, confidences, raw_results=raw_results, evaluation_round=evaluation_round)
+                        except Exception as _e2:
+                            print(f"Warning: _store_pair_evaluation failed: {_e2}")
+                        # Update legacy derived/confidence histories
+                        dims_a = set(derived_scores.get(a, {}).keys())
+                        dims_b = set(derived_scores.get(b, {}).keys())
+                        dims = list(dims_a.union(dims_b))
+                        try:
+                            self._update_agent_derived_scores(a, derived_scores.get(a, {}), dims, confidences.get(a, {}))
+                            self._update_agent_confidences(a, confidences.get(a, {}), dims)
+                            self._update_agent_derived_scores(b, derived_scores.get(b, {}), dims, confidences.get(b, {}))
+                            self._update_agent_confidences(b, confidences.get(b, {}), dims)
+                        except Exception as _e3:
+                            print(f"Warning: updating derived/confidences failed: {_e3}")
+                        # Cache results for this round
+                        try:
+                            self.comparison_results_cache[(min(a, b), max(a, b), evaluation_round)] = (derived_scores, confidences)
+                        except Exception as _e4:
+                            print(f"Warning: updating comparison_results_cache failed: {_e4}")
+                        # Collect evidence per agent/dimension
+                        for aid in (a,b):
+                            score_map = derived_scores.get(aid, {})
+                            conf_map = confidences.get(aid, {})
+                            if aid not in per_agent_dim_scores:
+                                per_agent_dim_scores[aid] = {}
+                                per_agent_dim_confs[aid] = {}
+                            for dim, score in score_map.items():
+                                if dim not in per_agent_dim_scores[aid]:
+                                    per_agent_dim_scores[aid][dim] = []
+                                    per_agent_dim_confs[aid][dim] = []
+                                per_agent_dim_scores[aid][dim].append(score)
+                                per_agent_dim_confs[aid][dim].append(conf_map.get(dim, 0.3))
+                # Aggregate and update beliefs using combined evidence for this round
+                try:
+                    for aid, dims in per_agent_dim_scores.items():
+                        for dim, scores in dims.items():
+                            confs = per_agent_dim_confs[aid][dim]
+                            agg_score, agg_conf = self.combine_multiple_beliefs(scores, confs)
+                            self._update_belief_state_bayesian(aid, dim, agg_score, agg_conf)
+                except Exception as _e5:
+                    print(f"Warning: aggregating cached evidence failed: {_e5}")
+        except Exception as _e:
+            print(f"Warning: could not process cached comparison log: {_e}")
+        # If no comparison logs, prime belief from eval_map as a fallback
+        if not did_update_from_comp and eval_map:
             try:
                 for aid, dims in eval_map.items():
                     if not isinstance(dims, dict):
@@ -1916,10 +1975,17 @@ class InformationSource:
                         if not isinstance(score, (int, float)) or not isinstance(conf, (int, float)):
                             continue
                         conf = max(0.0, min(0.99, float(conf)))
-                        self._update_belief_state_bayesian(aid, dim, float(score), conf)
+                        # self._update_belief_state_bayesian(aid, dim, float(score), conf)
+                        self.belief_state[aid][dim] = self._score_and_confidence_to_beta_params(float(score), conf)
             except Exception as _e:
                 print(f"Warning: could not prime belief state in get_cached_evaluation: {_e}")
+        # Update prediction volatility tracking for this round using the primed beliefs
+        try:
+            self.update_prediction_volatility_tracking(evaluation_round=evaluation_round)
+        except Exception as _e:
+            print(f"Warning: volatility tracking update failed: {_e}")
         return eval_map, comp
+
 
 
 # Example usage of the comprehensive risk system:
