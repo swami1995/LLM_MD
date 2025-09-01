@@ -592,12 +592,6 @@ class TrustMarketSystem:
                     print(f"Loaded cached user evaluations for {len(user_evaluations_by_round)} rounds")
             
             print(f"Successfully loaded cached evaluations for {sources_loaded} sources from {log_filepath}")
-            # Diagnostic: validate agent-id types in cached evaluations vs known agents
-            try:
-                self._debug_validate_cached_agent_ids()
-            except Exception as _e:
-                # Keep diagnostics best-effort; do not interrupt main flow
-                print(f"Warning: cached ID validation skipped due to: {_e}")
             return True
             
         except Exception as e:

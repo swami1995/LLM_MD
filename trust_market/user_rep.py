@@ -713,14 +713,14 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         
         return projected_prices, projected_capital_shares
 
-    def check_market_capacity(self, own_evaluations, market_prices):
+    def check_market_capacity(self, own_evaluations, market_prices, evaluation_round=None):
         """
         Checks if the source has enough capacity to invest based on its evaluations and market prices.
         If not, it will print a warning and return False.
         """
         if self.config.get('use_monte_carlo', True):
             num_trials = self.config.get('monte_carlo_trials', 50)
-            return self._monte_carlo_check_market_capacity(own_evaluations, market_prices, num_trials)
+            return self._monte_carlo_check_market_capacity(own_evaluations, market_prices, num_trials, evaluation_round=evaluation_round)
         else:
             capacity_flags = {} # Collect ratios for all dimensions
             projected_prices = {} # {agent_id: projected_price}
@@ -816,7 +816,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 print("DEBUG: No agents successfully evaluated - returning empty list")
             return [] if not analysis_mode else ([], analysis_data)
 
-        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
+        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices, evaluation_round=evaluation_round)
         risk = self.compute_risk(projected_capital_shares, current_capital_holdings=market_capital_holdings, type='relative_capital')
         use_capital_projection = {dim: self.config.get('investment_method', 'capital_projection') == 'capital_projection' or capacity_flags[dim] for dim in capacity_flags.keys()}
 
@@ -1068,7 +1068,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             return [] if not analysis_mode else ([], analysis_data)
 
         # 2. Capacity projection and risk
-        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices)
+        projected_prices, projected_capital_shares, capacity_flags = self.check_market_capacity(own_evaluations, market_prices, evaluation_round=evaluation_round)
         risk_iter = risk = self.compute_risk(projected_capital_shares, current_capital_holdings=market_capital_holdings, type='relative_capital')
 
         # 3. Current value holdings

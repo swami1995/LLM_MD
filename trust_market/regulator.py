@@ -582,7 +582,7 @@ class Regulator(InformationSource):
 
         return projected_prices, projected_capital_shares
     
-    def check_market_capacity(self, own_evaluations, market_prices, regulatory_capacity=0.0, include_source_capacity=False):
+    def check_market_capacity(self, own_evaluations, market_prices, regulatory_capacity=0.0, include_source_capacity=False, evaluation_round=None):
         """
         Checks if the source has enough capacity to invest based on its evaluations and market prices.
         If not, it will print a warning and return False.
@@ -590,7 +590,7 @@ class Regulator(InformationSource):
         if self.config.get('use_monte_carlo', True):
             # TODO : Assuming regulatory_capacity is 0.0 for now. And no source capacity. So compatible with default monte carlo implementation.
             num_trials = self.config.get('monte_carlo_trials', 50)
-            return self._monte_carlo_check_market_capacity(own_evaluations, market_prices, num_trials)
+            return self._monte_carlo_check_market_capacity(own_evaluations, market_prices, num_trials, evaluation_round=evaluation_round)
         else:
             capacity_flags = {} # Collect ratios for all dimensions
             projected_prices = {} # {agent_id: projected_price}
@@ -1027,4 +1027,3 @@ class Regulator(InformationSource):
         profile_exists = aid in self.agent_profiles
         convs_exist = len(self.get_agent_conversations(aid)) >= self.config.get('min_conversations_required', 3)
         return profile_exists or convs_exist
-

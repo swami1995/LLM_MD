@@ -3,6 +3,7 @@ from collections import defaultdict, Counter
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Set, Optional, Union, Any
+import hashlib
 import re
 import json
 import ipdb
@@ -1330,7 +1331,21 @@ class InformationSource:
     # ------------------------------------------------------------------
     # Monte Carlo Simulation Methods for Risk-Sensitive Investment
     # ------------------------------------------------------------------
-    def sample_from_belief_states(self, agent_ids: List[int], dimensions: List[str]) -> Dict[int, Dict[str, float]]:
+    def _deterministic_rng(self, evaluation_round: Optional[int], dimension: str, tag: str = 'mc'):
+        """Create a deterministic RNG for Monte Carlo sampling if mc_seed_base is set.
+        Falls back to NumPy global RNG when seeding is disabled.
+        """
+        base = self.config.get('mc_seed_base', None) if hasattr(self, 'config') else None
+        if base is None:
+            return None
+        key = f"{getattr(self, 'source_id', 'src')}|{evaluation_round}|{dimension}|{tag}|{base}"
+        seed = int.from_bytes(hashlib.md5(key.encode()).digest()[:4], 'little')
+        try:
+            return np.random.default_rng(seed)
+        except Exception:
+            np.random.seed(seed)
+            return None
+    def sample_from_belief_states(self, agent_ids: List[int], dimensions: List[str], rng: Optional[Any] = None) -> Dict[int, Dict[str, float]]:
         """
         Sample scores from Beta distributions for given agents and dimensions.
         
@@ -1351,11 +1366,11 @@ class InformationSource:
                 if belief_params is not None:
                     alpha, beta = belief_params
                     # Sample from Beta distribution
-                    # try:
-                    sampled_score = np.random.beta(alpha, beta)
+                    if rng is not None and hasattr(rng, 'beta'):
+                        sampled_score = rng.beta(alpha, beta)
+                    else:
+                        sampled_score = np.random.beta(alpha, beta)
                     sampled_scores[agent_id][dimension] = sampled_score
-                    # except:
-                    #     ipdb.set_trace()  # Debugging: check if sampling fails
                 else:
                     # If no belief state, use neutral default
                     sampled_scores[agent_id][dimension] = 0.5
@@ -1365,7 +1380,9 @@ class InformationSource:
     def monte_carlo_projected_capital_simulation(self, own_evaluations: Dict[int, Dict[str, Tuple[float, float]]], 
                                                 market_prices: Dict[int, Dict[str, float]], 
                                                 dimension: str, 
-                                                num_trials: int = 1000) -> Dict[str, Any]:
+                                                num_trials: int = 1000,
+                                                evaluation_round: Optional[int] = None,
+                                                rng: Optional[Any] = None) -> Dict[str, Any]:
         """
         Run Monte Carlo simulation to estimate distribution of projected capital shares.
         
@@ -1387,9 +1404,13 @@ class InformationSource:
         steady_state_capital, steady_state_ratio, current_capital_shares = self._get_steady_state_capital(market_prices, dimension)
         capacity_flags = steady_state_ratio > 1.2
         
+        # Use deterministic RNG if requested and not provided
+        if rng is None:
+            rng = self._deterministic_rng(evaluation_round, dimension, tag='mc_capital')
+
         for trial in range(num_trials):
             # Sample scores from belief states
-            sampled_scores = self.sample_from_belief_states(agent_ids, [dimension])
+            sampled_scores = self.sample_from_belief_states(agent_ids, [dimension], rng=rng)
             
             # Create evaluation format expected by _project_steady_state_prices
             trial_evaluations = {}
@@ -1420,7 +1441,8 @@ class InformationSource:
     
     def _monte_carlo_check_market_capacity(self, own_evaluations: Dict[int, Dict[str, Tuple[float, float]]], 
                                          market_prices: Dict[int, Dict[str, float]], 
-                                         num_trials: int = None) -> Dict[str, Any]:
+                                         num_trials: int = None,
+                                         evaluation_round: Optional[int] = None) -> Dict[str, Any]:
         """
         Monte Carlo version of check_market_capacity that incorporates uncertainty.
         
@@ -1440,8 +1462,9 @@ class InformationSource:
         capacity_flags = {}        
         for dimension in self.expertise_dimensions:
             # Run Monte Carlo simulation for this dimension
+            rng = self._deterministic_rng(evaluation_round, dimension, tag='mc_capacity')
             projected_prices_dim, projected_capital_dim, steady_state_ratio = self.monte_carlo_projected_capital_simulation(
-                own_evaluations, market_prices, dimension, num_trials
+                own_evaluations, market_prices, dimension, num_trials, evaluation_round=evaluation_round, rng=rng
             )
             projected_capital_shares[dimension] = projected_capital_dim
             projected_prices[dimension] = projected_prices_dim
@@ -1985,7 +2008,6 @@ class InformationSource:
         except Exception as _e:
             print(f"Warning: volatility tracking update failed: {_e}")
         return eval_map, comp
-
 
 
 # Example usage of the comprehensive risk system:
