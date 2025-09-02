@@ -359,7 +359,7 @@ if __name__ == "__main__":
     )
     for agent_id, profile in trust_market_system.agent_profiles.items():
         regulator.add_agent_profile(agent_id, profile)
-    trust_market_system.register_regulator(regulator, evaluation_frequency=args.regulator_frequency)
+    trust_market_system.register_regulator(regulator, evaluation_frequency=args.regulator_frequency, investment_horizon=args.regulator_frequency)
     print(f"Registered Regulator: {regulator.source_id} (Eval Freq: {args.regulator_frequency})")
 
     # Load cached evaluations if requested

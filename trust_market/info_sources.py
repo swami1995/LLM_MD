@@ -273,7 +273,8 @@ class InformationSource:
                               buy_mu: float = 0.0,
                               buy_allowed: bool = True,
                               sell_allowed: bool = True,
-                              grid_points: int = 25) -> float:
+                              grid_points: int = 25,
+                              buy_cap: int = float('inf')) -> float:
         """
         Solve 1D bounded optimization over cash c to minimize:
           f(c) = weight*(V(c)-V_target)^2 + lam_prox*(V(c)-V_prev)^2 + rho_risk*risk*max(c,0)^2 + tau_turnover*abs(c)
@@ -281,7 +282,7 @@ class InformationSource:
         Returns optimal cash c* (can be 0 if constrained).
         Uses coarse grid search followed by local refinement; robust and dependency-free.
         """
-        sell_cap, buy_cap = self._compute_trade_bounds(R, T, S)
+        sell_cap, _ = self._compute_trade_bounds(R, T, S)
         # Apply directional constraints
         lo = -sell_cap if sell_allowed else 0.0
         hi = (buy_cap if buy_allowed else 0.0)
@@ -305,16 +306,57 @@ class InformationSource:
         best_f = obj(0.0)
         if grid_points < 5:
             grid_points = 5
+        # Guard against infinite bounds producing NaNs (e.g., inf * 0)
+        lo_finite = np.isfinite(lo)
+        hi_finite = np.isfinite(hi)
         for k in range(grid_points + 1):
-            c = lo + (hi - lo) * (k / grid_points)
+            # Build c carefully to avoid inf*0 -> NaN
+            if lo_finite and hi_finite:
+                c = lo + (hi - lo) * (k / grid_points)
+            else:
+                # Use a local symmetric bracket around 0 when one side is infinite
+                span_local = 1.0
+                # Try to scale span based on R if available via closure or defaults
+                # but here we just incrementally explore reasonable magnitudes
+                u = (k / grid_points)
+                c_pos = span_local * (u / max(1e-9, (1.0 - u))) if k < grid_points else span_local * 10.0
+                c_neg = -span_local * (u / max(1e-9, (1.0 - u))) if k < grid_points else -span_local * 10.0
+                if lo_finite and not hi_finite:
+                    # Negative side: from lo to 0, positive side: 0 to growing values
+                    if k <= grid_points // 2:
+                        # Sample negative uniformly between lo and 0
+                        frac = k / max(1, grid_points // 2)
+                        c = lo + (0.0 - lo) * frac
+                    else:
+                        c = c_pos
+                elif hi_finite and not lo_finite:
+                    if k <= grid_points // 2:
+                        c = -abs(c_neg)
+                    else:
+                        frac = (k - grid_points // 2) / max(1, grid_points - grid_points // 2)
+                        c = 0.0 + (hi - 0.0) * frac
+                else:
+                    # both infinite: sample around 0 with symmetric growth
+                    c = c_pos if k % 2 == 0 else -abs(c_neg)
+            if not np.isfinite(c):
+                continue
             f = obj(c)
+            if not np.isfinite(f):
+                continue
             if f < best_f:
                 best_f, best_c = f, c
 
         # Local refinement around best_c using a small bracket
-        span = max((hi - lo) * 0.1, 1e-6)
-        a = max(lo, best_c - span)
-        b = min(hi, best_c + span)
+        # Local refinement around best_c using a small finite bracket
+        if lo_finite and hi_finite and np.isfinite(hi - lo):
+            span = max((hi - lo) * 0.1, 1e-6)
+            a = max(lo, best_c - span)
+            b = min(hi, best_c + span)
+        else:
+            # Fallback finite bracket centered at best_c
+            span = max(1.0, abs(best_c) + 1.0)
+            a = best_c - span
+            b = best_c + span
         # Golden-section-like refinement
         phi = (1 + 5 ** 0.5) / 2
         invphi = 1 / phi
@@ -339,7 +381,7 @@ class InformationSource:
                 f1 = obj(c1)
         c_candidate = (a + b) / 2
         f_candidate = obj(c_candidate)
-        if f_candidate < best_f:
+        if np.isfinite(f_candidate) and f_candidate < best_f:
             best_c = c_candidate
 
         return float(best_c)
@@ -386,6 +428,7 @@ class InformationSource:
                     buy_allowed=a.get('buy_allowed', True),
                     sell_allowed=a.get('sell_allowed', True),
                     grid_points=grid_points,
+                    buy_cap=buys_cap
                 )
                 trades[a['key']] = c
                 if c >= 0:

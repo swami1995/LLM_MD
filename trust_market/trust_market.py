@@ -399,21 +399,18 @@ class TrustMarket:
 
             # After any transaction, log the new state of the source for that dimension
             if source_id not in self.oracle_influence_mechanisms:
-                total_invested_value = 0
-                for a_id, dims in self.source_investments[source_id].items():
-                    if dimension in dims:
-                        shares = dims[dimension]
-                        price = self.agent_trust_scores[a_id][dimension]
-                        total_invested_value += shares * price
-                
-                available_cash = self.source_available_capacity[source_id][dimension]
-                
+                liq_val, mtm_val, available_cash = self._compute_portfolio_values_for_source_dimension(source_id, dimension)
+
                 self.temporal_db['source_states'].append({
                     'evaluation_round': self.evaluation_round, 'timestamp': time.time(),
                     'source_id': source_id, 'dimension': dimension,
-                    'total_invested_value': total_invested_value,
+                    # Canonical: liquidation-based totals
+                    'total_invested_value': liq_val,
                     'available_cash': available_cash,
-                    'total_value': total_invested_value + available_cash
+                    'total_value': liq_val + available_cash,
+                    # Diagnostics: MTM totals
+                    'mtm_total_invested_value': mtm_val,
+                    'mtm_total_value': mtm_val + available_cash,
                 })
 
 
@@ -728,6 +725,79 @@ class TrustMarket:
             self.market_volatility_history = self.market_volatility_history[-self.volatility_window_size:]
         
         return volatility_metrics
+
+    def _compute_portfolio_values_for_source_dimension(self, source_id: str, dimension: str):
+        """
+        Compute both mark-to-market and liquidation value of a source's holdings for a dimension.
+
+        Returns a tuple:
+          (liquidation_invested_value, mtm_invested_value, available_cash)
+        where
+          - liquidation_invested_value sums AMM cash-out for the source's shares (R*q/(T+q))
+          - mtm_invested_value sums shares * current marginal price
+        """
+        liquidation_invested_value = 0.0
+        mtm_invested_value = 0.0
+
+        if source_id in self.source_investments:
+            for a_id, dims in self.source_investments[source_id].items():
+                q = dims.get(dimension, 0.0)
+                if not q or q <= 0:
+                    continue
+
+                amm = self.agent_amm_params.get(a_id, {}).get(dimension, {})
+                R = amm.get('R', 0.0)
+                T = amm.get('T', 0.0)
+                price = (R / T) if T > 1e-12 else self.agent_trust_scores[a_id].get(dimension, 0.5)
+
+                # Mark-to-market
+                mtm_invested_value += q * price
+
+                # Liquidation value if selling q back to AMM: y = R*q/(T+q)
+                if R > 0 and (T + q) > 1e-12:
+                    liquidation_invested_value += R * q / (T + q)
+                else:
+                    # Fallback gracefully
+                    liquidation_invested_value += q * price
+
+        available_cash = self.source_available_capacity[source_id].get(dimension, 0.0)
+        return liquidation_invested_value, mtm_invested_value, available_cash
+
+    def snapshot_source_values(self) -> None:
+        """
+        Record a snapshot of each non-oracle source's portfolio value per dimension
+        for the current evaluation round. This ensures the source value plots update
+        every round even if the source did not transact in that round.
+
+        For each source and dimension, we compute:
+          - total_invested_value: sum over agent holdings (shares * current price)
+          - available_cash: uninvested capacity for that dimension
+          - total_value: total_invested_value + available_cash
+        """
+        if not self.source_available_capacity:
+            return
+
+        ts = time.time()
+        for source_id, dim_caps in self.source_available_capacity.items():
+            # Skip oracle pseudo-sources which don't have standard portfolios
+            if source_id in self.oracle_influence_mechanisms:
+                continue
+
+            for dimension in self.dimensions:
+                liq_val, mtm_val, available_cash = self._compute_portfolio_values_for_source_dimension(source_id, dimension)
+                self.temporal_db['source_states'].append({
+                    'evaluation_round': self.evaluation_round,
+                    'timestamp': ts,
+                    'source_id': source_id,
+                    'dimension': dimension,
+                    # Liquidation-based totals are the canonical totals
+                    'total_invested_value': liq_val,
+                    'available_cash': available_cash,
+                    'total_value': liq_val + available_cash,
+                    # Also log MTM for analysis/diagnostics
+                    'mtm_total_invested_value': mtm_val,
+                    'mtm_total_value': mtm_val + available_cash,
+                })
 
     def get_market_prices(self, candidate_agent_ids=None, dimensions=None, verbose=False):
         market_prices = defaultdict(lambda: defaultdict(float))   # {agent_id: {dimension: P_current}}

@@ -12,6 +12,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import copy
+import ipdb
 
 # --- Base UserRepresentative (Simplified Logic) ---
 class UserRepresentative(InformationSource):
@@ -186,15 +187,15 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'investment_method': 'capital_projection', # 'capital_projection' or 'rank_mapping'
             # Optimization-based allocation parameters (opt-in)
             'optimization_backend': 'l2_values',
-            'optimizer_enabled': False,  # do not change existing behavior unless explicitly enabled
-            'optimizer_lambda_prox': 0.5,   # proximal weight to damp moves (maps to rebalance aggressiveness)
-            'optimizer_risk_rho': 0.5,      # penalty weight for buy-side risk
+            'optimizer_enabled': True,  # do not change existing behavior unless explicitly enabled
+            'optimizer_lambda_prox': 0.1,   # proximal weight to damp moves (maps to rebalance aggressiveness)
+            'optimizer_risk_rho': 0.01,      # penalty weight for buy-side risk
             'optimizer_turnover_tau': 0.0,  # L1 turnover penalty (0 = off)
             'optimizer_grid_points': 31,    # resolution for per-asset 1D search
             'optimizer_joint_budget': True, # use dual (μ) search across agents per-dimension
-            'optimizer_solve_on_sim_state': True, # if False, solve against original snapshot R,T,S
+            'optimizer_solve_on_sim_state': False, # if False, solve against original snapshot R,T,S
             'optimizer_zeroing_enabled': True,       # allow force-zero small positions when target ~ 0
-            'optimizer_zero_target_rel': 0.005,      # target <= 0.5% of portfolio triggers zeroing check
+            'optimizer_zero_target_rel': 0.001,      # target <= 0.5% of portfolio triggers zeroing check
             'optimizer_small_holding_rel': 0.01,     # holding <= 1% of portfolio eligible for zeroing
             'optimizer_respect_investment_scale_cap': True, # cap fresh cash per round using investment_scale
         }
@@ -1090,12 +1091,17 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         rho = float(self.config.get('optimizer_risk_rho', 0.5))
         tau = float(self.config.get('optimizer_turnover_tau', 0.0))
         grid_pts = int(self.config.get('optimizer_grid_points', 31))
-        inner_iters = int(self.config.get('optimizer_inner_iters', 2))
+        inner_iters = int(self.config.get('optimizer_inner_iters', 10))
         relax = float(self.config.get('optimizer_relaxation', 0.4))
         recompute_targets = bool(self.config.get('optimizer_recompute_targets', False))
         recompute_risk = bool(self.config.get('optimizer_recompute_risk', False))
 
+        zeroing = self.config.get('optimizer_zeroing_enabled', True)
+        zero_target_rel = self.config.get('optimizer_zero_target_rel', 0.001)
+        small_hold_rel = self.config.get('optimizer_small_holding_rel', 0.01)
+        
         proj_caps = projected_capital_shares
+        
 
         def simulate_state(trades_map):
             sim_amm_params = copy.deepcopy(self.market.agent_amm_params)
@@ -1208,19 +1214,17 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                     p_curr = R / max(T, 1e-9)
                     value_holding_init[dimension][agent_id] = S * p_curr
             # Per-dimension solve with relaxation and budget scaling
+            median_attr = {dim : np.median([abs(v) for v in attractiveness_scores[dim].values()]) if attractiveness_scores[dim] else 0.0 for dim in self.expertise_dimensions}
             new_trades_by_dim = {dim: dict(trades_by_dim[dim]) for dim in self.expertise_dimensions}
             trades_by_dim_nonsmoothed = {dim: dict(trades_by_dim[dim]) for dim in self.expertise_dimensions}
             for dim in self.expertise_dimensions:
                 # Build asset parameter list for joint solve
                 assets = []
                 forced_sells = {}
-                zeroing = self.config.get('optimizer_zeroing_enabled', True)
-                zero_target_rel = self.config.get('optimizer_zero_target_rel', 0.005)
-                small_hold_rel = self.config.get('optimizer_small_holding_rel', 0.01)
                 portfolio_val_dim = total_portfolio_value_potential.get(dim, 0.0)
 
                 for aid in own_evaluations.keys():
-                    if self.config.get('optimizer_solve_on_sim_state', True):
+                    if self.config.get('optimizer_solve_on_sim_state', False):
                         R = sim_amm_params[aid][dim]['R']
                         T = sim_amm_params[aid][dim]['T']
                         S = sim_S.get(aid, {}).get(dim, 0.0)
@@ -1239,7 +1243,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                     elif isinstance(risk_iter.get(dim, None), dict):
                         rsk = risk_iter[dim].get(aid, 0.0)
                     buy_allowed = attr > buy_threshold
-                    sell_allowed = attr < -buy_threshold
+                    sell_allowed = True 
 
                     # Optional zeroing rule: if target is ~0 and current holding is small, force full sell
                     if zeroing and (V_target <= zero_target_rel * portfolio_val_dim) and (V_prev <= small_hold_rel * portfolio_val_dim) and (sell_allowed or not buy_allowed):
@@ -1294,9 +1298,9 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                             V_init=a['V_init'],
                             risk=a['risk'],
                             weight=a['weight'],
-                            lam_prox=lam,
-                            rho_risk=rho,
-                            tau_turnover=tau,
+                            lam_prox=lam*median_attr[dim],
+                            rho_risk=rho*median_attr[dim],
+                            tau_turnover=tau*median_attr[dim],
                             buy_allowed=a['buy_allowed'],
                             sell_allowed=a['sell_allowed'],
                             grid_points=grid_pts,
@@ -1323,19 +1327,22 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                         new_trades_by_dim[dim][aid] = (1 - relax) * trades_by_dim[dim][aid] + relax * c
             trades_by_dim = new_trades_by_dim
             sim_amm_params, sim_S, sim_uninvested_capacity = simulate_state(trades_by_dim)
-
+            # print(f"DEBUG(OPT): Iter {_iter+1}/{inner_iters} completed.")
+            # print("DEBUG(OPT): trades by dim:")
+            # for dim in self.expertise_dimensions:
+            #     sample_trades = [(aid,cash) for i, (aid, cash) in enumerate(trades_by_dim[dim].items())]
+            #     sample_trades.sort(key=lambda x: x[1])
+            #     print(f"  Dim {dim}: {sample_trades} ...")
 
         # 5. Optimization per-dimension
         total_portfolio_value_potential = self._calculate_total_portfolio_value_potential()
-        min_trade_threshold_pct = self.config.get('min_delta_value_trade_threshold', 5)  # percent of portfolio value
+        min_trade_threshold_pct = self.config.get('min_delta_value_trade_threshold', 1)
 
+        # Apply min trade threshold; allow exceptions for zeroing small positions
         for dimension in self.expertise_dimensions:
-            cash_trades = trades_by_dim_nonsmoothed[dimension]
-            # Apply min trade threshold; allow exceptions for zeroing small positions
+            cash_trades = trades_by_dim[dimension]
             threshold_value = total_portfolio_value_potential.get(dimension, 0.0) * (min_trade_threshold_pct / 100.0)
-            zeroing = self.config.get('optimizer_zeroing_enabled', True)
-            zero_target_rel = self.config.get('optimizer_zero_target_rel', 0.005)
-            small_hold_rel = self.config.get('optimizer_small_holding_rel', 0.01)
+            # print(f"DEBUG(OPT): Dim {dimension} - Applying min trade threshold: {threshold_value:.4f} ({min_trade_threshold_pct}%)")
             portfolio_val_dim = total_portfolio_value_potential.get(dimension, 0.0)
             for agent_id, cash in cash_trades.items():
                 V_prev = 0.0
@@ -1353,18 +1360,18 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # Sort by cash magnitude for cleanliness
         investments_to_propose.sort(key=lambda x: x[2])
 
-        # Emit final trades above threshold
-        total_portfolio_value_potential = self._calculate_total_portfolio_value_potential()
-        min_trade_threshold_pct = self.config.get('min_delta_value_trade_threshold', 5)
-        for dim in self.expertise_dimensions:
-            threshold_value = total_portfolio_value_potential.get(dim, 0.0) * (min_trade_threshold_pct / 100.0)
-            for aid, cash in trades_by_dim[dim].items():
-                if abs(cash) < threshold_value:
-                    continue
-                conf = own_evaluations.get(aid, {}).get(dim, (0.5, 0.5))[1]
-                investments_to_propose.append((aid, dim, cash, conf))
-
-        investments_to_propose.sort(key=lambda x: x[2])
+        print(f"DEBUG: Final investments list length: {len(investments_to_propose)}")
+        if investments_to_propose:
+            print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} prepared {len(investments_to_propose)} cash-value based actions.")
+            for i, (aid, dim, amount, conf) in enumerate(investments_to_propose):
+                print(f"DEBUG: Investment {i+1}: Agent {aid}, Dim {dim}, Amount {amount:.4f}, Confidence {conf:.4f}")
+        else:
+            print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} found no cash-value actions to take.")
+        
+        # --- CLEANUP ---
+        # Reset detailed analysis flag after evaluation
+        self._detailed_analysis_active = False
+        # ipdb.set_trace()
 
         if analysis_mode or detailed_analysis:
             if detailed_analysis:

@@ -297,7 +297,13 @@ class TrustMarketSystem:
 
         self.display_current_scores()
 
-        # 6. Increment evaluation round counter
+        # 6. Snapshot source portfolio values for this round (even without trades)
+        try:
+            self.trust_market.snapshot_source_values()
+        except Exception as e:
+            print(f"Warning: Failed to snapshot source values for round {self.evaluation_round}: {e}")
+
+        # 7. Increment evaluation round counter
         self.trust_market.increment_evaluation_round()
         self.evaluation_round += 1
 
