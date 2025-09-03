@@ -593,7 +593,7 @@ class InformationSource:
             snippets.append(f"Round {rnd}{relative_round_str}: {summary_str}")
 
         header = "For context, here are your past evaluations for this pair (most recent first, as shown by the round number of the evaluation). \n" \
-                 "Use these to inform your judgment, but be aware that agent behavior can change over time. So the older evaluations might be outdated or stale. Trust your own judgment in case you feel the agent interactions/profile you see above are in contradiction with these evaluations.\n"
+                 "Use these to inform your judgment.\n"# but be aware that agent behavior can change over time. So the older evaluations might be outdated or stale. Trust your own judgment in case you feel the agent interactions/profile you see above are in contradiction with these evaluations.\n"
 
         return header + "\n".join(snippets)
 

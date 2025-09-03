@@ -258,14 +258,14 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                     if eval_snippets:
                         regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, " + \
                         "a very trusted source which has much more information than you while evaluating (such as the agent prompts, " + \
-                        "profiles and its conversations with more users). You should probably trust its evaluation more than your own. " + \
-                        "However, the regulator evaluations are typically a bit old (check the round number of the evaluation to make sure) and may " + \
-                        "not reflect the current state of the agents, given that the agent's behavior can change over time. " + \
-                        "So if you have conclusive evidence that the regulator's evaluation and reasoning aren't reflective of the agent" + \
-                        " interactions you observed above and believe that the agent behavior has likely changed since the regulator's " + \
-                        "evaluation, feel free to override its evaluation. But, if the regulator's evaluation and reasoning " + \
-                        "seem at all plausible, it's likely that the agent hasn't changed much and thus you should just trust" + \
-                        " the regulator evaluations :\n" + "\n".join(eval_snippets)
+                        "profiles and its conversations with more users). You should probably trust its evaluation more than your own. " + "\n".join(eval_snippets)#\
+                        # "However, the regulator evaluations are typically a bit old (check the round number of the evaluation to make sure) and may " + \
+                        # "not reflect the current state of the agents, given that the agent's behavior can change over time. " + \
+                        # "So if you have conclusive evidence that the regulator's evaluation and reasoning aren't reflective of the agent" + \
+                        # " interactions you observed above and believe that the agent behavior has likely changed since the regulator's " + \
+                        # "evaluation, feel free to override its evaluation. But, if the regulator's evaluation and reasoning " + \
+                        # "seem at all plausible, it's likely that the agent hasn't changed much and thus you should just trust" + \
+                        # " the regulator evaluations :\n" + "\n".join(eval_snippets)
                         # . Based on that, use your judgment to evaluate how much/whether to incorporate the regulator's feedback
         except Exception as e:
             if self.verbose:

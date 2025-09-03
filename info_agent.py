@@ -1247,11 +1247,12 @@ Customer (you):
                         regulator_context = "\n\nFor additional context, here is the most recent evaluation from the Regulator, " + \
                         "a very trusted source which has much more information than you while evaluating (such as the agent prompts, " + \
                         "profiles and the agent's conversations with more users). You should trust its evaluation and judgement more " + \
-                        "than anything else, even your own evaluation. However, the regulator evaluations can sometimes be a bit old" + \
-                        " (check the round number of the evaluation to make sure) and it's possible that it doesn't reflect the current" + \
-                        " state of the agents, given the agent behavior can change over time. But if the regulator evaluation and reasoning" + \
-                        " seem at all plausible, it's likely that the agent hasn't changed much and thus you should just trust the regulator" + \
-                        " evaluations : \n" + "\n".join(eval_snippets)
+                        "than anything else, even your own evaluation."  + "\n".join(eval_snippets) 
+                        # "However, the regulator evaluations can sometimes be a bit old" + \
+                        # " (check the round number of the evaluation to make sure) and it's possible that it doesn't reflect the current" + \
+                        # " state of the agents, given the agent behavior can change over time. But if the regulator evaluation and reasoning" + \
+                        # " seem at all plausible, it's likely that the agent hasn't changed much and thus you should just trust the regulator" + \
+                        # " evaluations : \n" + "\n".join(eval_snippets)
                         # "But, if the regulator made a very recent evaluation (in the last few rounds), it's very likely to be correct and you should probably trust it's judgement. " + \
                         # "Use your judgment to evaluate how much/whether to incorporate the regulator feedback"
                 # print(f"regulator round {rnd}{relative_round_str}")
