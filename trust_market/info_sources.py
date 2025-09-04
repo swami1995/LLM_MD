@@ -1993,7 +1993,7 @@ class InformationSource:
         Returns:
             Dictionary with structure {agent_id: {dimension: (score, confidence)}} or None
         """
-        eval_map = self.cached_evaluations.get(evaluation_round)
+        eval_map = self.cached_evaluations.get(evaluation_round, {})
         comp = self.cached_comparison_log.get(evaluation_round, {})
         # Rehydrate pair evaluation memory and derived/confidence histories if comparison logs are present
         did_update_from_comp = False
@@ -2063,7 +2063,8 @@ class InformationSource:
                     conf = max(0.0, min(0.99, float(conf)))
                     self.belief_state[aid][dim] = self._score_and_confidence_to_beta_params(float(score), conf)
         # Update prediction volatility tracking for this round using the primed beliefs
-        self.update_prediction_volatility_tracking(evaluation_round=evaluation_round)
+        if did_update_from_comp or eval_map:
+            self.update_prediction_volatility_tracking(evaluation_round=evaluation_round)
         return eval_map, comp
 
 

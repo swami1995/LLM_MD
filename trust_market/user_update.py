@@ -330,6 +330,12 @@ class UserUpdate:
                     self.oracle_adjust_reserve_direct(agent_b_id, dimension, delta_R_B)
     
 
+    def reset_belief_state(self, agent_ids):
+        """Reset belief states for specified agents."""
+        for agent_id in agent_ids:
+            if agent_id in self.user_belief_state:
+                self.user_belief_state[agent_id] = defaultdict(lambda: None)
+                
     def record_comparative_feedback_with_bayesian_averaging(self, agent_a_id: str, agent_b_id: str,
                                                             winners: Dict, raw_comparison_details: Optional[Dict] = None):
         """

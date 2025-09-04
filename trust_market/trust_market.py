@@ -118,6 +118,117 @@ class TrustMarket:
         print(f"  - User Feedback Strength: {self.user_feedback_strength}")
         print(f"  - Comparative Feedback Strength: {self.comparative_feedback_strength}")
 
+    # ------------------------------------------------------------------
+    #                           Persistence: Load
+    # ------------------------------------------------------------------
+    def load_logged_data(self, log_filepath: str) -> bool:
+        """
+        Load previously saved market state (from save_logged_data) into this instance.
+
+        Supports JSON and pickle formats. Attempts to normalize id types.
+
+        Returns True on success, False otherwise.
+        """
+        try:
+            if not os.path.exists(log_filepath):
+                print(f"Error: Market log not found at {log_filepath}")
+                return False
+
+            ext = os.path.splitext(log_filepath)[1].lower()
+            saved = {}
+            if ext == ".json":
+                with open(log_filepath, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+            elif ext in {".pkl", ".pickle"}:
+                with open(log_filepath, "rb") as f:
+                    saved = pickle.load(f)
+            else:
+                print(f"Error: Unsupported market log format '{ext}' (expected .json/.pkl)")
+                return False
+
+            saved_config = saved.get("config", {})
+            # Warn on dimension mismatches but continue
+            if saved_config:
+                if set(saved_config.get("dimensions", [])) != set(self.dimensions):
+                    print("Warning: Loaded log dimensions differ from current config; using loaded config.")
+                # Reapply config-driven fields
+                self.config = saved_config
+                self.dimensions = saved_config.get('dimensions', self.dimensions)
+                self.dimension_weights = saved_config.get('dimension_weights', {dim: 1.0 for dim in self.dimensions})
+                self.primary_sources = set(saved_config.get('primary_sources', list(self.primary_sources)))
+                self.primary_source_weight = saved_config.get('primary_source_weight', self.primary_source_weight)
+                self.secondary_source_weight = saved_config.get('secondary_source_weight', self.secondary_source_weight)
+                self.rating_scale = saved_config.get('rating_scale', self.rating_scale)
+                self.user_feedback_strength = saved_config.get('user_feedback_strength', self.user_feedback_strength)
+                self.comparative_feedback_strength = saved_config.get('comparative_feedback_strength', self.comparative_feedback_strength)
+                self.trust_decay_rate = saved_config.get('trust_decay_rate', self.trust_decay_rate)
+                self.max_trust = saved_config.get('max_trust', self.max_trust)
+                self.min_trust = saved_config.get('min_trust', self.min_trust)
+                self.primary_source_update_type = saved_config.get('primary_source_update_type', self.primary_source_update_type)
+
+            # Helpers to normalize int-like keys
+            def _to_int_if_digit(x):
+                return int(x) if isinstance(x, str) and x.isdigit() else x
+
+            # Restore core simple attributes
+            self.evaluation_round = saved.get("evaluation_round", 0)
+            self.amm_transactions_log = saved.get("amm_transactions_log", [])
+
+            # Restore temporal DB
+            temporal_db = saved.get("temporal_db", None)
+            if isinstance(temporal_db, dict):
+                self.temporal_db = temporal_db
+
+            # Restore nested mappings, normalizing agent_id keys where appropriate
+            agent_trust_scores = defaultdict(lambda: defaultdict(lambda: 0.5))
+            for aid, dim_map in saved.get("agent_trust_scores", {}).items():
+                aid_n = _to_int_if_digit(aid)
+                agent_trust_scores[aid_n] = defaultdict(lambda: 0.5, dim_map)
+            self.agent_trust_scores = agent_trust_scores
+
+            agent_amm_params = defaultdict(lambda: {dim: {'R': 0.0, 'T': 0.0, 'K': 0.0, 'total_supply': 0.0} for dim in self.dimensions})
+            for aid, dims in saved.get("agent_amm_params", {}).items():
+                aid_n = _to_int_if_digit(aid)
+                agent_amm_params[aid_n] = {dim: dict(params) for dim, params in dims.items()}
+            self.agent_amm_params = agent_amm_params
+
+            source_investments = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: 0.0)))
+            for sid, inv_map in saved.get("source_investments", {}).items():
+                for aid, dim_map in inv_map.items():
+                    aid_n = _to_int_if_digit(aid)
+                    source_investments[sid][aid_n] = dict(dim_map)
+            self.source_investments = source_investments
+
+            self.source_influence_capacity = defaultdict(lambda: {dim: 0.0 for dim in self.dimensions},
+                                                         {sid: dict(cap) for sid, cap in saved.get("source_influence_capacity", {}).items()})
+            self.source_available_capacity = defaultdict(lambda: {dim: 0.0 for dim in self.dimensions},
+                                                         {sid: dict(cap) for sid, cap in saved.get("source_available_capacity", {}).items()})
+            self.allocated_influence = defaultdict(lambda: {dim: 0.0 for dim in self.dimensions},
+                                                   {sid: dict(al) for sid, al in saved.get("allocated_influence", {}).items()})
+
+            self.agent_performance = defaultdict(lambda: defaultdict(list))
+            for aid, dim_map in saved.get("agent_performance", {}).items():
+                aid_n = _to_int_if_digit(aid)
+                self.agent_performance[aid_n] = {dim: list(entries) for dim, entries in dim_map.items()}
+
+            # Optional: restore spread horizons and pending investments if present in logs
+            self.source_investment_spread_horizons = saved.get("source_investment_spread_horizons", self.source_investment_spread_horizons)
+            self.pending_spread_investments = saved.get("pending_spread_investments", self.pending_spread_investments)
+
+            # If correlations are enabled, rebuild matrix
+            self.use_dimension_correlations = self.config.get('use_dimension_correlations', self.use_dimension_correlations)
+            if self.use_dimension_correlations:
+                self.initialize_dimension_correlations()
+
+            print(f"Loaded TrustMarket state from {log_filepath} at round {self.evaluation_round}")
+            return True
+
+        except Exception as e:
+            print(f"Error loading market state from {log_filepath}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
 
     def initialize_dimension_correlations(self):
         """Initialize the correlation structure between trust dimensions."""
@@ -1312,6 +1423,9 @@ class TrustMarket:
                 aid: {dim: list(entries) for dim, entries in dim_map.items()}
                 for aid, dim_map in self.agent_performance.items()
             },
+            # Add spread mechanics for precise resume support
+            "source_investment_spread_horizons": self.source_investment_spread_horizons,
+            "pending_spread_investments": self.pending_spread_investments,
             "detailed_evaluations": detailed_evaluations if detailed_evaluations is not None else {},
         }
 

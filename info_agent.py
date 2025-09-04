@@ -1328,6 +1328,14 @@ Customer (you):
                     return batch_ratings_parsed
                     
                 elif self.evaluation_method == "comparative_binary":
+                    if 'memory' in cached_eval[0]:
+                        for eval in cached_eval:
+                            user_id = eval.get('user_id')
+                            agent_a_id = eval.get('agent_a_id')
+                            agent_b_id = eval.get('agent_b_id')
+                            pair_key = (min(agent_a_id, agent_b_id), max(agent_a_id, agent_b_id))
+                            history = eval.get('memory', [])
+                            self.user_evaluations[user_id][pair_key] = history
                     return cached_eval
             else:
                 print(f"UserAgentSet: No cached evaluations found for round {evaluation_round}, falling back to LLM evaluation")
@@ -1558,7 +1566,8 @@ Format ONLY as a JSON object: {{ "DimensionName": {{ "reasoning": "string", "rat
                     'agent_a_id': agent_ids[i],
                     'agent_b_id': comparison_agent_ids[i],
                     'user_id': user_ids[i],
-                    'winners': winners_dict_ab
+                    'winners': winners_dict_ab,
+                    'memory': history[-self.memory_length_n:]  # Last N evaluations for this pair
                 }
                 batch_winners_parsed.append(comparison_result_for_market)
 
@@ -1747,6 +1756,7 @@ class CustomerSupportModel:
         self.stored_conversations = []
         self.use_stored_conversations = False
         self.stored_conversation_index = 0
+        self.stored_conversations_behavior = 'loop'  # 'loop' or 'new'
 
         print(f"Simulating with {self.num_agents} agent profiles and {self.num_users} user profiles.")
         print(f"Evaluation method: {self.evaluation_method}, Rating scale: {self.rating_scale}")
@@ -1812,6 +1822,13 @@ class CustomerSupportModel:
         print(f"Conversation types: {sum(1 for c in self.stored_conversations if 'agent_b_id' in c)} comparative, "
               f"{sum(1 for c in self.stored_conversations if 'agent_b_id' not in c)} specific")
 
+    def set_stored_conversations_behavior(self, behavior: str):
+        """Set behavior when stored conversations are exhausted: 'loop' or 'new'."""
+        if behavior not in ("loop", "new"):
+            print(f"Warning: Unknown stored conversation behavior '{behavior}'. Defaulting to 'loop'.")
+            behavior = 'loop'
+        self.stored_conversations_behavior = behavior
+
     def enable_stored_conversations(self, enabled: bool = True):
         """
         Enable or disable the use of stored conversations.
@@ -1841,10 +1858,16 @@ class CustomerSupportModel:
         sampled = []
         evaluation_method_matches = True
         
-        for _ in range(batch_size):
-            if self.stored_conversation_index >= len(self.stored_conversations):
-                self.stored_conversation_index = 0  # Cycle back to beginning
-            
+        remaining = len(self.stored_conversations) - self.stored_conversation_index
+        if remaining <= 0:
+            if self.stored_conversations_behavior == 'loop' and self.stored_conversations:
+                self.stored_conversation_index = 0
+                remaining = len(self.stored_conversations)
+            else:
+                return [], True  # exhausted
+
+        take = min(batch_size, remaining)
+        for _ in range(take):
             conv = self.stored_conversations[self.stored_conversation_index]
             sampled.append(conv)
             self.stored_conversation_index += 1
@@ -1858,8 +1881,8 @@ class CustomerSupportModel:
         
         if not evaluation_method_matches:
             print(f"Warning: Stored conversation types don't match current evaluation method ({self.evaluation_method})")
-        
-        return sampled, evaluation_method_matches
+        exhausted = (len(sampled) == 0)
+        return sampled, evaluation_method_matches if evaluation_method_matches else False, exhausted
 
     def _prepare_conversation_prompts(self):
         """Prepare and organize conversation prompts for use in simulation."""
@@ -1976,13 +1999,17 @@ class CustomerSupportModel:
         batch_size = self.batch_size
         
         # Sample stored conversations
-        sampled_conversations, method_matches = self.sample_stored_conversations(batch_size)
+        sampled_conversations, method_matches, exhausted = self.sample_stored_conversations(batch_size)
         
         # Initialize return values
         ratings_batch = None
         winners = None
         conversation_data_list = []
         
+        if exhausted and self.stored_conversations_behavior == 'new':
+            # Fall back to generating new conversations once stored are exhausted
+            return self._multi_turn_dialog_generate_new(evaluation_round)
+
         if self.evaluation_method == "comparative_binary":
             # Filter for comparative conversations
             comparative_convs = [c for c in sampled_conversations if 'agent_b_id' in c and c.get('history_b')]
@@ -2233,4 +2260,3 @@ class CustomerSupportModel:
     def enable_cached_user_evaluations(self, enable: bool = True):
         """Enable or disable using cached user evaluations."""
         self.user_agents.enable_cached_evaluations(enable)
-

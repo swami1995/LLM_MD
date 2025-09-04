@@ -74,6 +74,8 @@ if __name__ == "__main__":
     # --- NEW: Stored Conversation Args ---
     parser.add_argument("--use_stored_conversations", action="store_true", help="Use pre-computed conversations instead of generating new ones.")
     parser.add_argument("--stored_data_path", type=str, help="Path to the JSON file containing stored conversation data.")
+    parser.add_argument("--stored_conversations_behavior", type=str, choices=["loop", "new"], default="loop",
+                        help="Behavior when stored conversations are exhausted: 'loop' to cycle through them again, or 'new' to start generating fresh conversations.")
     
     # --- NEW: Detailed Logging Args ---
     parser.add_argument('--save_detailed_logs', action='store_true', default=False,
@@ -84,6 +86,10 @@ if __name__ == "__main__":
                         help='Use cached evaluations from a previous run instead of making new LLM calls.')
     parser.add_argument('--cached_evaluations_path', type=str, default=None,
                         help='Path to the log file containing cached evaluations to load.')
+    
+    # --- NEW: Resume Support ---
+    parser.add_argument('--resume_from_market_log', type=str, default=None,
+                        help='Resume the run from a saved TrustMarket log (json/pkl). Starts from the next round.')
     
     args = parser.parse_args()
 
@@ -304,6 +310,9 @@ if __name__ == "__main__":
     if args.use_stored_conversations:
         customer_support_sim.load_stored_conversations(args.stored_data_path)
         customer_support_sim.enable_stored_conversations(True)
+        # Configure behavior when stored conversations run out
+        if hasattr(customer_support_sim, 'set_stored_conversations_behavior'):
+            customer_support_sim.set_stored_conversations_behavior(args.stored_conversations_behavior)
 
     # --- 4. Pass Simulation Model to Trust Market System ---
     trust_market_system.register_simulation_module(customer_support_sim)
@@ -362,6 +371,15 @@ if __name__ == "__main__":
     trust_market_system.register_regulator(regulator, evaluation_frequency=args.regulator_frequency, investment_horizon=args.regulator_frequency)
     print(f"Registered Regulator: {regulator.source_id} (Eval Freq: {args.regulator_frequency})")
 
+    # Resume market state if requested (do this before enabling caches)
+    if args.resume_from_market_log:
+        print(f"\nResuming Trust Market state from: {args.resume_from_market_log}")
+        resumed = trust_market_system.load_market_state_from_log(args.resume_from_market_log)
+        if resumed:
+            print(f"Resume successful. Next round: {trust_market_system.evaluation_round}")
+        else:
+            print("Failed to resume from saved market log; proceeding with fresh state.")
+
     # Load cached evaluations if requested
     if args.use_cached_evaluations:
         if args.cached_evaluations_path:
@@ -403,30 +421,30 @@ if __name__ == "__main__":
         sim_agent_profiles = trust_market_system.agent_profiles if hasattr(trust_market_system, 'agent_profiles') else {}
 
         for agent_id_str, scores in final_scores.items():
-             try:
-                 # Agent IDs from market might be strings if defaultdict was used; ensure integer for indexing
-                 agent_id = int(agent_id_str)
-                 if agent_id in sim_agent_profiles:
-                     profile = sim_agent_profiles[agent_id] # Get profile based on ID
-                     goals = profile.get("primary_goals", [("Primary", "Unknown")])
-                     goals_text = goals[0][1] if goals else "Unknown"
-                     print(f"\nAgent {agent_id} (Goal: {goals_text}):")
-                 else:
-                     print(f"\nAgent {agent_id} (Profile not found):")
+            try:
+                # Agent IDs from market might be strings if defaultdict was used; ensure integer for indexing
+                agent_id = int(agent_id_str)
+                if agent_id in sim_agent_profiles:
+                    profile = sim_agent_profiles[agent_id] # Get profile based on ID
+                    goals = profile.get("primary_goals", [("Primary", "Unknown")])
+                    goals_text = goals[0][1] if goals else "Unknown"
+                    print(f"\nAgent {agent_id} (Goal: {goals_text}):")
+                else:
+                    print(f"\nAgent {agent_id} (Profile not found):")
 
-                 score_strs = []
-                 # Sort dimensions for consistent output
-                 sorted_dims = sorted(scores.keys())
-                 for dim in sorted_dims:
-                     score = scores[dim]
-                     score_strs.append(f"{dim}: {score:.3f}")
+                score_strs = []
+                # Sort dimensions for consistent output
+                sorted_dims = sorted(scores.keys())
+                for dim in sorted_dims:
+                    score = scores[dim]
+                    score_strs.append(f"{dim}: {score:.3f}")
 
-                 # Print scores in rows for better readability
-                 for i in range(0, len(score_strs), 3):
-                      print("  " + ", ".join(score_strs[i:i+3]))
-             except (ValueError, KeyError, IndexError) as e:
-                 print(f"Error displaying scores for agent {agent_id_str}: {e}")
-                 print(f"  Raw Scores: {scores}")
+                # Print scores in rows for better readability
+                for i in range(0, len(score_strs), 3):
+                    print("  " + ", ".join(score_strs[i:i+3]))
+            except (ValueError, KeyError, IndexError) as e:
+                print(f"Error displaying scores for agent {agent_id_str}: {e}")
+                print(f"  Raw Scores: {scores}")
 
     trust_market_system.trust_market.visualize_trust_scores(show_investments=True, save_path="figures/", experiment_name=args.exp_name)
     trust_market_system.trust_market.visualize_source_value(save_path="figures/", experiment_name=args.exp_name)

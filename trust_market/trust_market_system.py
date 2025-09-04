@@ -365,8 +365,10 @@ class TrustMarketSystem:
         if comparative_winners_batch:
             # The structure is: list of dicts with all comparison details
             # self.debug_print_comparisons(comparative_winners_batch) # Optional debug print
-            
             if isinstance(list(comparative_winners_batch[0]['winners'].values())[0], dict) and 'rating' in list(comparative_winners_batch[0]['winners'].values())[0]:
+                agent_ids_list = [data['agent_a_id'] for data in comparative_winners_batch] + [data['agent_b_id'] for data in comparative_winners_batch]
+                unique_agent_ids = set(agent_ids_list)
+                self.trust_market.user_update.reset_belief_state(unique_agent_ids)
                 for comparison_data in comparative_winners_batch:
                     self.process_comparative_feedback(comparison_data, bayesian=True)
                 self.trust_market.user_update.decide_investments()
@@ -663,3 +665,42 @@ class TrustMarketSystem:
                 print(f"Enabled cached user evaluations for simulation module")
             else:
                 print(f"Warning: Simulation module does not support cached evaluations")
+
+    # ------------------------------------------------------------------
+    #                           Resume Support
+    # ------------------------------------------------------------------
+    def load_market_state_from_log(self, log_filepath: str) -> bool:
+        """
+        Restore the TrustMarket state from a previously saved market log file
+        (created via TrustMarket.save_logged_data). Updates the system's
+        evaluation_round to match the market.
+
+        After calling this, the next call to run_evaluation_round will start
+        at the subsequent round.
+        """
+        try:
+            ok = self.trust_market.load_logged_data(log_filepath)
+            if not ok:
+                return False
+
+            # Ensure references are consistent
+            self.trust_market.information_sources = self.information_sources
+            # Update all attached sources and simulation module to point to the (restored) market
+            for src in self.information_sources.values():
+                try:
+                    src.market = self.trust_market
+                except Exception:
+                    pass
+            if self.simulation_module is not None and hasattr(self.simulation_module, 'market'):
+                self.simulation_module.market = self.trust_market
+
+            # Align system round counter with market
+            self.evaluation_round = self.trust_market.evaluation_round
+            print(f"TrustMarketSystem resumed at round {self.evaluation_round} from {log_filepath}")
+            return True
+
+        except Exception as e:
+            print(f"Error restoring market state from {log_filepath}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False

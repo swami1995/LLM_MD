@@ -16,4 +16,8 @@ source ~/.bashrc
 
 conda activate llmmd
 
-python info_main.py --use_chat_api --num_steps 60 --exp_name pro_calibouts | tee outputs/llm_out_pro_calibouts.txt
+# python info_main.py --use_chat_api --num_steps 60 --exp_name pro_calibouts | tee outputs/llm_out_pro_calibouts.txt
+
+# python info_main.py --use_chat_api --use_stored_conversations --stored_data_path run_logs/debug_runs/primary_source_test_rounds5_20250708_204246.json --num_steps 60 --save_detailed_logs --exp_name scratch_trustreg_nstep60 | tee outputs/scratch_trustreg_nstep60.txt
+# python info_main.py --use_chat_api --use_stored_conversations --stored_data_path run_logs/debug_runs/primary_source_test_rounds5_20250708_204246.json --num_steps 30 --save_detailed_logs --exp_name bayes_updates_with_ratings_userrep_opt --use_cached_evaluations --cached_evaluations_path run_logs/bayes_updates_with_ratings_cached_fixed_20250828_210510.json | tee outputs/bayes_updates_with_ratings_userrep_opt.txt
+python info_main.py --use_chat_api --use_stored_conversations --stored_data_path run_logs/debug_runs/primary_source_test_rounds5_20250708_204246.json --num_steps 60 --save_detailed_logs --exp_name scratch_trustreg_nstep60_userforget --use_cached_evaluations --cached_evaluations_path run_logs/scratch_trustreg_nstep60_20250902_231130.json | tee outputs/scratch_trustreg_nstep60_userforget.txt
