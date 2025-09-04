@@ -78,7 +78,7 @@ class Regulator(InformationSource):
             'rank_correction_strength': 0.5,
             'max_confidence_history': 10,
             'max_realloc_per_dim': 100,
-            'regulator_influence_ratio': 0.5, # Added for the new decide_investments method
+            'regulator_influence_ratio': 2, # Added for the new decide_investments method
             'max_eval_trials': 1,
             'var_threshold': 0.1,
             'min_eval_trials': 1,
@@ -720,15 +720,15 @@ class Regulator(InformationSource):
         # The maximum reallocation is now determined by actual user activity per dimension.
         # Fallback to config value if no user activity was recorded for a dimension.
         default_max_realloc = self.config.get('max_realloc_per_dim', 100)
+        # Set this dimension's reallocation budget based on user influence
+        max_reallocs = {dim: user_influence_by_dim.get(dim, 0.0) * desired_influence_ratio for dim in self.expertise_dimensions}
+        max_reallocs_median = np.median([v for v in max_reallocs.values() if v > 1e-6]) if any(v > 1e-6 for v in max_reallocs.values()) else default_max_realloc
 
         for dim in self.expertise_dimensions:
-            # Set this dimension's reallocation budget based on user influence
-            max_realloc_per_dim = user_influence_by_dim.get(dim, 0.0) * desired_influence_ratio
-            if max_realloc_per_dim <= 1e-6: # If no user influence, use fallback
-                max_realloc_per_dim = default_max_realloc
-                if self.verbose:
-                    print(f"DEBUG: No user influence for dim {dim}, using default max_realloc: {max_realloc_per_dim}")
-
+            if max_reallocs[dim] <= 1e-6: # If no user influence, use fallback
+                # max_realloc_per_dim = default_max_realloc
+                max_reallocs[dim] = max_reallocs_median
+            max_realloc_per_dim = max_reallocs[dim]
             agents_with_proj_capital = [
                 aid for aid in own_evaluations.keys() 
                 if dim in projected_capital_shares and aid in projected_capital_shares[dim] and

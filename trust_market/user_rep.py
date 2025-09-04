@@ -30,7 +30,7 @@ class UserRepresentative(InformationSource):
             expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment"]
             confidence = {"Communication_Quality": 0.9, "Problem_Resolution": 0.8, "Value_Alignment": 0.7}
         else: # balanced
-            expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment", "Manipulation_Resistance", "Adaptability", "Safety_Security"]
+            expertise_dimensions = ["Communication_Quality", "Problem_Resolution", "Value_Alignment", "Manipulation_Resistance", "Adaptability", "Safety_Security", "Factual_Correctness", "Process_Reliability", "Transparency", "Trust_Calibration"]
             confidence = {"Communication_Quality": 0.8, "Problem_Resolution": 0.8, "Value_Alignment": 0.7, "Manipulation_Resistance": 0.7, "Adaptability": 0.7, "Safety_Security": 0.7}
 
         super().__init__(source_id, "user_representative", expertise_dimensions,
