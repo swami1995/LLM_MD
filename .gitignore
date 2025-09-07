@@ -8,3 +8,6 @@ figures/
 outputs/
 run_logs/
 .vscode/
+**/__pycache__/
+**/*.pyc
+*$py.class
