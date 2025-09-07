@@ -335,7 +335,7 @@ class UserUpdate:
         for agent_id in agent_ids:
             if agent_id in self.user_belief_state:
                 self.user_belief_state[agent_id] = defaultdict(lambda: None)
-                
+
     def record_comparative_feedback_with_bayesian_averaging(self, agent_a_id: str, agent_b_id: str,
                                                             winners: Dict, raw_comparison_details: Optional[Dict] = None):
         """
@@ -515,7 +515,7 @@ class UserUpdate:
         1. Evaluates all agents to get up-to-date scores.
         """
         desirability_method = self.config.get('desirability_method', 'percentage_change')
-        max_investment_per_round_per_dimension = self.config.get('max_investment_per_round_per_dimension', 0.1)
+        max_investment_per_round_per_dimension = self.config.get('max_investment_per_round_per_dimension', 0.4)
 
         # Project belief scores to market prices
         market_prices, market_capital_holdings = self.market.get_market_prices(candidate_agent_ids=self.user_belief_state.keys(), dimensions=list(self.user_belief_state.values())[0].keys())
@@ -531,13 +531,15 @@ class UserUpdate:
             for dimension in list(self.user_belief_state.values())[0].keys()
         } for agent_id in self.user_belief_state.keys()}
 
+        # Normalize risk by current capital holding; guard zero/near-zero to avoid division warnings
+        eps = 1e-4
         risk_normalized = {agent_id: {
-            dimension: risk[agent_id][dimension]/market_capital_holdings[agent_id][dimension]
+            dimension: (risk[agent_id][dimension] / max(market_capital_holdings[agent_id][dimension], eps))
             for dimension in list(self.user_belief_state.values())[0].keys()
         } for agent_id in self.user_belief_state.keys()}
 
         investments = {agent_id: {
-            dimension: min(max_investment_per_round_per_dimension, max(deltas[agent_id][dimension], -max_investment_per_round_per_dimension))/ ( 1 + risk_normalized[agent_id][dimension])
+            dimension: min(max_investment_per_round_per_dimension, max(deltas[agent_id][dimension], -max_investment_per_round_per_dimension))/ (1 + risk_normalized[agent_id][dimension])
             for dimension in list(self.user_belief_state.values())[0].keys()
         } for agent_id in self.user_belief_state.keys()}
 

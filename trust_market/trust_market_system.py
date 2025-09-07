@@ -68,6 +68,17 @@ class TrustMarketSystem:
         print(f"  - Cached {len(self.agent_profiles)} agent profiles.")
         print(f"  - Cached {len(self.user_profiles)} user profiles.")
 
+        # Initialize AMM params and baseline trust scores for all agents at round 0
+        try:
+            if self.agent_profiles:
+                for agent_id in self.agent_profiles.keys():
+                    for dim in self.trust_market.dimensions:
+                        self.trust_market.ensure_agent_dimension_initialized_in_amm(agent_id, dim)
+                # Log an initial snapshot so plots start at iteration 0
+                self.trust_market._snapshot_trust_scores_for_current_round()
+        except Exception as e:
+            print(f"Warning: Failed to initialize baseline trust state for agents: {e}")
+
         # Pass profiles to any *already registered* information sources that need them
         for source_id, source in self.information_sources.items():
             if hasattr(source, 'add_agent_profile') and callable(source.add_agent_profile):

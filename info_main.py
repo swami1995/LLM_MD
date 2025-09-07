@@ -95,8 +95,8 @@ if __name__ == "__main__":
 
     # --- API Key Handling ---
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
-    # openai_api_key = os.environ.get("OPENAI_API_KEY")
-    openai_api_key = os.environ.get("KIMI_API_KEY")
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    # openai_api_key = os.environ.get("KIMI_API_KEY")
 
     if not gemini_api_key and args.api_provider == "gemini":
         # IMPORTANT: Replace with your actual key ONLY for testing. Use environment variables.
@@ -125,13 +125,15 @@ if __name__ == "__main__":
     if args.llm_source == 'api':
         if args.api_provider == 'gemini':
             args.largest_model = "gemini-2.5-pro"
+            # args.largest_model = "gpt-5"
             args.api_model_name = "gemini-2.5-flash"
             # args.api_model_name = "gemini-2.5-pro"
         elif args.api_provider == 'openai':
             # Configure OpenAI models here if needed
-            args.largest_model = "moonshotai/kimi-k2:free"
-            # args.api_model_name = "o3"
-            args.api_model_name = "moonshotai/kimi-k2:free"
+            # args.largest_model = "moonshotai/kimi-k2:free"
+            args.api_model_name = "gpt-5"
+            args.largest_model = "gpt-5"
+            # args.api_model_name = "moonshotai/kimi-k2:free"
 
     # Validate chat API usage
     if args.use_chat_api and args.api_provider != "gemini":

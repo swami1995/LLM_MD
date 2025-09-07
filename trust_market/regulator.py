@@ -11,7 +11,7 @@ from concurrent.futures import as_completed
 from google import genai
 from google.genai import types
 from trust_market.auditor import BatchEvaluator
-
+import copy
 
 class Regulator(InformationSource):
     """Regulator evaluates using profile analysis and conversation history."""
@@ -37,6 +37,7 @@ class Regulator(InformationSource):
         
         # Flag to track if detailed analysis is currently active
         self._detailed_analysis_active = False
+        self.last_round = None
 
         # Initialize LLM-based evaluator
         self.batch_evaluator = BatchEvaluator(
@@ -78,7 +79,7 @@ class Regulator(InformationSource):
             'rank_correction_strength': 0.5,
             'max_confidence_history': 10,
             'max_realloc_per_dim': 100,
-            'regulator_influence_ratio': 2, # Added for the new decide_investments method
+            'regulator_influence_ratio': 1, # Added for the new decide_investments method
             'max_eval_trials': 1,
             'var_threshold': 0.1,
             'min_eval_trials': 1,
@@ -887,6 +888,8 @@ class Regulator(InformationSource):
             print(f"=== DEBUG: End of decide_investments for {self.source_id} ===\n")
 
         self._detailed_analysis_active = False
+        self.last_investments = copy.deepcopy(investments_to_propose_cash_value)
+        self.last_round = evaluation_round
 
         if analysis_mode or detailed_analysis:
             if detailed_analysis:
@@ -916,6 +919,20 @@ class Regulator(InformationSource):
             return {}
 
         return self.pair_evaluation_memory
+
+    def last_investment_round(self):
+        """
+        Returns (investments_list, round_number) for the most recent round in which this regulator
+        made any investment/divestment, based on market.temporal_db['investments'].
+
+        investments_list is a list of temporal_db investment entries for that round and this source.
+        If no investments are found, returns (None, None).
+        """
+        if self.last_round is None:
+            return (None, None)
+        
+        return self.last_investments, self.last_round
+        
 
     def get_target_capital_distribution(self, evaluation_round=None, use_comparative=True):
         """

@@ -424,14 +424,19 @@ class TrustMarket:
                 T, K = agent_amm_params['T'], agent_amm_params['K']
                 R = K/T
                 old_price = R/T
-                y = min(y, R) # Don't divest more than the reserve
+                # Numerical safety: never let y reach R exactly
+                if R <= 1e-4:
+                    return  # Nothing to divest against; skip
+                y = min(y, R - 1e-4)
                 if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
                     R_new = R - y
                     T_new = T
                 else:
-                    num_shares_to_divest = y*T/(R - y)
+                    denom = max(R - y, 1e-4)
+                    num_shares_to_divest = y*T/denom
                     T_new = T + num_shares_to_divest
-                    R_new = R*T/T_new #= R- y  # = R*T/(T + num_shares_to_divest) = R*T/(T + y*T/(R - y)) = R*T*(R-y)/(R*T) = R - y
+                    T_new = max(T_new, 1e-8)
+                    R_new = R*T/T_new #= R- y
                 new_price = R_new/T_new
 
                 self.agent_amm_params[agent_id][dimension]['R'] = R_new
@@ -468,12 +473,13 @@ class TrustMarket:
                 R = K/T
                 old_price = R/T
                 if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
-                    R_new = R - y
+                    R_new = R + x
                     T_new = T
                 else:
                     num_shares_to_invest = x*T/(R + x)
                     T_new = T - num_shares_to_invest
-                    R_new = K/T_new #= R + x  # = R*T/(T - num_shares_to_invest) = R*T/(T - x*T/(R + x)) = R*T*(R+x)/(R*T) = R + x
+                    T_new = max(T_new, 1e-8)
+                    R_new = K/T_new #= R + x
                 new_price = R_new/T_new
 
                 self.agent_amm_params[agent_id][dimension]['R'] = R_new
@@ -760,6 +766,32 @@ class TrustMarket:
         
         # Update market volatility tracking after each round
         self.update_market_volatility_tracking()
+
+    def _snapshot_trust_scores_for_current_round(self) -> None:
+        """
+        Append a snapshot of current trust scores for all known agents and
+        dimensions into temporal_db for the current evaluation_round.
+
+        This guarantees that visualizations have a data point for every round
+        (even if no investments/updates happened in that round).
+        """
+        if not self.agent_trust_scores:
+            return
+
+        ts = time.time()
+        for agent_id in list(self.agent_trust_scores.keys()):
+            for dimension in self.dimensions:
+                cur = self.agent_trust_scores[agent_id].get(dimension, 0.5)
+                self.temporal_db['trust_scores'].append({
+                    'evaluation_round': self.evaluation_round,
+                    'timestamp': ts,
+                    'agent_id': agent_id,
+                    'dimension': dimension,
+                    'old_score': cur,
+                    'new_score': cur,
+                    'change_source': 'snapshot',
+                    'source_id': None
+                })
 
     def update_market_volatility_tracking(self) -> None:
         """Update market volatility tracking with current market state."""

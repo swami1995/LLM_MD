@@ -198,6 +198,8 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'optimizer_zero_target_rel': 0.001,      # target <= 0.5% of portfolio triggers zeroing check
             'optimizer_small_holding_rel': 0.01,     # holding <= 1% of portfolio eligible for zeroing
             'optimizer_respect_investment_scale_cap': True, # cap fresh cash per round using investment_scale
+            'use_additional_context': True, # Whether to include additional context (e.g. regulator evals) in comparisons
+            'use_direct_LLM_predictions': True, # Whether to use LLM-based conversation audits or simpler logic
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
         # Note: Uses segment_weights from base class for dimension importance
@@ -297,6 +299,27 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         return (aid, oid, derived_scores, confidences, comparison_results)
         # else:
         #     return (aid, oid, derived_scores, confidences)
+    
+    def _compare_pair_direct(self, aid, oid, dimensions, additional_context: str = "") -> Optional[Tuple[int, int, dict]]:
+        """UserRep's implementation of a pairwise comparison based on conversations."""
+        if not (self._agent_has_comparable_data(aid) and self._agent_has_comparable_data(oid)):
+            return None # Incomparable
+
+        # Check if detailed analysis is requested
+        return_raw = self._detailed_analysis_active
+
+        comparison_results = self.evaluator.compare_agent_batches_direct(
+            self.get_agent_conversations(aid), aid,
+            self.get_agent_conversations(oid), oid,
+            dimensions,
+            additional_context=additional_context)
+
+        if not comparison_results:
+            return None
+
+        
+        # Return 5-tuple if detailed analysis is active, 4-tuple otherwise
+        return (aid, oid, comparison_results)
 
     # Override evaluate_agent to use the holistic comparison method
     def evaluate_agent(self, agent_id, dimensions=None, evaluation_round=None, use_comparative=True):
@@ -735,11 +758,23 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
                 projected_capital_shares[dim] = projected_capital_shares_dim # Store projected capital shares for this dimension
             return projected_prices, projected_capital_shares, capacity_flags # plenty of capacity still to be deployed : so just try to match the projected prices
 
+    def get_all_agent_ids(self):
+        """Returns a list of all agent IDs known to this source."""
+        return list(self.agent_conversations.keys())
+    
     def decide_investments(self, evaluation_round=None, use_comparative=True, analysis_mode=False, detailed_analysis=False):
         """
         The main decision-making loop for the user_rep.
         1. Evaluates all agents to get up-to-date scores.
         """
+        # Optional delegation to the direct LLM investment path
+        if self.config.get('use_direct_LLM_predictions', False):
+            return self.decide_investments_direct(
+                evaluation_round=evaluation_round,
+                use_comparative=use_comparative,
+                analysis_mode=analysis_mode,
+                detailed_analysis=detailed_analysis,
+            )
         # Optional delegation to the optimized path
         if self.config.get('optimizer_enabled', False):
             return self.decide_investments_optimized(

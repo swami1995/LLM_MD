@@ -597,6 +597,110 @@ class InformationSource:
 
         return header + "\n".join(snippets)
 
+    def _get_additional_context_direct(self, agent_a_id, agent_b_id, evaluation_round):
+        """
+        Build additional prompt context for direct investment decisions between two agents.
+        Includes:
+        - This source's current investment limits and holdings for the pair
+        - Current market state (prices and capital locked) for the pair
+        - Regulator's most recent round of investments (if available)
+        """
+        # 1) Own portfolio snapshot and market state for the two agents
+        own_context = ""
+        if not self.market:
+            own_context = ""
+        else:
+            # Available capacity (cash) per dimension for this source
+            available_cash_per_dim = dict(self.market.source_available_capacity.get(self.source_id, {}))
+
+            # Current prices and capital (R) for Agent A and Agent B
+            def _agent_price_and_capital(agent_id):
+                prices = {}
+                capitals = {}
+                for dim in self.expertise_dimensions:
+                    # Ensure AMM state exists for this agent-dim
+                    if agent_id not in self.market.agent_amm_params:
+                        continue
+                    if dim not in self.market.agent_amm_params[agent_id]:
+                        continue
+                    R = float(self.market.agent_amm_params[agent_id][dim]['R'])
+                    T = float(self.market.agent_amm_params[agent_id][dim]['T'])
+                    price = (R / T) if T > 1e-9 else float(self.market.agent_trust_scores[agent_id].get(dim, 0.5))
+                    prices[dim] = price
+                    capitals[dim] = R
+                return prices, capitals
+
+            prices_a, capitals_a = _agent_price_and_capital(agent_a_id)
+            prices_b, capitals_b = _agent_price_and_capital(agent_b_id)
+            # Total market capital (R) across the two agents and a third "market" agent C
+            capitals_total = {dim: sum(
+                float(self.market.agent_amm_params[aid][dim].get('R', 0.0))
+                for aid in list(self.market.agent_trust_scores.keys())
+            ) for dim in self.expertise_dimensions}
+
+            # This source's holdings (shares and current MTM value) in the two agents
+            def _source_holdings_value(agent_id, prices_map):
+                shares_per_dim = {}
+                value_per_dim = {}
+                total_value = 0.0
+                # Shares held by this source
+                agent_holdings = self.market.source_investments.get(self.source_id, {}).get(agent_id, {})
+                for dim in self.expertise_dimensions:
+                    shares = float(agent_holdings.get(dim, 0.0))
+                    price = float(prices_map.get(dim, 0.5))
+                    val = shares * price
+                    if shares > 0 or dim in prices_map:
+                        shares_per_dim[dim] = shares
+                        value_per_dim[dim] = val
+                        total_value += val
+                return shares_per_dim, value_per_dim, total_value
+
+            shares_a, values_a, total_value_a = _source_holdings_value(agent_a_id, prices_a)
+            shares_b, values_b, total_value_b = _source_holdings_value(agent_b_id, prices_b)
+            # Compose context string
+            own_context = (
+                "\n\nYour current portfolio context (as an investor):\n"
+                f"- Available uninvested cash per dimension: \n {json.dumps(available_cash_per_dim)}\n"
+                f"- Total investment by the market on Agent A per dim: {json.dumps(capitals_a)}\n"
+                f"- Your holdings/investments in Agent A (value) per dim: {json.dumps(values_a)} \n"
+                f"- Total investment by the market on Agent B per dim: {json.dumps(capitals_b)}\n"
+                f"- Your holdings/investments in Agent B (value) per dim: {json.dumps(values_b)}\n"
+                f"- Total investments/marketcap in the market across 3 agents (A, B and C) per dim: {json.dumps(capitals_total)}\n"
+            )
+        # 2) Regulator's most recent investments (if available)
+        regulator_context = ""
+        if self.market and 'regulator' in self.market.information_sources:
+            regulator = self.market.information_sources['regulator']
+            last_investments, last_round_num = regulator.last_investment_round()
+
+            if last_investments and last_round_num is not None and len(last_investments)>0:
+                relative_round_str = ""
+                if isinstance(evaluation_round, int) and isinstance(last_round_num, int):
+                    diff_rounds = evaluation_round - last_round_num
+                    if diff_rounds == 0:
+                        relative_round_str = " (this round)"
+                    elif diff_rounds == 1:
+                        relative_round_str = " (last round)"
+                    else:
+                        relative_round_str = f" ({diff_rounds} rounds ago)"
+
+                # Filter to the two agents if present
+                inv_a = [(e[1],e[2]) for e in last_investments if e[0] == agent_a_id]
+                inv_b = [(e[1],e[2]) for e in last_investments if e[0] == agent_b_id]
+                snippet = {
+                    'relative_time': relative_round_str.strip(),
+                    f'agent_{agent_a_id}': inv_a,
+                    f'agent_{agent_b_id}': inv_b
+                }
+                regulator_context = (
+                    "\n\nFor additional context, here are the most recent trades from the Regulator, "
+                    "a highly trusted source with broader visibility (profiles, more conversations, etc.). "
+                    "Default to trusting these decisions unless your observed evidence strongly contradicts them.\n"
+                    f"Regulator last trades: {json.dumps(snippet)}\n"
+                )
+
+        return f"{own_context}{regulator_context}".strip()
+    
     def _compare_pair(self, aid1, aid2, dimensions, additional_context: str = "") -> Optional[Tuple[int, int, dict, dict]]:
         """
         Placeholder for subclasses to perform a pairwise comparison between two agents.
@@ -1641,10 +1745,13 @@ class InformationSource:
         prompts_for_pairs = {}
         
         if pairs_to_eval:
-            contexts_for_pairs = {
-                (a, b): self._get_additional_context(a, b, evaluation_round)
-                for a, b in pairs_to_eval
-            }
+            if self.config.get('use_additional_context', True):
+                contexts_for_pairs = {
+                    (a, b): self._get_additional_context(a, b, evaluation_round)
+                    for a, b in pairs_to_eval
+                }
+            else:
+                contexts_for_pairs = {(a, b): "" for a, b in pairs_to_eval}
             with ThreadPoolExecutor(max_workers=min(8, len(pairs_to_eval))) as exe:
                 fut_to_pair = {exe.submit(self._compare_pair, a, b, dimensions, contexts_for_pairs.get((a,b), "")): (a, b) for (a, b) in pairs_to_eval}
                 # if True:
@@ -1770,6 +1877,165 @@ class InformationSource:
         if detailed_analysis:
             return final_evals, comparison_log
         return final_evals
+
+ 
+    def evaluate_agents_batch_direct(self, agent_ids: List[int], dimensions: Optional[List[str]] = None, 
+                              evaluation_round: Optional[int] = None, use_comparative: bool = True,
+                              analysis_mode: bool = False, detailed_analysis: bool = False):
+        """Batch variant of evaluate_agent that pairs agents globally and evaluates in parallel.
+        
+        Now uses Dynamic Bayesian Inference to update persistent belief states about agents.
+
+        Returns: 
+          - if detailed_analysis is False: {agent_id: {dimension: (score, confidence)}}
+          - if detailed_analysis is True: ({agent_id: ...}, comparison_log_list)
+        """
+        if dimensions is None:
+            dimensions = self.expertise_dimensions
+
+        # Handle round change bookkeeping exactly once
+        if evaluation_round is not None and evaluation_round != self.last_evaluation_round:
+            if self.verbose:
+                print(f"INFO ({self.source_id}): New evaluation round {evaluation_round}. Clearing caches.")
+            self._invalidate_cache() # Clears all caches
+            self.last_evaluation_round = evaluation_round
+
+        
+        comparison_agents_per_target = self.config.get('comparison_agents_per_target', 3)
+
+        valid_agents = [aid for aid in agent_ids if self._agent_has_comparable_data(aid)]
+        # Collect desired unique pairs
+        desired_pairs = set()
+        import random
+        rng = random.Random(42 + (evaluation_round or 0))
+
+        for aid in valid_agents:
+            others = [o for o in valid_agents if o != aid]
+            rng.shuffle(others)
+            needed = comparison_agents_per_target
+            for oid in others:
+                if needed <= 0:
+                    break
+                pair_key = (min(aid, oid), max(aid, oid))
+                if pair_key not in desired_pairs:
+                    desired_pairs.add(pair_key)
+                    needed -= 1
+
+        # Remove pairs already cached for this round
+        pairs_to_eval = []
+        for a, b in desired_pairs:
+            cache_key = (a, b, evaluation_round)
+            if cache_key in self.comparison_results_cache:
+                continue
+            pairs_to_eval.append((a, b))
+
+        
+        if self.num_trials > 1:# and not analysis_mode and not detailed_analysis:
+            pairs_to_eval_og = copy.deepcopy(pairs_to_eval)
+            pairs_to_eval_new = pairs_to_eval
+            for i in range(1, self.num_trials):
+                pairs_to_eval_new = [(b,a) for (a,b) in pairs_to_eval_new]
+                pairs_to_eval = pairs_to_eval + pairs_to_eval_new
+
+        # ------------------------------------------------------------
+        # Phase 3 – parallel LLM comparison calls for those pairs
+        # ------------------------------------------------------------
+        # Store current round evaluations for Bayesian update
+        current_round_evaluations = defaultdict(lambda: defaultdict(list))  # agent_id -> dim -> [(score, confidence), ...]
+        prompts_for_pairs = {}
+        investments = {aid: { dim : [] for dim in dimensions } for aid in valid_agents}
+        comparison_log = []
+        
+        if pairs_to_eval:
+            if self.config.get('use_additional_context', True):
+                contexts_for_pairs = {
+                    (a, b): self._get_additional_context_direct(a, b, evaluation_round)
+                    for a, b in pairs_to_eval
+                }
+            else:
+                contexts_for_pairs = {(a, b): "" for a, b in pairs_to_eval}
+            with ThreadPoolExecutor(max_workers=min(8, len(pairs_to_eval))) as exe:
+                fut_to_pair = {exe.submit(self._compare_pair_direct, a, b, dimensions, contexts_for_pairs.get((a,b), "")): (a, b) for (a, b) in pairs_to_eval}
+                # if True:
+                for fut in as_completed(fut_to_pair):
+                    result = fut.result()
+                    if result is None:
+                        continue
+                    # for a, b in pairs_to_eval:
+                    #     result = self._compare_pair(a, b, dimensions, contexts_for_pairs.get((a,b), ""))
+                    
+                    # Unpack result, which may or may not include raw_reasoning
+                    aid, oid, raw_results = result
+                    for dim in dimensions:
+                        # Accept both singular and plural key variants from prompts
+                        inv_a = raw_results[dim].get('investments_A', raw_results[dim].get('investment_A'))
+                        inv_b = raw_results[dim].get('investments_B', raw_results[dim].get('investment_B'))
+                        investments[aid][dim].append(inv_a)
+                        investments[oid][dim].append(inv_b)
+
+                    # cache_key = (min(aid, oid), max(aid, oid), evaluation_round)
+                    # self.comparison_results_cache[cache_key] = (derived_scores, confidences)
+                    
+                    # if isinstance(raw_results, dict) and 'Communication_Quality' in raw_results:
+                    #     prompts_for_pairs[str((aid, oid))] = raw_results['Communication_Quality'].get('prompt', "Not provided by source.")
+
+                    # # --- Persist evaluation memory ---
+                    # if True:  # not analysis_mode and not detailed_analysis:
+                    #     self._store_pair_evaluation(aid, oid, derived_scores, confidences, raw_results=raw_results, evaluation_round=evaluation_round)
+
+                    # Log for detailed analysis if enabled
+                    if detailed_analysis:
+                        comparison_log.append({
+                            'pair': (aid, oid),
+                            'raw_results': raw_results
+                        })
+        for aid in investments:
+            for dim in investments[aid]:
+                investments[aid][dim] = np.mean(investments[aid][dim])
+        if detailed_analysis:
+            return investments, comparison_log
+        return investments
+
+    def decide_investments_direct(self, evaluation_round, use_comparative=True, analysis_mode=False, detailed_analysis=False):
+        """Directly decide investments after evaluating agents in batch."""
+        # Evaluate all agents in the market
+        if self.market is None:
+            print(f"WARNING ({self.source_id}): No market assigned, cannot decide investments.")
+            return []
+        
+        agent_ids = self.get_all_agent_ids()
+        investments = self.evaluate_agents_batch_direct(
+            agent_ids, 
+            evaluation_round=evaluation_round, 
+            use_comparative=use_comparative,
+            analysis_mode=analysis_mode,
+            detailed_analysis=detailed_analysis
+        )
+        
+        if detailed_analysis and isinstance(investments, tuple):
+            investments, comparison_log = investments
+        else:
+            comparison_log = None
+        
+        investments_final = []
+        total_portfolio_value_potential = self._calculate_total_portfolio_value_potential()
+        min_trade_threshold = self.config.get('min_delta_value_trade_threshold', 5)
+        for agent_id in investments:
+            for dim in investments[agent_id]:
+                if abs(investments[agent_id][dim]) > total_portfolio_value_potential[dim] * min_trade_threshold / 100:
+                    investments_final.append((agent_id, dim, investments[agent_id][dim], 1.0))
+        
+        print(f"DEBUG: Final investments list length: {len(investments_final)}")
+        if investments_final:
+            print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} prepared {len(investments_final)} cash-value based actions.")
+            for i, (aid, dim, amount, conf) in enumerate(investments_final):
+                print(f"DEBUG: Investment {i+1}: Agent {aid}, Dim {dim}, Amount {amount:.4f}, Confidence {conf:.4f}")
+        else:
+            print(f"DEBUG: {self.source_type.capitalize()} {self.source_id} found no cash-value actions to take.")
+        
+        if detailed_analysis:
+            return investments_final, comparison_log
+        return investments_final
 
     def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
         """
