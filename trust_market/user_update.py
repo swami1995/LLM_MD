@@ -538,6 +538,10 @@ class UserUpdate:
             for dimension in list(self.user_belief_state.values())[0].keys()
         } for agent_id in self.user_belief_state.keys()}
 
+        # increase randomness in investments 
+        # increasing pure noise doesn't help much -> the regulator will just counteract it and would end up in the same place. 
+        # p = 0.7
+        # sample = np.random.choice([-1.0, 1.0], p=[1 - p, p])
         investments = {agent_id: {
             dimension: min(max_investment_per_round_per_dimension, max(deltas[agent_id][dimension], -max_investment_per_round_per_dimension))/ (1 + risk_normalized[agent_id][dimension])
             for dimension in list(self.user_belief_state.values())[0].keys()

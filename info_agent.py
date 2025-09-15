@@ -1257,7 +1257,7 @@ Customer (you):
                         # "Use your judgment to evaluate how much/whether to incorporate the regulator feedback"
                 # print(f"regulator round {rnd}{relative_round_str}")
             # 3. Get user rep evaluations for these agents
-            if 'user_rep_general' in self.market.information_sources:
+            if False: #'user_rep_general' in self.market.information_sources:
                 user_rep = self.market.information_sources['user_rep_general']
                 user_rep_evals = user_rep._get_recent_pair_evaluations(agent_a_id, agent_b_id)[:1]
                 if user_rep_evals:

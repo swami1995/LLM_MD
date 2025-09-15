@@ -293,8 +293,8 @@ class TrustMarket:
         """
         if agent_id not in self.agent_amm_params or (self.agent_amm_params[agent_id][dimension]['R'] == 0 and self.agent_amm_params[agent_id][dimension]['T'] == 0):
             # Initialize AMM parameters for this agent and dimension
-            self.agent_amm_params[agent_id][dimension]['R'] = self.config.get('initial_R_oracle', 10.0)
-            self.agent_amm_params[agent_id][dimension]['T'] = self.config.get('initial_T_oracle', 20.0)
+            self.agent_amm_params[agent_id][dimension]['R'] = self.config.get('initial_R_oracle', 10.0)# 35.0)#10.0
+            self.agent_amm_params[agent_id][dimension]['T'] = self.config.get('initial_T_oracle', 20.0)#86.0)#20.0
             self.agent_amm_params[agent_id][dimension]['K'] = self.agent_amm_params[agent_id][dimension]['R'] * self.agent_amm_params[agent_id][dimension]['T']
             self.agent_amm_params[agent_id][dimension]['total_supply'] = self.agent_amm_params[agent_id][dimension]['T']
             # Initialize trust score from AMM price
@@ -425,14 +425,14 @@ class TrustMarket:
                 R = K/T
                 old_price = R/T
                 # Numerical safety: never let y reach R exactly
-                if R <= 1e-4:
+                if R <= 2:
                     return  # Nothing to divest against; skip
-                y = min(y, R - 1e-4)
+                actual_divestment = y = min(y, R - 2)
                 if source_id in self.oracle_influence_mechanisms and self.primary_source_update_type == 'fix_T':
                     R_new = R - y
                     T_new = T
                 else:
-                    denom = max(R - y, 1e-4)
+                    denom = max(R - y, 2)
                     num_shares_to_divest = y*T/denom
                     T_new = T + num_shares_to_divest
                     T_new = max(T_new, 1e-8)

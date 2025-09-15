@@ -578,14 +578,44 @@ class TrustMarketSystem:
                         if 'comparison_log' in source_data:
                             print(f"  Source {source_id} has comparison_log")
                             comparison_log_by_source_by_round[source_id][round_num] = source_data['comparison_log']
+                        
+                        if type(source_data) is list:
+                            print(f"  Source {source_id} has list of evaluations")
+                            evaluations_by_source_by_round[source_id][round_num] = source_data
+            # ipdb.set_trace()
+            # Add fallbacks: if heuristic sources lack logs, reuse main sources
+            def _apply_fallback(target_id: str, from_id: str):
+                nonlocal evaluations_by_source_by_round, comparison_log_by_source_by_round
+                if target_id not in self.information_sources or from_id not in self.information_sources:
+                    return
+                # Only apply if target missing or empty, and source exists
+                has_target_evals = target_id in evaluations_by_source_by_round and bool(evaluations_by_source_by_round[target_id])
+                has_src_evals = from_id in evaluations_by_source_by_round and bool(evaluations_by_source_by_round[from_id])
+                if not has_target_evals and has_src_evals:
+                    evaluations_by_source_by_round[target_id] = evaluations_by_source_by_round[from_id]
+                    print(f"  Fallback: Using cached evaluations from '{from_id}' for '{target_id}'")
+                has_target_comp = target_id in comparison_log_by_source_by_round and bool(comparison_log_by_source_by_round[target_id])
+                has_src_comp = from_id in comparison_log_by_source_by_round and bool(comparison_log_by_source_by_round[from_id])
+                if not has_target_comp and has_src_comp:
+                    comparison_log_by_source_by_round[target_id] = comparison_log_by_source_by_round[from_id]
+                    print(f"  Fallback: Using comparison logs from '{from_id}' for '{target_id}'")
             
+            _apply_fallback('auditor_heuristic', 'auditor_main')
+            _apply_fallback('auditor_nonbayesian', 'auditor_main')
+            _apply_fallback('user_rep_heuristic', 'user_rep_general')
+            _apply_fallback('user_rep_nonbayesian', 'user_rep_general')
+            # ipdb.set_trace()
+
             # Distribute cached evaluations to information sources
             sources_loaded = 0
             for source_id, cached_evals in evaluations_by_source_by_round.items():
                 if source_id in self.information_sources:
                     source = self.information_sources[source_id]
                     if hasattr(source, 'load_cached_evaluations'):
-                        source.load_cached_evaluations(cached_evals, comparison_log_by_source_by_round.get(source_id, {}))
+                        if isinstance(cached_evals, list):
+                            source.load_cached_evaluations_direct(cached_evals)
+                        else:
+                            source.load_cached_evaluations(cached_evals, comparison_log_by_source_by_round.get(source_id, {}))
                         sources_loaded += 1
                         print(f"Loaded cached evaluations for source {source_id}: {len(cached_evals)} rounds")
                     else:

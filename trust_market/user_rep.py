@@ -129,7 +129,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
     User representative that evaluates agents holistically across batches of conversations using LLM.
     """
 
-    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None, memory_length_n: int = 3):
+    def __init__(self, source_id, user_segment, representative_profile, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None, config_params={}, memory_length_n: int = 3):
         super().__init__(source_id, user_segment, representative_profile, market, verbose=verbose)
         # ensure base InformationSource memory length set
         self.memory_length_n = memory_length_n
@@ -187,7 +187,6 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'investment_method': 'capital_projection', # 'capital_projection' or 'rank_mapping'
             # Optimization-based allocation parameters (opt-in)
             'optimization_backend': 'l2_values',
-            'optimizer_enabled': True,  # do not change existing behavior unless explicitly enabled
             'optimizer_lambda_prox': 0.1,   # proximal weight to damp moves (maps to rebalance aggressiveness)
             'optimizer_risk_rho': 0.01,      # penalty weight for buy-side risk
             'optimizer_turnover_tau': 0.0,  # L1 turnover penalty (0 = off)
@@ -198,8 +197,10 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
             'optimizer_zero_target_rel': 0.001,      # target <= 0.5% of portfolio triggers zeroing check
             'optimizer_small_holding_rel': 0.01,     # holding <= 1% of portfolio eligible for zeroing
             'optimizer_respect_investment_scale_cap': True, # cap fresh cash per round using investment_scale
-            'use_additional_context': True, # Whether to include additional context (e.g. regulator evals) in comparisons
-            'use_direct_LLM_predictions': True, # Whether to use LLM-based conversation audits or simpler logic
+            'optimizer_enabled': config_params.get('optimizer_enabled', True),  # do not change existing behavior unless explicitly enabled
+            'use_additional_context': config_params.get('use_additional_context', True), # Whether to include additional context (e.g. regulator evals) in comparisons
+            'use_direct_LLM_predictions': config_params.get('use_direct_LLM_predictions', False), # Whether to use LLM-based conversation audits or simpler logic
+            'use_bayesian_updates': config_params.get('use_bayesian_updates', True), # Whether to use Bayesian updates for derived scores
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
         # Note: Uses segment_weights from base class for dimension importance
@@ -232,7 +233,7 @@ class UserRepresentativeWithHolisticEvaluation(UserRepresentative):
         # 2. Get regulator evaluations for these agents
         regulator_context = ""
         try:
-            if self.market and 'regulator' in self.market.information_sources:
+            if self.market and 'regulator' in self.market.information_sources and self.config.get('use_additional_context', True):
                 regulator = self.market.information_sources['regulator']
                 reg_evals = regulator._get_recent_pair_evaluations(agent_a_id, agent_b_id)[:1] # Only the most recent one
                 if reg_evals:

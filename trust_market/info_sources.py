@@ -788,7 +788,7 @@ class InformationSource:
         # Get prior belief
         prior_belief = self.belief_state[agent_id][dimension]
         
-        if prior_belief is None:
+        if prior_belief is None or self.config.get('use_bayesian_updates', True) is False:
             # First evaluation - set posterior to new evidence
             alpha_posterior = alpha_new
             beta_posterior = beta_new
@@ -1745,7 +1745,7 @@ class InformationSource:
         prompts_for_pairs = {}
         
         if pairs_to_eval:
-            if self.config.get('use_additional_context', True):
+            if True:#self.config.get('use_additional_context', True):
                 contexts_for_pairs = {
                     (a, b): self._get_additional_context(a, b, evaluation_round)
                     for a, b in pairs_to_eval
@@ -2003,19 +2003,35 @@ class InformationSource:
             print(f"WARNING ({self.source_id}): No market assigned, cannot decide investments.")
             return []
         
+        investments = {}
+        comparison_log = None
+
+        if self.use_cached_evaluations and evaluation_round is not None:
+            cached_investments, cached_comparison_log = self.get_cached_evaluations_direct(evaluation_round)
+            if cached_investments:
+                print(f"{self.source_type.upper()} ({self.source_id}): Using cached evaluations for round {evaluation_round}")
+                investments = cached_investments
+                if detailed_analysis:
+                    comparison_log = cached_comparison_log
+            else:
+                if self.verbose:
+                    print(f"{self.source_type.upper()} ({self.source_id}): No cached evaluations found for round {evaluation_round}, falling back to LLM evaluation")
+                
         agent_ids = self.get_all_agent_ids()
-        investments = self.evaluate_agents_batch_direct(
-            agent_ids, 
-            evaluation_round=evaluation_round, 
-            use_comparative=use_comparative,
-            analysis_mode=analysis_mode,
-            detailed_analysis=detailed_analysis
-        )
-        
-        if detailed_analysis and isinstance(investments, tuple):
-            investments, comparison_log = investments
-        else:
-            comparison_log = None
+
+        if not investments:
+            investments = self.evaluate_agents_batch_direct(
+                agent_ids, 
+                evaluation_round=evaluation_round, 
+                use_comparative=use_comparative,
+                analysis_mode=analysis_mode,
+                detailed_analysis=detailed_analysis
+            )
+            
+            if detailed_analysis and isinstance(investments, tuple):
+                investments, comparison_log = investments
+            else:
+                comparison_log = None
         
         investments_final = []
         total_portfolio_value_potential = self._calculate_total_portfolio_value_potential()
@@ -2036,6 +2052,24 @@ class InformationSource:
         if detailed_analysis:
             return investments_final, comparison_log
         return investments_final
+
+    def get_cached_evaluations_direct(self, evaluation_round):
+
+        investments = defaultdict(lambda : defaultdict(list))
+        if evaluation_round not in self.cached_evaluations:
+            return None, None
+        for eval in self.cached_evaluations[evaluation_round]:
+            aid, oid = eval['pair']
+            raw_results = eval['raw_results']
+            for dim in self.expertise_dimensions:
+                inv_a = raw_results[dim].get('investments_A', raw_results[dim].get('investment_A'))
+                inv_b = raw_results[dim].get('investments_B', raw_results[dim].get('investment_B'))
+                investments[aid][dim].append(inv_a)
+                investments[oid][dim].append(inv_b)
+        for aid in investments:
+            for dim in investments[aid]:
+                investments[aid][dim] = np.mean(investments[aid][dim])
+        return investments, self.cached_evaluations[evaluation_round]
 
     def _extract_comparison_confidences(self, comparison_results, agent_a_id, agent_b_id):
         """
@@ -2176,6 +2210,17 @@ class InformationSource:
 
         return min(0.95, final_aggregated_confidence)
 
+    def load_cached_evaluations_direct(self, cached_data: Dict):
+        """
+        Load cached evaluations from a previous run for direct investment evaluations.
+        
+        Args:
+            cached_data: Dictionary with structure {round: {agent_id: {dimension: investment_amount}}}
+        """
+        self.cached_evaluations = cached_data
+        self.use_cached_evaluations = True
+        print(f"{self.source_type.upper()} ({self.source_id}): Loaded cached direct evaluations for {len(cached_data)} rounds")
+
     def load_cached_evaluations(self, cached_data: Dict, comparison_log: Dict):
         """
         Load cached evaluations from a previous run.
@@ -2259,6 +2304,8 @@ class InformationSource:
         Returns:
             Dictionary with structure {agent_id: {dimension: (score, confidence)}} or None
         """
+        if type(self.cached_evaluations) is not dict:
+            self.get_cached_evaluations_direct(evaluation_round)
         eval_map = self.cached_evaluations.get(evaluation_round, {})
         comp = self.cached_comparison_log.get(evaluation_round, {})
         # Rehydrate pair evaluation memory and derived/confidence histories if comparison logs are present

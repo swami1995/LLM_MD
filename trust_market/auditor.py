@@ -258,7 +258,7 @@ Format your response as a JSON object with this structure:
 class AuditorWithProfileAnalysis(InformationSource):
     """Enhanced auditor using profile analysis and conversation history."""
 
-    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None, memory_length_n: int = 3):
+    def __init__(self, source_id, market=None, api_key=None, api_model_name='gemini-2.5-flash', verbose=False, api_provider='gemini', openai_api_key=None, config_params={}, memory_length_n: int = 3):
         expertise_dimensions = [
             "Factual_Correctness", "Process_Reliability", "Value_Alignment",
             "Communication_Quality", "Problem_Resolution", "Safety_Security",
@@ -361,9 +361,10 @@ class AuditorWithProfileAnalysis(InformationSource):
             'optimizer_zero_target_rel': 0.001,      # target <= 0.5% of portfolio triggers zeroing check
             'optimizer_small_holding_rel': 0.01,     # holding <= 1% of portfolio eligible for zeroing
             'optimizer_respect_investment_scale_cap': True, # cap fresh cash per round using investment_scale
-            'optimizer_enabled': True,  # do not change existing behavior unless explicitly enabled
-            'use_additional_context': True, # Whether to include additional context (e.g. regulator evals) in comparisons
-            'use_direct_LLM_predictions': True, # Whether to use LLM-based conversation audits or simpler logic
+            'optimizer_enabled':config_params.get('optimizer_enabled', True),  # do not change existing behavior unless explicitly enabled
+            'use_additional_context': config_params.get('use_additional_context', True), # Whether to include additional context (e.g. regulator evals) in comparisons
+            'use_direct_LLM_predictions': config_params.get('use_direct_LLM_predictions', False), # Whether to use LLM-based conversation audits or simpler logic
+            'use_bayesian_updates': config_params.get('use_bayesian_updates', True), # Whether to use Bayesian updates for derived scores
         }
         self.num_trials = self.config.get('max_eval_trials', 1)
 
@@ -993,6 +994,7 @@ class AuditorWithProfileAnalysis(InformationSource):
                 detailed_analysis=detailed_analysis,
             )
 
+
         desirability_method = self.config.get('desirability_method', 'percentage_change')
         if self.verbose:
             print(f"AUDITOR ({self.source_id}): Starting investment decisions for round {evaluation_round}.")
@@ -1284,6 +1286,8 @@ class AuditorWithProfileAnalysis(InformationSource):
                 investments_to_propose_cash_value.append(
                     (agent_id, dim, cash_amount, confidence)
                 )
+                # if abs(cash_amount) > 100:
+                #     ipdb.set_trace()
         investments_to_propose_cash_value.sort(key=lambda x: x[2])
 
         # Let's consider how much money we have to invest
@@ -1727,7 +1731,7 @@ class AuditorWithProfileAnalysis(InformationSource):
         # 2. Get regulator evaluations for these agents
         regulator_context = ""
         try:
-            if self.market and 'regulator' in self.market.information_sources:
+            if self.market and 'regulator' in self.market.information_sources and self.config.get('use_additional_context', True):
                 regulator = self.market.information_sources['regulator']
                 # This relies on the regulator having run its evaluation in the same round already.
                 reg_evals = regulator._get_recent_pair_evaluations(agent_a_id, agent_b_id)[:1] # Only the most recent one
